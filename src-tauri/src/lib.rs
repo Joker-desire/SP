@@ -788,6 +788,13 @@ async fn list_pair_ids(
 // 那张照片只被拍过一次，程序没有资格替他做这个决定。
 // ---------------------------------------------------------------------------
 
+/// 一个待导出的原文件。
+#[derive(Clone)]
+struct ExportFile {
+    path: String,
+    size: i64,
+}
+
 /// 一条一次快门的导出记录：元数据 + 它涉及的所有原文件。
 struct ExportPair {
     pair_key: String,
@@ -800,8 +807,111 @@ struct ExportPair {
     aperture: Option<f64>,
     shutter: Option<String>,
     iso: Option<i64>,
-    /// (绝对路径, 字节数)
-    files: Vec<(String, i64)>,
+    files: Vec<ExportFile>,
+}
+
+/// 导出时要哪些文件。
+///
+/// 一次快门通常留下 RAW + JPG 两份，但很多时候只需要其中一种：
+/// 交给后期只想要 RAW，发预览只想要 JPG。默认 `both` 保持原来的行为。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileScope {
+    Both,
+    Raw,
+    Jpeg,
+}
+
+impl FileScope {
+    fn parse(s: &str) -> Self {
+        match s {
+            "raw" => Self::Raw,
+            "jpeg" => Self::Jpeg,
+            _ => Self::Both,
+        }
+    }
+    fn keeps(self, kind: &str) -> bool {
+        match self {
+            Self::Both => true,
+            Self::Raw => kind == "raw",
+            Self::Jpeg => kind == "jpeg",
+        }
+    }
+}
+
+/// 重命名模板的默认形式：保持原文件名。
+const DEFAULT_NAME_TEMPLATE: &str = "{name}";
+
+/// 模板里能用的变量，按顺序填进 `render_name`。
+struct NameCtx<'a> {
+    /// 原文件名（不含扩展名）
+    stem: &'a str,
+    /// 扩展名（不含点）
+    ext: &'a str,
+    /// 拍摄日期 YYYYMMDD
+    date: &'a str,
+    /// 拍摄时间 HHMMSS
+    time: &'a str,
+    /// 这一批里的序号，从 1 开始
+    seq: usize,
+    stars: i64,
+    camera: &'a str,
+    pair: &'a str,
+}
+
+/// 把重命名模板渲染成文件名。
+///
+/// 支持 `{name}` `{ext}` `{date}` `{time}` `{seq}` `{stars}` `{camera}` `{pair}`。
+/// 模板是纯字符串处理，所以能直接单测——「用户写了个没见过的变量」这种
+/// 情况必须一眼看出结果，而不是等导出一千张之后才发现名字全乱了。
+fn render_name(template: &str, ctx: &NameCtx) -> String {
+    let values: &[(&str, String)] = &[
+        ("{name}", ctx.stem.to_string()),
+        ("{ext}", ctx.ext.to_string()),
+        ("{date}", ctx.date.to_string()),
+        ("{time}", ctx.time.to_string()),
+        ("{seq}", format!("{:04}", ctx.seq)),
+        ("{stars}", ctx.stars.to_string()),
+        ("{camera}", ctx.camera.to_string()),
+        ("{pair}", ctx.pair.to_string()),
+    ];
+
+    let mut out = template.to_string();
+    for (k, v) in values {
+        out = out.replace(k, v);
+    }
+
+    // 模板里没写 {ext} 就补上，避免导出一堆没有扩展名的文件
+    if !out.to_lowercase().ends_with(&format!(".{}", ctx.ext.to_lowercase())) {
+        out.push('.');
+        out.push_str(ctx.ext);
+    }
+
+    // 文件名里的非法字符统一换成下划线（Windows 最严格，两边一起遵守）
+    const BAD: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+    let cleaned: String = out
+        .chars()
+        .map(|c| if BAD.contains(&c) { '_' } else { c })
+        .collect();
+
+    if cleaned.trim().is_empty() || cleaned == format!(".{}", ctx.ext) {
+        format!("{}.{}", ctx.stem, ctx.ext)
+    } else {
+        cleaned
+    }
+}
+
+/// 拆出主文件名与扩展名。
+fn split_ext(path: &str) -> (String, String) {
+    let p = std::path::Path::new(path);
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = p
+        .extension()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    (stem, ext)
 }
 
 #[derive(serde::Serialize)]
@@ -845,9 +955,20 @@ async fn export_selection(
     filter: Option<PairFilter>,
     dest: String,
     mode: String,
+    // 要哪些文件：raw / jpeg / both（默认）
+    scope: Option<String>,
+    // 重命名模板，默认 {name}（保持原文件名）
+    template: Option<String>,
 ) -> Result<ExportSummary, String> {
     let db = state.db.clone();
     let filter = filter.unwrap_or_default();
+    let scope = FileScope::parse(scope.as_deref().unwrap_or("both"));
+    let template = template
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_NAME_TEMPLATE)
+        .to_string();
     tauri::async_runtime::spawn_blocking(move || -> Result<ExportSummary, String> {
         let conn = db.lock().map_err(|e| e.to_string())?;
         let copy_files = mode == "copy";
@@ -856,6 +977,8 @@ async fn export_selection(
             &filter,
             Path::new(&dest),
             copy_files,
+            scope,
+            &template,
             // 推送失败不是错误：窗口关了而已，复制该继续跑完
             |p| {
                 let _ = app.emit("export://progress", &p);
@@ -874,6 +997,8 @@ fn export_rows<F>(
     filter: &PairFilter,
     dest: &Path,
     copy_files: bool,
+    scope: FileScope,
+    template: &str,
     on_progress: F,
 ) -> anyhow::Result<ExportSummary>
 where
@@ -891,7 +1016,7 @@ where
         total: 0,
     });
 
-    let pairs = collect_export_pairs(conn, filter)?;
+    let pairs = collect_export_pairs(conn, filter, scope)?;
 
     let files_total: usize = pairs.iter().map(|p| p.files.len()).sum();
     let mut copied = 0usize;
@@ -901,16 +1026,27 @@ where
 
     if copy_files {
         let mut done = 0usize;
-        for pair in &pairs {
-            for (src, size) in &pair.files {
+        for (idx, pair) in pairs.iter().enumerate() {
+            let (date, time) = split_datetime(pair.taken_at_text.as_deref());
+            for f in &pair.files {
                 done += 1;
-                let src_path = Path::new(src);
-                let name = src_path
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| pair.pair_key.clone());
+                let src_path = Path::new(&f.path);
+                let (stem, ext) = split_ext(&f.path);
+                let name = render_name(
+                    template,
+                    &NameCtx {
+                        stem: &stem,
+                        ext: &ext,
+                        date: &date,
+                        time: &time,
+                        seq: idx + 1,
+                        stars: pair.stars,
+                        camera: pair.camera_model.as_deref().unwrap_or(""),
+                        pair: &pair.pair_key,
+                    },
+                );
 
-                match plan_target(dest, &name, *size as u64) {
+                match plan_target(dest, &name, f.size as u64) {
                     // 已经复制过同一份（同名同大小），这一遍就跳过
                     None => skipped += 1,
                     Some(target) => match std::fs::copy(src_path, &target) {
@@ -957,7 +1093,11 @@ where
 }
 
 /// 取出筛选命中的照片，以及每张照片涉及的所有原文件。
-fn collect_export_pairs(conn: &Connection, filter: &PairFilter) -> anyhow::Result<Vec<ExportPair>> {
+fn collect_export_pairs(
+    conn: &Connection,
+    filter: &PairFilter,
+    scope: FileScope,
+) -> anyhow::Result<Vec<ExportPair>> {
     let (where_sql, args) = build_where(filter);
 
     let mut pairs: Vec<ExportPair> = Vec::new();
@@ -991,23 +1131,28 @@ fn collect_export_pairs(conn: &Connection, filter: &PairFilter) -> anyhow::Resul
         }
     }
 
-    let mut by_key: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+    let mut by_key: HashMap<String, Vec<ExportFile>> = HashMap::new();
     for chunk in pairs.chunks(ID_CHUNK) {
         let holders = vec!["?"; chunk.len()].join(",");
         let keys: Vec<&str> = chunk.iter().map(|p| p.pair_key.as_str()).collect();
         let mut stmt = conn.prepare(&format!(
-            "SELECT pair_key, path, file_size FROM photos WHERE pair_key IN ({holders})"
+            "SELECT pair_key, path, file_size, file_kind FROM photos WHERE pair_key IN ({holders})"
         ))?;
         let rows = stmt.query_map(rusqlite::params_from_iter(keys.iter()), |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, i64>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })?;
         for row in rows {
-            let (k, path, size) = row?;
-            by_key.entry(k).or_default().push((path, size));
+            let (k, path, size, kind) = row?;
+            // 「仅 RAW / 仅 JPG」在这一步就筛掉，后面的计数和清单都只算选中的
+            if !scope.keeps(&kind) {
+                continue;
+            }
+            by_key.entry(k).or_default().push(ExportFile { path, size });
         }
     }
 
@@ -1015,12 +1160,24 @@ fn collect_export_pairs(conn: &Connection, filter: &PairFilter) -> anyhow::Resul
         if let Some(files) = by_key.remove(&p.pair_key) {
             // 排序让清单和复制顺序稳定：同样的输入跑两次，结果一样
             let mut files = files;
-            files.sort();
+            files.sort_by(|a, b| a.path.cmp(&b.path));
             p.files = files;
         }
     }
 
     Ok(pairs)
+}
+
+/// 从「2026-09-16 10:20:37」里拆出 `20260916` 和 `102037`。
+/// 拿不到就返回空串——模板里对应的位置会空着，但不至于崩。
+fn split_datetime(text: Option<&str>) -> (String, String) {
+    let s = text.unwrap_or("").trim();
+    if s.len() < 19 {
+        return (String::new(), String::new());
+    }
+    let date: String = s[..10].chars().filter(|c| c.is_ascii_digit()).collect();
+    let time: String = s[11..19].chars().filter(|c| c.is_ascii_digit()).collect();
+    (date, time)
 }
 
 /// 给一个源文件挑目标路径。
@@ -1118,8 +1275,8 @@ fn manifest_csv(pairs: &[ExportPair]) -> String {
             continue;
         }
 
-        for (path, _) in &p.files {
-            let name = Path::new(path)
+        for f in &p.files {
+            let name = Path::new(&f.path)
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
@@ -1134,7 +1291,7 @@ fn manifest_csv(pairs: &[ExportPair]) -> String {
                 p.aperture.map(|v| format!("{v:.1}")).unwrap_or_default(),
                 p.shutter.clone().unwrap_or_default(),
                 p.iso.map(|v| v.to_string()).unwrap_or_default(),
-                path.clone(),
+                f.path.clone(),
             ]));
         }
     }
@@ -1210,6 +1367,9 @@ async fn photo_thumbnail(
         let (infos, _) = thumb::ensure(&root, &fingerprint, Path::new(&path), &sizes, orientation)
             .map_err(|e| format!("{e:#}"))?;
 
+        // 刚写过新文件，顺手看看缓存是不是该瘦身了（内部限流，不会每次都扫）
+        thumb::enforce_if_needed(&root);
+
         let info = &infos[0];
         debug_assert_eq!(infos.len(), sizes.len());
 
@@ -1264,6 +1424,8 @@ struct CacheStats {
     photos: i64,
     /// 真正有内容的选片结果（打过分或标过保留/淘汰的 pair 数）。
     decisions: i64,
+    /// 缩略图缓存的容量上限。超过会自动淘汰最久没用的，前端据此显示「已用 / 上限」。
+    thumbs_limit_bytes: u64,
 }
 
 /// 目录占用（文件数 + 字节数）。目录不存在算 0，不报错。
@@ -1307,6 +1469,7 @@ fn cache_stats_of(conn: &Connection) -> anyhow::Result<CacheStats> {
             [],
             |r| r.get(0),
         )?,
+        thumbs_limit_bytes: thumb::DEFAULT_MAX_CACHE_BYTES,
     })
 }
 
@@ -1432,6 +1595,159 @@ fn now_epoch() -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// 连拍分组
+//
+// 连着按快门会留下一串几乎一样的照片，真正要做的决定只有「留哪一张」。
+// 一张张翻过去对比太慢，所以先按时间把它们聚成组，一次看完整串再挑。
+// ---------------------------------------------------------------------------
+
+/// 一组连拍里的一张。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SimilarMember {
+    id: i64,
+    pair_key: String,
+    name: String,
+    time_text: Option<String>,
+    decision: String,
+    stars: i64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SimilarGroup {
+    /// 组里第一张的 pair_key —— 界面上靠它稳定标识这一组
+    key: String,
+    size: usize,
+    /// 组内时间跨度（秒）
+    span_secs: i64,
+    start_text: Option<String>,
+    members: Vec<SimilarMember>,
+}
+
+/// 相邻两张间隔不超过 gap（秒）就归为同一组。
+///
+/// 输入必须已按时间升序。抽成纯函数是为了能单测——
+/// 「隔了 2.9 秒算不算同一组」这种边界，肉眼看界面是说不清的。
+fn cluster_by_gap(times: &[i64], gap: i64) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+
+    for (i, &t) in times.iter().enumerate() {
+        match current.last() {
+            Some(&last) if t - times[last] <= gap => current.push(i),
+            Some(_) => {
+                groups.push(std::mem::take(&mut current));
+                current.push(i);
+            }
+            None => current.push(i),
+        }
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
+}
+
+/// 默认时间间隔：3 秒。
+///
+/// 高速连拍间隔不到 1 秒，慢慢拍同一个场景也就几秒一张。定得太小，
+/// 会把「同一个姿势连拍三张」切成三组，那就没意义了。
+const DEFAULT_GROUP_GAP_SECS: i64 = 3;
+
+/// 一次最多返回多少组。连拍多的时候组数能到几百，全塞给前端没意义。
+const MAX_GROUPS: usize = 300;
+
+/// 找出筛选范围内的连拍分组（按拍摄时间聚类）。
+#[tauri::command]
+async fn similar_groups(
+    state: tauri::State<'_, AppState>,
+    filter: Option<PairFilter>,
+    gap_secs: Option<i64>,
+) -> Result<Vec<SimilarGroup>, String> {
+    let db = state.db.clone();
+    let filter = filter.unwrap_or_default();
+    let gap = gap_secs.unwrap_or(DEFAULT_GROUP_GAP_SECS).max(0);
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<SimilarGroup>, String> {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let (where_sql, args) = build_where(&filter);
+
+        // 按 pair_key 聚合：一次快门算一张，NEF 和 JPG 不重复计数。
+        // 读不到拍摄时间的（EXIF 缺失）不参与——没有时间就谈不上「连着拍」。
+        let sql = format!(
+            "SELECT MIN(p.id), p.pair_key,
+                    MIN(COALESCE(p.taken_at_corrected, p.mtime)),
+                    MIN({TIME_TEXT}),
+                    {DECISION}, {STARS}, MIN(p.path)
+             {FROM_PHOTOS}
+             WHERE {where_sql} AND COALESCE(p.taken_at_corrected, p.mtime) IS NOT NULL
+             GROUP BY p.pair_key
+             ORDER BY 3"
+        );
+
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+
+        let times: Vec<i64> = rows.iter().map(|r| r.2).collect();
+        let mut out: Vec<SimilarGroup> = Vec::new();
+
+        for cluster in cluster_by_gap(&times, gap) {
+            if cluster.len() < 2 {
+                continue;
+            }
+            let members: Vec<SimilarMember> = cluster
+                .iter()
+                .map(|&i| {
+                    let (id, pair_key, _, time_text, decision, stars, path) = &rows[i];
+                    SimilarMember {
+                        id: *id,
+                        pair_key: pair_key.clone(),
+                        name: std::path::Path::new(path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        time_text: time_text.clone(),
+                        decision: decision.clone(),
+                        stars: *stars,
+                    }
+                })
+                .collect();
+
+            out.push(SimilarGroup {
+                key: rows[cluster[0]].1.clone(),
+                size: members.len(),
+                span_secs: times[*cluster.last().unwrap()] - times[cluster[0]],
+                start_text: rows[cluster[0]].3.clone(),
+                members,
+            });
+
+            if out.len() >= MAX_GROUPS {
+                break;
+            }
+        }
+
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
 // 关于窗口
 //
 // 系统原生的「关于」面板只认图标 + 名称 + 版本号，塞不进 slogan，
@@ -1550,6 +1866,7 @@ pub fn run() {
             list_pairs,
             list_pair_ids,
             apply_decision,
+            similar_groups,
             export_selection,
             photo_thumbnail,
             cache_stats,
@@ -2122,8 +2439,8 @@ mod tests {
             iso: Some(200),
             files: vec![
                 // 故意用带逗号和引号的文件名，逼出转义路径
-                ("/tmp/a/MY, SHOT \"x\".NEF".into(), 100),
-                ("/tmp/a/b.JPG".into(), 50),
+                ExportFile { path: "/tmp/a/MY, SHOT \"x\".NEF".into(), size: 100 },
+                ExportFile { path: "/tmp/a/b.JPG".into(), size: 50 },
             ],
         };
         let missing = ExportPair {
@@ -2180,7 +2497,7 @@ mod tests {
         let dest = temp_dir("export-dest");
         let filter = by_mark(Some("keep"), None);
 
-        let s = export_rows(&conn, &filter, &dest, true, |_| {}).unwrap();
+        let s = export_rows(&conn, &filter, &dest, true, FileScope::Both, DEFAULT_NAME_TEMPLATE, |_| {}).unwrap();
         assert_eq!(s.photos, 1);
         assert_eq!(s.files, 2, "NEF 和 JPG 都要复制");
         assert_eq!(s.copied, 2);
@@ -2195,7 +2512,7 @@ mod tests {
         assert!(csv.contains("保留,5,"), "清单里要有决定和星级");
 
         // 再导一遍：不该滚出一堆 -1 -2 的副本
-        let again = export_rows(&conn, &filter, &dest, true, |_| {}).unwrap();
+        let again = export_rows(&conn, &filter, &dest, true, FileScope::Both, DEFAULT_NAME_TEMPLATE, |_| {}).unwrap();
         assert_eq!(again.copied, 0);
         assert_eq!(again.skipped, 2, "同名同大小的文件应当跳过");
 
@@ -2211,7 +2528,7 @@ mod tests {
         apply_decision_rows(&mut conn, &[card.id], Some("keep"), None).unwrap();
 
         let dest = temp_dir("export-list-dest");
-        let s = export_rows(&conn, &by_mark(Some("keep"), None), &dest, false, |_| {}).unwrap();
+        let s = export_rows(&conn, &by_mark(Some("keep"), None), &dest, false, FileScope::Both, DEFAULT_NAME_TEMPLATE, |_| {}).unwrap();
 
         assert_eq!(s.copied, 0);
         assert_eq!(s.bytes, 0);
@@ -2259,8 +2576,8 @@ mod tests {
         assert_eq!(before.len(), 5, "三次快门：2 对完整 + 1 张孤立 NEF");
 
         let dest = temp_dir("export-ro-dest");
-        export_rows(&conn, &by_mark(None, None), &dest, true, |_| {}).unwrap();
-        export_rows(&conn, &by_mark(Some("reject"), None), &dest, true, |_| {}).unwrap();
+        export_rows(&conn, &by_mark(None, None), &dest, true, FileScope::Both, DEFAULT_NAME_TEMPLATE, |_| {}).unwrap();
+        export_rows(&conn, &by_mark(Some("reject"), None), &dest, true, FileScope::Both, DEFAULT_NAME_TEMPLATE, |_| {}).unwrap();
 
         assert_eq!(
             before,
@@ -2308,6 +2625,71 @@ mod tests {
             thumb::SIZE_PREVIEW > thumb::SIZE_LOUPE,
             "高清档必须比大图档大"
         );
+    }
+
+    #[test]
+    fn cluster_by_gap_splits_at_the_boundary() {
+        // 间隔「不超过」gap 算同一组：差 3 秒还在组内，差 4 秒就断开
+        let times = [0, 2, 5, 9, 30];
+        let groups = cluster_by_gap(&times, 3);
+        assert_eq!(groups, vec![vec![0, 1, 2], vec![3], vec![4]]);
+    }
+
+    #[test]
+    fn cluster_by_gap_handles_empty_and_single() {
+        assert!(cluster_by_gap(&[], 3).is_empty());
+        assert_eq!(cluster_by_gap(&[42], 3), vec![vec![0]]);
+    }
+
+    #[test]
+    fn render_name_fills_variables() {
+        let ctx = NameCtx {
+            stem: "DSC_0001",
+            ext: "NEF",
+            date: "20260916",
+            time: "102030",
+            seq: 7,
+            stars: 3,
+            camera: "NIKON Z 50II",
+            pair: "key-1",
+        };
+        // 默认模板等于保持原文件名
+        assert_eq!(render_name("{name}", &ctx), "DSC_0001.NEF");
+        assert_eq!(
+            render_name("{date}_{seq}_{name}", &ctx),
+            "20260916_0007_DSC_0001.NEF"
+        );
+        assert_eq!(render_name("{stars}星_{pair}", &ctx), "3星_key-1.NEF");
+        // 模板里没写 {ext} 也会补上，不会导出一堆没有扩展名的文件
+        assert!(render_name("{date}-{seq}", &ctx).ends_with(".NEF"));
+    }
+
+    #[test]
+    fn render_name_cleans_illegal_chars_and_empty_results() {
+        let ctx = NameCtx {
+            stem: "a/b",
+            ext: "nef",
+            date: "",
+            time: "",
+            seq: 1,
+            stars: 0,
+            camera: "NIKON: Z/50",
+            pair: "k",
+        };
+        // 文件名里的非法字符必须换掉，否则 Windows 上直接写失败
+        let out = render_name("{camera}_{name}", &ctx);
+        assert!(!out.contains('/') && !out.contains(':'));
+        // 空模板也不能产出「只有扩展名」的文件
+        assert_ne!(render_name("", &ctx), ".nef");
+    }
+
+    #[test]
+    fn file_scope_picks_only_the_asked_kind() {
+        assert!(FileScope::Both.keeps("raw") && FileScope::Both.keeps("jpeg"));
+        assert!(FileScope::Raw.keeps("raw") && !FileScope::Raw.keeps("jpeg"));
+        assert!(FileScope::Jpeg.keeps("jpeg") && !FileScope::Jpeg.keeps("raw"));
+        // 认不出的取值退回「都要」，宁可多导也不能什么都不导
+        assert_eq!(FileScope::parse("whatever"), FileScope::Both);
     }
 
     #[test]

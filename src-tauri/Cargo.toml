@@ -31,7 +31,10 @@ kamadak-exif = "0.6.1"
 blake3 = "1.8.7"
 anyhow = "1.0.104"
 tauri-plugin-dialog = "2.7.3"
-image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff"] }
+# RAW 完整解码——降级链的第三级。只有内嵌预览抠不出来时才轮到它，
+# 慢但覆盖面广（尼康 NEF、佳能 CR3、索尼 ARW 等）。
+rawler = "0.8.0"
 memmap2 = "0.9.11"
 base64 = "0.23.1"
 

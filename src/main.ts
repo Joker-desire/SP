@@ -118,6 +118,25 @@ interface ExportSummary {
   elapsedMs: number;
 }
 
+/** 连拍分组里的一张。 */
+interface SimilarMember {
+  id: number;
+  pairKey: string;
+  name: string;
+  timeText: string | null;
+  decision: string;
+  stars: number;
+}
+
+/** 一次连拍聚类出的一组（>=2 张才成组）。 */
+interface SimilarGroup {
+  key: string;
+  size: number;
+  spanSecs: number;
+  startText: string | null;
+  members: SimilarMember[];
+}
+
 interface ExportProgress {
   phase: "listing" | "copying" | "manifest";
   done: number;
@@ -141,6 +160,9 @@ const NONE_KEY = "__none__";
 const ROUTE_LABEL: Record<string, string> = {
   "embedded-jpeg": "内嵌预览",
   "file-jpeg": "原文件 JPEG",
+  "image-decode": "位图直接解码",
+  "raw-decode": "RAW 完整解码",
+  placeholder: "占位图（没能解出画面）",
   cached: "缓存",
 };
 
@@ -224,6 +246,8 @@ const elLoupeZoomActual = $<HTMLButtonElement>("#loupe-zoom-actual");
 const elExportModal = $<HTMLElement>("#export-modal");
 const elExportScope = $<HTMLElement>("#export-scope");
 const elExportMode = $<HTMLElement>("#export-mode");
+const elExportFiles = $<HTMLElement>("#export-files");
+const elExportTemplate = $<HTMLInputElement>("#export-template");
 const elExportCancel = $<HTMLButtonElement>("#export-cancel");
 const elExportConfirm = $<HTMLButtonElement>("#export-confirm");
 const elExportReveal = $<HTMLButtonElement>("#export-reveal");
@@ -245,6 +269,18 @@ const elCacheDir = $<HTMLElement>("#cache-dir");
 const elCacheScope = $<HTMLElement>("#cache-scope");
 const elCacheCancel = $<HTMLButtonElement>("#cache-cancel");
 const elCacheClear = $<HTMLButtonElement>("#cache-clear");
+
+const elBtnSimilar = $<HTMLButtonElement>("#btn-similar");
+const elSimilarModal = $<HTMLElement>("#similar-modal");
+const elSimilarList = $<HTMLElement>("#similar-list");
+const elSimilarGap = $<HTMLElement>("#similar-gap");
+const elSimilarClose = $<HTMLButtonElement>("#similar-close");
+const elSimilarEmpty = $<HTMLElement>("#similar-empty");
+const elSimilarNote = $<HTMLElement>("#similar-note");
+
+const elCompareModal = $<HTMLElement>("#compare-modal");
+const elCompareGrid = $<HTMLElement>("#compare-grid");
+const elCompareDone = $<HTMLButtonElement>("#compare-done");
 
 // ---------------------------------------------------------------------------
 // 状态
@@ -1651,6 +1687,8 @@ elExportConfirm.addEventListener("click", () => {
 async function runExport() {
   const scope = currentChoice(elExportScope);
   const mode = currentChoice(elExportMode);
+  const files = currentChoice(elExportFiles) || "both";
+  const template = elExportTemplate.value.trim() || "{name}";
   if (!scope || !mode) return;
 
   const dest = await open({ directory: true, multiple: false, title: "导出到哪个文件夹" });
@@ -1672,6 +1710,8 @@ async function runExport() {
       filter: { ...currentFilterPayload(), decision: scope },
       dest,
       mode,
+      scope: files,
+      template,
     });
     lastExport = summary;
 
@@ -1705,6 +1745,228 @@ async function runExport() {
     elExportConfirm.textContent = "再导出一次";
   }
 }
+
+// ---------------------------------------------------------------------------
+// 连拍分组 + 对比选一张
+//
+// 拍连拍时一次快门连按好几张，挑一张最好的就行。这里按拍摄时间把相近的
+// 聚成一组，点一组进去并排看，点一张 = 留它、同组其它自动淘汰。
+// 标记走和卡片、灯箱同一套 apply_decision，所以侧栏计数、筛选都跟着动。
+// ---------------------------------------------------------------------------
+
+function currentGap(): number {
+  const v = currentChoice(elSimilarGap);
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 3;
+}
+
+async function openSimilarDialog() {
+  if (total === 0) {
+    setHint("先选择一个装有 NEF / JPG 的文件夹，再来看连拍分组。", "warn");
+    return;
+  }
+  elSimilarList.replaceChildren();
+  elSimilarEmpty.hidden = true;
+  elSimilarNote.textContent = "正在按拍摄时间聚类…";
+  elSimilarModal.hidden = false;
+  await refreshSimilarGroups();
+}
+
+async function refreshSimilarGroups() {
+  try {
+    const groups = await invoke<SimilarGroup[]>("similar_groups", {
+      filter: currentFilterPayload(),
+      gapSecs: currentGap(),
+    });
+    renderSimilarGroups(groups);
+  } catch (e) {
+    elSimilarNote.textContent = `连拍分组失败：${String(e)}`;
+    elSimilarList.replaceChildren();
+  }
+}
+
+function renderSimilarGroups(groups: SimilarGroup[]) {
+  elSimilarList.replaceChildren();
+  if (groups.length === 0) {
+    elSimilarEmpty.hidden = false;
+    elSimilarNote.textContent = "";
+    return;
+  }
+
+  let totalPhotos = 0;
+  let totalKept = 0;
+  for (const g of groups) {
+    totalPhotos += g.size;
+    totalKept += g.members.filter((m) => m.decision === "keep").length;
+  }
+  elSimilarNote.textContent =
+    `${groups.length} 组 · 涉及 ${totalPhotos} 张` +
+    (totalKept > 0 ? ` · 已挑出 ${totalKept} 张` : "");
+
+  for (const g of groups) {
+    const kept = g.members.filter((m) => m.decision === "keep").length;
+    const card = document.createElement("div");
+    card.className = "similar-card";
+
+    const head = document.createElement("div");
+    head.className = "similar-head";
+    const span = g.spanSecs > 0 ? ` · 跨度 ${g.spanSecs}s` : "";
+    const keptText = kept > 0 ? ` · 已挑 ${kept}` : "";
+    head.innerHTML =
+      `<span class="similar-time">${escapeHtml(g.startText ?? "时间未知")}</span>` +
+      `<span class="similar-count">${g.size} 张${span}${keptText}</span>`;
+    card.appendChild(head);
+
+    const strip = document.createElement("div");
+    strip.className = "similar-strip";
+    for (const m of g.members) {
+      const cell = document.createElement("button");
+      cell.type = "button";
+      cell.className = "similar-cell" + (m.decision === "keep" ? " is-kept" : "");
+      cell.title = `${m.name}\n${m.timeText ?? ""}`;
+      const img = document.createElement("img");
+      img.alt = m.name;
+      img.loading = "lazy";
+      cell.appendChild(img);
+      // 缩略图按 id 取，命中前端缓存就不重复请求
+      void loadThumb(m.id, 512).then((p) => {
+        img.src = p.dataUrl;
+      });
+      strip.appendChild(cell);
+    }
+    card.appendChild(strip);
+
+    const actions = document.createElement("div");
+    actions.className = "similar-actions";
+    const compareBtn = document.createElement("button");
+    compareBtn.type = "button";
+    compareBtn.className = "btn btn-primary";
+    compareBtn.textContent = "对比选一张";
+    compareBtn.addEventListener("click", () => openCompare(g));
+    actions.appendChild(compareBtn);
+    card.appendChild(actions);
+
+    elSimilarList.appendChild(card);
+  }
+}
+
+let compareGroup: SimilarGroup | null = null;
+
+function openCompare(group: SimilarGroup) {
+  compareGroup = group;
+  elCompareGrid.replaceChildren();
+  elCompareModal.hidden = false;
+
+  group.members.forEach((m, i) => {
+    const tile = document.createElement("button");
+    tile.type = "button";
+    tile.className = "compare-tile" + (m.decision === "keep" ? " is-kept" : "");
+    tile.dataset.id = String(m.id);
+
+    const img = document.createElement("img");
+    img.alt = m.name;
+    tile.appendChild(img);
+    void loadThumb(m.id, 1600).then((p) => {
+      img.src = p.dataUrl;
+    });
+
+    const num = document.createElement("span");
+    num.className = "compare-num";
+    num.textContent = String(i + 1);
+    tile.appendChild(num);
+
+    const name = document.createElement("span");
+    name.className = "compare-name";
+    name.textContent = m.name;
+    tile.appendChild(name);
+
+    if (m.decision === "keep") {
+      const badge = document.createElement("span");
+      badge.className = "compare-badge";
+      badge.textContent = "已选";
+      tile.appendChild(badge);
+    }
+
+    tile.addEventListener("click", () => pickInGroup(group, m.id));
+    elCompareGrid.appendChild(tile);
+  });
+}
+
+/** 选一张：它标 keep，同组其它一律 reject。已经是 keep 的那张再点一次 = 取消（全清回 none）。 */
+async function pickInGroup(group: SimilarGroup, pickId: number) {
+  const already = group.members.find((m) => m.id === pickId)?.decision === "keep";
+  const patch: { id: number; decision: string }[] = group.members.map((m) => ({
+    id: m.id,
+    decision: already ? "none" : m.id === pickId ? "keep" : "reject",
+  }));
+
+  // 先本地乐观更新，避免一张张闪
+  for (const p of patch) {
+    const cell = elCompareGrid.querySelector<HTMLElement>(`[data-id="${p.id}"]`);
+    if (!cell) continue;
+    cell.classList.toggle("is-kept", p.decision === "keep");
+    const oldBadge = cell.querySelector(".compare-badge");
+    if (p.decision === "keep" && !oldBadge) {
+      const badge = document.createElement("span");
+      badge.className = "compare-badge";
+      badge.textContent = "已选";
+      cell.appendChild(badge);
+    } else if (p.decision !== "keep" && oldBadge) {
+      oldBadge.remove();
+    }
+  }
+
+  try {
+    await Promise.all(
+      patch.map((p) => invoke<number>("apply_decision", { ids: [p.id], decision: p.decision, stars: null }))
+    );
+    // 同步回分组数据，连拍列表的「已挑 N」才准
+    for (const p of patch) {
+      const m = group.members.find((x) => x.id === p.id);
+      if (m) m.decision = p.decision;
+    }
+    void refreshFacetCounts();
+  } catch (e) {
+    setHint(`标记没能保存：${String(e)}`, "error");
+    void refreshSimilarGroups();
+  }
+}
+
+function closeSimilarDialog() {
+  elSimilarModal.hidden = true;
+}
+
+function closeCompareDialog() {
+  elCompareModal.hidden = true;
+  compareGroup = null;
+  // 关掉对比时把连拍列表的「已挑 N」刷新一下（缩略图走前端缓存，开销很小）
+  void refreshSimilarGroups();
+}
+
+elBtnSimilar.addEventListener("click", () => void openSimilarDialog());
+elSimilarClose.addEventListener("click", closeSimilarDialog);
+elSimilarModal.addEventListener("click", (e) => {
+  if (e.target === elSimilarModal) closeSimilarDialog();
+});
+elSimilarGap.addEventListener("change", () => void refreshSimilarGroups());
+elCompareDone.addEventListener("click", closeCompareDialog);
+elCompareModal.addEventListener("click", (e) => {
+  if (e.target === elCompareModal) closeCompareDialog();
+});
+
+// 对比视图里 1–9 直接选第几张，Esc 关掉
+document.addEventListener("keydown", (e) => {
+  if (elCompareModal.hidden) return;
+  if (e.key === "Escape") {
+    closeCompareDialog();
+    return;
+  }
+  const n = Number(e.key);
+  if (Number.isInteger(n) && n >= 1 && n <= 9 && compareGroup) {
+    const m = compareGroup.members[n - 1];
+    if (m) void pickInGroup(compareGroup, m.id);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // 扫描

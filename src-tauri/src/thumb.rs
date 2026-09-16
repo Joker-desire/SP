@@ -263,7 +263,198 @@ fn cache_path(root: &Path, fingerprint: &str, size: u32) -> PathBuf {
     root.join(&key[..2]).join(format!("{key}-{size}.jpg"))
 }
 
-/// 确保指定尺寸的缩略图存在，返回其缓存路径。
+/// 解码一张照片，按降级链依次尝试，最后兜底到占位图。
+///
+/// 四级：
+///
+/// 1. `embedded-jpeg` / `file-jpeg` —— 抠内嵌预览。最快，绝大多数照片走这里，
+///    而且色彩就是机身原味（相机自己写的 JPEG）。
+/// 2. `image-decode` —— 文件本身就是标准位图（PNG / TIFF / 没有内嵌预览的 JPEG）。
+/// 3. `raw-decode` —— 完整 RAW 解码（demosaic）。慢一个数量级，但覆盖面广，
+///    专门对付「RAW 里没存预览」或预览被裁掉的情况。
+/// 4. `placeholder` —— 以上全失败时给一张占位图，网格里至少不是一片空白。
+///
+/// 路由会写进 `photos.decode_path`：出问题时能一眼看出卡在哪一级，
+/// 而不是只看到「这张显示不出来」。
+pub fn decode_source(path: &Path) -> Result<(image::DynamicImage, &'static str)> {
+    // 1. 内嵌预览
+    if let Ok((bytes, route)) = best_jpeg_from_file(path) {
+        if let Ok(img) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg) {
+            return Ok((img, route));
+        }
+    }
+
+    // 2. 标准位图。NEF 之类的 RAW 在这里必然失败（image crate 不认），不影响。
+    if let Ok(img) = image::open(path) {
+        return Ok((img, "image-decode"));
+    }
+
+    // 3. RAW 完整解码
+    if let Ok(img) = decode_raw(path) {
+        return Ok((img, "raw-decode"));
+    }
+
+    // 4. 占位图
+    Ok((placeholder(1024, 683), "placeholder"))
+}
+
+/// 完整 RAW 解码：demosaic + 白平衡 + 转 sRGB。
+///
+/// 只做「够缩略图看」的质量：2×2 拜耳块合并成一个 RGB 像素，分辨率减半。
+/// 从六千万像素减到三千万，仍远超 512px 网格的需求，而速度是全尺寸 demosaic
+/// 的几十倍——这一级本来就是兜底，没必要为它付全尺寸处理的代价。
+fn decode_raw(path: &Path) -> Result<image::DynamicImage> {
+    let mut raw =
+        rawler::decode_file(path).map_err(|e| anyhow!("RAW 解码失败：{e}"))?;
+
+    // 去黑电平、按白电平归一化，数据变成 0.0..1.0 的 f32
+    raw.apply_scaling()
+        .map_err(|e| anyhow!("RAW 电平归一化失败：{e}"))?;
+
+    let w = raw.width;
+    let h = raw.height;
+    let data = match &raw.data {
+        rawler::RawImageData::Float(d) => d,
+        _ => return Err(anyhow!("RAW 数据不是浮点格式")),
+    };
+    if w < 4 || h < 4 {
+        return Err(anyhow!("RAW 尺寸异常：{w}×{h}"));
+    }
+
+    // 白平衡：机身给的是 RGBE 顺序的系数，归一化后按通道缩放
+    let wb = raw.neutralwb();
+    let gain = {
+        let g = [wb[0], wb[1], wb[2]];
+        let avg = (g[0] + g[1] + g[2]) / 3.0;
+        if avg > 0.0 {
+            [g[0] / avg, g[1] / avg, g[2] / avg]
+        } else {
+            [1.0, 1.0, 1.0]
+        }
+    };
+
+    let cfa = raw.cropped_cfa();
+    let out_w = w / 2;
+    let out_h = h / 2;
+    let mut out = image::RgbImage::new(out_w as u32, out_h as u32);
+
+    for y in 0..out_h {
+        for x in 0..out_w {
+            // 2×2 块里每个位置贡献自己的颜色通道；同一通道出现多次（G 有两个）取平均
+            let mut sum = [0f32; 3];
+            let mut cnt = [0u32; 3];
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let sy = y * 2 + dy;
+                    let sx = x * 2 + dx;
+                    if sy >= h || sx >= w {
+                        continue;
+                    }
+                    let ch = cfa.color_at(sy, sx);
+                    if ch < 3 {
+                        sum[ch] += data[sy * w + sx];
+                        cnt[ch] += 1;
+                    }
+                }
+            }
+            let mut rgb = [0f32; 3];
+            for c in 0..3 {
+                let v = if cnt[c] > 0 {
+                    sum[c] / cnt[c] as f32 * gain[c]
+                } else {
+                    // 该通道在这块里缺失（比如非 RGGB 排列），用其它通道的均值顶上
+                    let others: Vec<f32> = (0..3)
+                        .filter(|&k| cnt[k] > 0)
+                        .map(|k| sum[k] / cnt[k] as f32 * gain[k])
+                        .collect();
+                    if others.is_empty() {
+                        0.0
+                    } else {
+                        others.iter().sum::<f32>() / others.len() as f32
+                    }
+                };
+                rgb[c] = linear_to_srgb(v.clamp(0.0, 1.0));
+            }
+            out.put_pixel(
+                x as u32,
+                y as u32,
+                image::Rgb([
+                    (rgb[0] * 255.0) as u8,
+                    (rgb[1] * 255.0) as u8,
+                    (rgb[2] * 255.0) as u8,
+                ]),
+            );
+        }
+    }
+
+    Ok(image::DynamicImage::ImageRgb8(out))
+}
+
+/// 线性光 → sRGB 编码。不做这一步 RAW 出来的图会黑得几乎看不见。
+fn linear_to_srgb(v: f32) -> f32 {
+    if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// 占位图：斜纹底 + 一个「没有预览」的方框。
+///
+/// 纯代码画，不引额外依赖，也不读任何字体——它只在最坏情况下出现，
+/// 能让人一眼看出「这张没能解出来」，而不是看到一个空洞。
+pub fn placeholder(width: u32, height: u32) -> image::DynamicImage {
+    let mut img = image::RgbImage::from_pixel(width, height, image::Rgb([38, 40, 45]));
+
+    // 斜纹：让占位图和「加载中」的纯色块区分开
+    for y in 0..height {
+        for x in 0..width {
+            if ((x + y) / 32) % 2 == 0 {
+                img.put_pixel(x, y, image::Rgb([46, 48, 54]));
+            }
+        }
+    }
+
+    // 中间的方框 + 一条对角线，形状类似「图片」图标被打叉
+    let side = width.min(height) / 4;
+    let left = width / 2 - side / 2;
+    let top = height / 2 - side / 2;
+    let fg = image::Rgb([120, 124, 133]);
+    let stroke = (width / 256).max(2);
+
+    for t in 0..stroke {
+        for i in 0..side {
+            // 上下两条边
+            for &dx in &[left + i] {
+                for &dy in &[top + t, top + side - 1 - t] {
+                    if dx < width && dy < height {
+                        img.put_pixel(dx, dy, fg);
+                    }
+                }
+            }
+            // 左右两条边
+            for &dy in &[top + i] {
+                for &dx in &[left + t, left + side - 1 - t] {
+                    if dx < width && dy < height {
+                        img.put_pixel(dx, dy, fg);
+                    }
+                }
+            }
+        }
+        // 对角线（方框的斜杠）
+        for i in 0..side {
+            let dx = left + i;
+            let dy = top + i;
+            for k in 0..stroke {
+                if dx < width && dy + k < height {
+                    img.put_pixel(dx, dy + k, fg);
+                }
+            }
+        }
+    }
+
+    image::DynamicImage::ImageRgb8(img)
+}
 ///
 /// 多个尺寸会复用同一次解码——解码是整条链路里最贵的一步。
 /// **返回顺序与 `sizes` 一一对应**，调用方可以直接按下标取。
@@ -292,10 +483,8 @@ pub fn ensure(
         return Ok((slots.into_iter().flatten().collect(), "cached"));
     }
 
-    let (bytes, route) = best_jpeg_from_file(source)?;
-
-    let mut img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
-        .with_context(|| format!("内嵌 JPEG 无法解码（{}）", source.display()))?;
+    // 降级链：抠预览 → 标准位图 → RAW 解码 → 占位图。走到最后一级也不会失败。
+    let (mut img, route) = decode_source(source)?;
     let source_width = img.width();
     let source_height = img.height();
 
@@ -421,6 +610,115 @@ pub fn global_limiter() -> &'static Limiter {
     LIMITER.get_or_init(|| Limiter::new(4))
 }
 
+// ---------------------------------------------------------------------------
+// 容量上限与 LRU 淘汰
+// ---------------------------------------------------------------------------
+
+/// 缓存容量上限。
+///
+/// 缩略图会一直长——每看一张就留 2~3 份 JPEG，看一万张就是好几个 GB。
+/// 以前只能靠用户手动清理，现在给一个默认上限，超了自动淘汰最久没用的。
+/// 这些都是可再生数据（删了重新抠一次预览就回来），所以自动删不心疼。
+pub const DEFAULT_MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// 淘汰水位线：清到上限的 80%，而不是刚好卡在上限。
+/// 否则刚清完再生成两张又超了，会变成「每张都触发一次全目录扫描」。
+const PRUNE_WATERMARK: f64 = 0.8;
+
+/// 自动淘汰的最小间隔（秒）。扫一遍几万个文件不便宜，没必要每次生成都扫。
+const PRUNE_MIN_INTERVAL_SECS: u64 = 60;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PruneStats {
+    pub removed: u64,
+    pub freed_bytes: u64,
+}
+
+/// 按 LRU 把缓存压回水位线以下。
+///
+/// 排序键用**访问时间**而不是修改时间：缩略图写完就不会再改，mtime 等于创建时间，
+/// 拿它排序等于「按加入顺序删」，最近看过的老照片会被误删。atime 拿不到时
+/// （某些挂载用了 noatime）退回 mtime，至少不会崩。
+pub fn enforce_limit(root: &Path, max_bytes: u64) -> Result<PruneStats> {
+    #[derive(Debug)]
+    struct Entry {
+        path: PathBuf,
+        size: u64,
+        atime: std::time::SystemTime,
+    }
+
+    let mut files: Vec<Entry> = Vec::new();
+    for entry in walkdir::WalkDir::new(root).into_iter().flatten() {
+        let Ok(md) = entry.metadata() else { continue };
+        if !md.is_file() {
+            continue;
+        }
+        let atime = md
+            .accessed()
+            .or_else(|_| md.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        files.push(Entry {
+            path: entry.into_path(),
+            size: md.len(),
+            atime,
+        });
+    }
+
+    let total: u64 = files.iter().map(|f| f.size).sum();
+    if total <= max_bytes {
+        return Ok(PruneStats::default());
+    }
+
+    let target = (max_bytes as f64 * PRUNE_WATERMARK) as u64;
+    files.sort_by_key(|f| f.atime);
+
+    let mut stats = PruneStats::default();
+    let mut current = total;
+    for f in files {
+        if current <= target {
+            break;
+        }
+        if std::fs::remove_file(&f.path).is_ok() {
+            current -= f.size;
+            stats.removed += 1;
+            stats.freed_bytes += f.size;
+        }
+    }
+
+    Ok(stats)
+}
+
+/// 惰性触发的自动淘汰：最多一分钟扫一次，且只在超限后才真的删。
+///
+/// 每次生成缩略图都遍历整个缓存目录是浪费——几万个文件的 stat 调用比生成一张
+/// 缩略图还贵。所以限流，并且先做一次便宜的总量判断。
+pub fn enforce_if_needed(root: &Path) {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST.load(std::sync::atomic::Ordering::Relaxed);
+    if now.saturating_sub(last) < PRUNE_MIN_INTERVAL_SECS {
+        return;
+    }
+    // 抢到锁的线程去扫，其它线程这一轮直接跳过
+    if LAST
+        .compare_exchange(
+            last,
+            now,
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return;
+    }
+
+    let _ = enforce_limit(root, DEFAULT_MAX_CACHE_BYTES);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,6 +802,82 @@ mod tests {
     fn rejects_data_without_jpeg() {
         let junk = vec![0u8; 8192];
         assert!(best_jpeg(&junk).is_none());
+    }
+
+    /// 造一个指定访问时间、指定大小的缓存文件。
+    fn make_cached_file(dir: &Path, name: &str, size: usize, atime_secs: u64) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, vec![7u8; size]).unwrap();
+        let f = File::options().write(true).open(&p).unwrap();
+        f.set_times(
+            std::fs::FileTimes::new().set_accessed(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(atime_secs),
+            ),
+        )
+        .unwrap();
+        p
+    }
+
+    #[test]
+    fn enforce_limit_does_nothing_when_under_the_cap() {
+        let dir = std::env::temp_dir().join(format!("sp-lru-under-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..4 {
+            make_cached_file(&dir, &format!("f{i}.jpg"), 100, 1000 + i as u64);
+        }
+
+        let stats = enforce_limit(&dir, 1000).unwrap();
+        assert_eq!(stats.removed, 0);
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            4,
+            "没超限就不该动任何文件"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn enforce_limit_drops_the_least_recently_used_first() {
+        let dir = std::env::temp_dir().join(format!("sp-lru-over-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 五个文件各 100 字节，访问时间依次变新
+        for i in 0..5 {
+            make_cached_file(&dir, &format!("f{i}.jpg"), 100, 1000 + i as u64);
+        }
+
+        // 上限 300 → 水位线 240，得删到剩下 2 个（200 字节）
+        let stats = enforce_limit(&dir, 300).unwrap();
+        assert_eq!(stats.removed, 3, "应删掉 3 个最旧的");
+        assert_eq!(stats.freed_bytes, 300);
+
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        // 留下来的必须是最近访问过的两个：f3、f4
+        assert_eq!(left, vec!["f3.jpg".to_string(), "f4.jpg".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn placeholder_is_a_real_image() {
+        let img = placeholder(320, 200);
+        assert_eq!(img.width(), 320);
+        assert_eq!(img.height(), 200);
+        // 至少要有两种颜色，否则说明「占位图」其实是一片纯色，看不出区别
+        let rgb = img.to_rgb8();
+        let mut seen = std::collections::HashSet::new();
+        for p in rgb.pixels().take(4000) {
+            seen.insert((p[0], p[1], p[2]));
+        }
+        assert!(seen.len() > 1, "占位图不该是纯色块");
     }
 
     #[test]

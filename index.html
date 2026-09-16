@@ -82,6 +82,36 @@
           <span class="btn-text">清理</span>
         </button>
 
+        <button
+          class="btn btn-ghost"
+          id="btn-similar"
+          title="把连着拍的照片按时间分组，一次挑出最好的一张"
+        >
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <rect
+              x="1.8"
+              y="3.2"
+              width="6"
+              height="9.6"
+              rx="1.2"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+            />
+            <rect
+              x="8.2"
+              y="3.2"
+              width="6"
+              height="9.6"
+              rx="1.2"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+            />
+          </svg>
+          <span class="btn-text">连拍</span>
+        </button>
+
         <button class="btn btn-primary" id="btn-pick">
           <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
             <path
@@ -364,6 +394,41 @@
             </div>
           </div>
 
+          <div class="field">
+            <span class="field-label">要哪些文件</span>
+            <div class="choices choices-inline" id="export-files">
+              <label class="choice">
+                <input type="radio" name="files" value="both" checked />
+                <span class="choice-main">RAW + JPG</span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="files" value="raw" />
+                <span class="choice-main">仅 RAW</span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="files" value="jpeg" />
+                <span class="choice-main">仅 JPG</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="field">
+            <span class="field-label">文件名</span>
+            <input
+              class="input"
+              id="export-template"
+              type="text"
+              value="{name}"
+              spellcheck="false"
+              autocomplete="off"
+            />
+            <span class="field-hint">
+              可用变量：<code>{name}</code> 原文件名 · <code>{date}</code> 拍摄日期 ·
+              <code>{time}</code> 时间 · <code>{seq}</code> 序号 · <code>{stars}</code> 星级 ·
+              <code>{camera}</code> 机身 · <code>{pair}</code> 配对键
+            </span>
+          </div>
+
           <p class="modal-note">
             导出是<strong>复制</strong>：不会删除、移动或重命名任何原片。淘汰的照片也只是记进清单，
             真正要删的时候你自己动手。
@@ -381,6 +446,62 @@
           <button class="btn" id="export-cancel">取消</button>
           <button class="btn" id="export-reveal" hidden>打开目标文件夹</button>
           <button class="btn btn-primary" id="export-confirm">选择文件夹并导出</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 连拍分组 ───────────────────────────────────────────────────── -->
+    <div class="modal" id="similar-modal" hidden>
+      <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-labelledby="similar-title">
+        <h2 class="modal-title" id="similar-title">连拍分组</h2>
+
+        <div class="modal-body">
+          <div class="field">
+            <span class="field-label">相隔多久算一组</span>
+            <div class="choices choices-inline" id="similar-gap">
+              <label class="choice">
+                <input type="radio" name="gap" value="1" />
+                <span class="choice-main">1 秒</span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="gap" value="3" checked />
+                <span class="choice-main">3 秒</span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="gap" value="10" />
+                <span class="choice-main">10 秒</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="similar-list" id="similar-list"></div>
+          <p class="modal-note" id="similar-empty" hidden>
+            当前筛选范围内没有连拍分组（也可能是这些照片读不到拍摄时间）。
+          </p>
+          <p class="modal-note" id="similar-note"></p>
+        </div>
+
+        <div class="modal-foot">
+          <button class="btn" id="similar-close">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 对比选一张 ─────────────────────────────────────────────────── -->
+    <div class="modal" id="compare-modal" hidden>
+      <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-labelledby="compare-title">
+        <h2 class="modal-title" id="compare-title">挑一张</h2>
+
+        <div class="modal-body">
+          <div class="compare-grid" id="compare-grid"></div>
+          <p class="modal-note">
+            点一张 = 保留它，同组其它自动标为淘汰；再点一次已保留的，取消这次选择。
+            键盘 <kbd>1</kbd>–<kbd>9</kbd> 直接选第几张，<kbd>Esc</kbd> 返回。
+          </p>
+        </div>
+
+        <div class="modal-foot">
+          <button class="btn" id="compare-done">完成</button>
         </div>
       </div>
     </div>
