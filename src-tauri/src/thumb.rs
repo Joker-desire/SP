@@ -304,8 +304,7 @@ pub fn decode_source(path: &Path) -> Result<(image::DynamicImage, &'static str)>
 /// 从六千万像素减到三千万，仍远超 512px 网格的需求，而速度是全尺寸 demosaic
 /// 的几十倍——这一级本来就是兜底，没必要为它付全尺寸处理的代价。
 fn decode_raw(path: &Path) -> Result<image::DynamicImage> {
-    let mut raw =
-        rawler::decode_file(path).map_err(|e| anyhow!("RAW 解码失败：{e}"))?;
+    let mut raw = rawler::decode_file(path).map_err(|e| anyhow!("RAW 解码失败：{e}"))?;
 
     // 去黑电平、按白电平归一化，数据变成 0.0..1.0 的 f32
     raw.apply_scaling()
@@ -809,11 +808,9 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, vec![7u8; size]).unwrap();
         let f = File::options().write(true).open(&p).unwrap();
-        f.set_times(
-            std::fs::FileTimes::new().set_accessed(
-                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(atime_secs),
-            ),
-        )
+        f.set_times(std::fs::FileTimes::new().set_accessed(
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(atime_secs),
+        ))
         .unwrap();
         p
     }

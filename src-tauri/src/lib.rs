@@ -881,7 +881,10 @@ fn render_name(template: &str, ctx: &NameCtx) -> String {
     }
 
     // 模板里没写 {ext} 就补上，避免导出一堆没有扩展名的文件
-    if !out.to_lowercase().ends_with(&format!(".{}", ctx.ext.to_lowercase())) {
+    if !out
+        .to_lowercase()
+        .ends_with(&format!(".{}", ctx.ext.to_lowercase()))
+    {
         out.push('.');
         out.push_str(ctx.ext);
     }
@@ -2439,8 +2442,14 @@ mod tests {
             iso: Some(200),
             files: vec![
                 // 故意用带逗号和引号的文件名，逼出转义路径
-                ExportFile { path: "/tmp/a/MY, SHOT \"x\".NEF".into(), size: 100 },
-                ExportFile { path: "/tmp/a/b.JPG".into(), size: 50 },
+                ExportFile {
+                    path: "/tmp/a/MY, SHOT \"x\".NEF".into(),
+                    size: 100,
+                },
+                ExportFile {
+                    path: "/tmp/a/b.JPG".into(),
+                    size: 50,
+                },
             ],
         };
         let missing = ExportPair {
@@ -2497,7 +2506,16 @@ mod tests {
         let dest = temp_dir("export-dest");
         let filter = by_mark(Some("keep"), None);
 
-        let s = export_rows(&conn, &filter, &dest, true, FileScope::Both, DEFAULT_NAME_TEMPLATE, |_| {}).unwrap();
+        let s = export_rows(
+            &conn,
+            &filter,
+            &dest,
+            true,
+            FileScope::Both,
+            DEFAULT_NAME_TEMPLATE,
+            |_| {},
+        )
+        .unwrap();
         assert_eq!(s.photos, 1);
         assert_eq!(s.files, 2, "NEF 和 JPG 都要复制");
         assert_eq!(s.copied, 2);
@@ -2512,7 +2530,16 @@ mod tests {
         assert!(csv.contains("保留,5,"), "清单里要有决定和星级");
 
         // 再导一遍：不该滚出一堆 -1 -2 的副本
-        let again = export_rows(&conn, &filter, &dest, true, FileScope::Both, DEFAULT_NAME_TEMPLATE, |_| {}).unwrap();
+        let again = export_rows(
+            &conn,
+            &filter,
+            &dest,
+            true,
+            FileScope::Both,
+            DEFAULT_NAME_TEMPLATE,
+            |_| {},
+        )
+        .unwrap();
         assert_eq!(again.copied, 0);
         assert_eq!(again.skipped, 2, "同名同大小的文件应当跳过");
 
@@ -2528,7 +2555,16 @@ mod tests {
         apply_decision_rows(&mut conn, &[card.id], Some("keep"), None).unwrap();
 
         let dest = temp_dir("export-list-dest");
-        let s = export_rows(&conn, &by_mark(Some("keep"), None), &dest, false, FileScope::Both, DEFAULT_NAME_TEMPLATE, |_| {}).unwrap();
+        let s = export_rows(
+            &conn,
+            &by_mark(Some("keep"), None),
+            &dest,
+            false,
+            FileScope::Both,
+            DEFAULT_NAME_TEMPLATE,
+            |_| {},
+        )
+        .unwrap();
 
         assert_eq!(s.copied, 0);
         assert_eq!(s.bytes, 0);
@@ -2576,8 +2612,26 @@ mod tests {
         assert_eq!(before.len(), 5, "三次快门：2 对完整 + 1 张孤立 NEF");
 
         let dest = temp_dir("export-ro-dest");
-        export_rows(&conn, &by_mark(None, None), &dest, true, FileScope::Both, DEFAULT_NAME_TEMPLATE, |_| {}).unwrap();
-        export_rows(&conn, &by_mark(Some("reject"), None), &dest, true, FileScope::Both, DEFAULT_NAME_TEMPLATE, |_| {}).unwrap();
+        export_rows(
+            &conn,
+            &by_mark(None, None),
+            &dest,
+            true,
+            FileScope::Both,
+            DEFAULT_NAME_TEMPLATE,
+            |_| {},
+        )
+        .unwrap();
+        export_rows(
+            &conn,
+            &by_mark(Some("reject"), None),
+            &dest,
+            true,
+            FileScope::Both,
+            DEFAULT_NAME_TEMPLATE,
+            |_| {},
+        )
+        .unwrap();
 
         assert_eq!(
             before,
