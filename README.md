@@ -26,16 +26,28 @@
 
 | 平台 | 文件 |
 |---|---|
-| macOS（Apple Silicon，M 系列） | `S·P_<版本>_macos-latest_apple-silicon.dmg` |
-| macOS（Intel） | `S·P_<版本>_macos-latest_intel.dmg` |
-| Windows | `S·P_<版本>_windows-latest_x64.msi`（或 `.exe`，二选一） |
+| macOS（Apple Silicon，M 系列） | `SP_<版本>_macos_apple-silicon.dmg` |
+| macOS（Intel） | `SP_<版本>_macos_intel.dmg` |
+| Windows | `SP_<版本>_windows_x64.msi`（或 `.exe`，二选一） |
 
 装完之后：
 
 - 数据（图库索引、选片标记、缩略图缓存）放在 macOS `~/Library/Application Support/SP/`、Windows `%APPDATA%\SP\`
 - 删应用不会删照片——**原片全程只读**，重装后标记还在
 
-> **未签名应用的第一次打开**：macOS 会被 Gatekeeper 拦一下，右键点 app → 「打开」→ 再点「打开」；或终端执行 `xattr -cr "/Applications/S·P.app"`。彻底消除提示需要 Apple 开发者账号（$99/年），目前没买。Windows 同理会有 SmartScreen 提示，点「仍要运行」。
+### macOS 第一次打开要先做一步
+
+应用没有 Apple 开发者证书签名（$99/年，目前没买），只有 ad-hoc 签名。从浏览器下载的文件会带隔离属性，这时双击会提示**「应用已损坏，无法打开」**，而且**右键 → 打开也不管用**。
+
+把 app 拖进「应用程序」之后，在终端执行这一行即可：
+
+```bash
+xattr -cr "/Applications/S·P.app"
+```
+
+隔离属性清掉后 Gatekeeper 不再拦截，之后双击正常启动，功能没有任何区别。
+
+> Windows 同理会有 SmartScreen 提示，点「仍要运行」。
 
 ---
 
