@@ -81,9 +81,16 @@ jobs:
           v="${GITHUB_REF_NAME#v}"
           # 手动触发时没有 tag，用 package.json 里的版本兜底
           [ "$v" = "${GITHUB_REF_NAME}" ] && v=$(node -p "require('./package.json').version")
+          os="${{ matrix.os }}"
+          os="${os%-latest}" # macos-latest → macos
+          arch="${{ matrix.arch }}"
+          # 必须 export：find -exec 起的 sh 是子进程，不 export 的话 ${v} 在里面是空的，
+          # 文件名会变成 SP__macos_apple-silicon.dmg（版本号凭空消失）
+          export v os arch
+          # 文件名用 ASCII：S·P 的间隔号在上传环节会被换成 "."，看着像坏了
           find src-tauri/target -path '*/release/bundle/*' \
             \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) \
-            -exec sh -c 'cp "$1" "out/S·P_${v}_${{ matrix.os }}_${{ matrix.arch }}.${1##*.}"' _ {} \;
+            -exec sh -c 'cp "$1" "out/SP_${v}_${os}_${arch}.${1##*.}"' _ {} \;
           ls -lh out
 
       - name: 建 Release 并上传（仅打 tag 时）
