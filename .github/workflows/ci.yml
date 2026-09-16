@@ -43,6 +43,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          # 显式锁官方源：本机若配了镜像，lock 里的 resolved 会被写死成镜像地址，
+          # 别人的机器和 CI 都访问不了。这里兜一层，配合干净的 lock 双保险。
+          registry-url: https://registry.npmjs.org
 
       - name: 安装依赖
         run: npm ci

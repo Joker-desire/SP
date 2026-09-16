@@ -38,6 +38,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          # 锁官方源，理由同 ci.yml：镜像写进 lock 会让别人和 CI 都装不上
+          registry-url: https://registry.npmjs.org
 
       - name: 安装 Rust
         uses: dtolnay/rust-toolchain@stable
