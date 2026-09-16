@@ -1,0 +1,51 @@
+# 每次推送和 PR 都跑一遍：后端测试 + 前端类型检查与构建 + 三平台编译是否通过。
+#
+# 开源之后，别人提的 PR 得有地方自动验一次；本机没装 Rust 的人也能靠这里知道自己改没改坏。
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"] # tag 走 release.yml，别重复跑
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rust:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Rust 编译缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 格式检查
+        run: cargo fmt --check
+        working-directory: src-tauri
+
+      - name: 测试
+        run: cargo test
+        working-directory: src-tauri
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查与构建
+        run: npm run build

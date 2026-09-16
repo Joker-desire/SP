@@ -1,0 +1,2522 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import * as zoomMath from "./zoom";
+import type { Box } from "./zoom";
+
+// ---------------------------------------------------------------------------
+// 类型：与 Rust 侧命令的返回值一一对应
+// ---------------------------------------------------------------------------
+
+interface ScanSummary {
+  scanned: number;
+  unchanged: number;
+  inserted: number;
+  updated: number;
+  removed: number;
+  failed: number;
+  pairs: number;
+  orphanRaw: number;
+  orphanJpg: number;
+  exifFailed: number;
+  elapsedMs: number;
+}
+
+interface LibraryStats {
+  files: number;
+  pairs: number;
+  orphanRaw: number;
+  orphanJpg: number;
+  exifFailed: number;
+  cameras: number;
+  dbPath: string;
+}
+
+interface ScanProgress {
+  phase: "walking" | "parsing" | "writing" | "stats";
+  done: number;
+  total: number;
+}
+
+interface PairCard {
+  id: number;
+  pairKey: string;
+  path: string;
+  fileKind: string;
+  pairState: "both" | "rawOnly" | "jpgOnly";
+  takenAtText: string | null;
+  dayKey: string | null;
+  cameraModel: string | null;
+  cameraSerial: string | null;
+  lens: string | null;
+  focalLen: number | null;
+  aperture: number | null;
+  shutter: string | null;
+  iso: number | null;
+  fileSize: number;
+  decodePath: string | null;
+  /** 选片结果。落库落在 pair_key 上，所以 NEF 和 JPG 永远同进同退。 */
+  decision: Decision;
+  /** 0–5 */
+  stars: number;
+}
+
+type Decision = "none" | "keep" | "reject";
+
+interface PairPage {
+  items: PairCard[];
+  total: number;
+}
+
+interface Facet {
+  key: string;
+  label: string;
+  count: number;
+}
+
+interface LibraryFacets {
+  total: number;
+  pairStates: Facet[];
+  cameras: Facet[];
+  days: Facet[];
+  daysTruncated: boolean;
+  decisions: Facet[];
+  stars: Facet[];
+}
+
+interface ThumbPayload {
+  id: number;
+  size: number;
+  dataUrl: string;
+  route: string;
+  sourceWidth: number;
+  sourceHeight: number;
+  fromCache: boolean;
+}
+
+/** 缓存占用。缩略图随时能重建，索引重建要重扫，选片标记是唯一不能重建的东西。 */
+interface CacheStats {
+  thumbsFiles: number;
+  thumbsBytes: number;
+  thumbsDir: string;
+  dbBytes: number;
+  dbPath: string;
+  photos: number;
+  decisions: number;
+}
+
+interface ExportSummary {
+  dest: string;
+  manifest: string;
+  photos: number;
+  files: number;
+  copied: number;
+  skipped: number;
+  failed: number;
+  bytes: number;
+  elapsedMs: number;
+}
+
+interface ExportProgress {
+  phase: "listing" | "copying" | "manifest";
+  done: number;
+  total: number;
+}
+
+interface FilterState {
+  pairState: string;
+  cameraSerial: string | null;
+  day: string | null;
+  /** all / none / keep / reject / marked */
+  decision: string;
+  /** null＝不筛。注意和 0（只要没打星的）是两码事。 */
+  stars: number | null;
+  search: string;
+  sort: string;
+}
+
+const NONE_KEY = "__none__";
+
+const ROUTE_LABEL: Record<string, string> = {
+  "embedded-jpeg": "内嵌预览",
+  "file-jpeg": "原文件 JPEG",
+  cached: "缓存",
+};
+
+const PAIR_LABEL: Record<PairCard["pairState"], string> = {
+  both: "NEF + JPG",
+  rawOnly: "仅 NEF",
+  jpgOnly: "仅 JPG",
+};
+
+/** 配对不完整时才显示的徽标文案。 */
+const BROKEN_LABEL: Record<string, string> = {
+  rawOnly: "缺 JPG",
+  jpgOnly: "缺 NEF",
+};
+
+// ---------------------------------------------------------------------------
+// DOM
+// ---------------------------------------------------------------------------
+
+const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
+
+const elRootChip = $<HTMLElement>("#root-chip");
+const elRootPath = $<HTMLElement>("#root-path");
+const elRootMeta = $<HTMLElement>("#root-meta");
+const elTheme = $<HTMLButtonElement>("#btn-theme");
+const elPick = $<HTMLButtonElement>("#btn-pick");
+const elRescan = $<HTMLButtonElement>("#btn-rescan");
+const elCache = $<HTMLButtonElement>("#btn-cache");
+
+const elFacetsDecision = $<HTMLElement>("#facets-decision");
+const elFacetsStars = $<HTMLElement>("#facets-stars");
+const elFacetsPair = $<HTMLElement>("#facets-pair");
+const elFacetsDays = $<HTMLElement>("#facets-days");
+const elFacetsCameras = $<HTMLElement>("#facets-cameras");
+const elDaysNote = $<HTMLElement>("#days-note");
+
+const elSearch = $<HTMLInputElement>("#search");const elSearchClear = $<HTMLButtonElement>("#search-clear");
+const elSort = $<HTMLSelectElement>("#sort");
+const elDensity = $<HTMLElement>("#density");
+const elClear = $<HTMLButtonElement>("#btn-clear");
+const elCount = $<HTMLElement>("#count");
+const elGrid = $<HTMLElement>("#grid");
+const elProgress = $<HTMLElement>("#progress");
+const elProgressFill = $<HTMLElement>("#progress-fill");
+const elProgressText = $<HTMLElement>("#progress-text");
+const elHint = $<HTMLElement>("#hint");
+const elCacheInfo = $<HTMLElement>("#cache-info");
+const elBanner = $<HTMLElement>("#banner");
+const elBannerText = $<HTMLElement>("#banner-text");
+const elBannerClose = $<HTMLButtonElement>("#banner-close");
+
+const elCullbar = $<HTMLElement>("#cullbar");
+const elCullInfo = $<HTMLElement>("#cullbar-info");
+const elBtnKeep = $<HTMLButtonElement>("#btn-keep");
+const elBtnReject = $<HTMLButtonElement>("#btn-reject");
+const elBtnUnmark = $<HTMLButtonElement>("#btn-unmark");
+const elStars = $<HTMLElement>("#cullbar-stars");
+const elBtnSelectAll = $<HTMLButtonElement>("#btn-select-all");
+const elBtnInvert = $<HTMLButtonElement>("#btn-invert");
+const elBtnSelectNone = $<HTMLButtonElement>("#btn-select-none");
+const elBtnExport = $<HTMLButtonElement>("#btn-export");
+
+const elLoupe = $<HTMLElement>("#loupe");
+const elLoupeImg = $<HTMLImageElement>("#loupe-img");
+const elLoupeName = $<HTMLElement>("#loupe-name");
+const elLoupeExif = $<HTMLElement>("#loupe-exif");
+const elLoupePos = $<HTMLElement>("#loupe-pos");
+const elLoupeClose = $<HTMLButtonElement>("#loupe-close");
+const elLoupePrev = $<HTMLButtonElement>("#loupe-prev");
+const elLoupeNext = $<HTMLButtonElement>("#loupe-next");
+const elLoupeKeep = $<HTMLButtonElement>("#loupe-keep");
+const elLoupeReject = $<HTMLButtonElement>("#loupe-reject");
+const elLoupeUnmark = $<HTMLButtonElement>("#loupe-unmark");
+const elLoupeMark = $<HTMLElement>("#loupe-mark");
+const elLoupeStars = $<HTMLElement>("#loupe-stars");
+const elLoupeZoomLabel = $<HTMLButtonElement>("#loupe-zoom-reset");
+const elLoupeZoomIn = $<HTMLButtonElement>("#loupe-zoom-in");
+const elLoupeZoomOut = $<HTMLButtonElement>("#loupe-zoom-out");
+const elLoupeZoomActual = $<HTMLButtonElement>("#loupe-zoom-actual");
+
+const elExportModal = $<HTMLElement>("#export-modal");
+const elExportScope = $<HTMLElement>("#export-scope");
+const elExportMode = $<HTMLElement>("#export-mode");
+const elExportCancel = $<HTMLButtonElement>("#export-cancel");
+const elExportConfirm = $<HTMLButtonElement>("#export-confirm");
+const elExportReveal = $<HTMLButtonElement>("#export-reveal");
+const elExportProgress = $<HTMLElement>("#export-progress");
+const elExportFill = $<HTMLElement>("#export-fill");
+const elExportProgressText = $<HTMLElement>("#export-progress-text");
+const elExportResult = $<HTMLElement>("#export-result");
+const elNoteKeep = $<HTMLElement>("#note-keep");
+const elNoteReject = $<HTMLElement>("#note-reject");
+const elNoteMarked = $<HTMLElement>("#note-marked");
+const elNoteAll = $<HTMLElement>("#note-all");
+const elNoteThumbs = $<HTMLElement>("#note-thumbs");
+
+const elCacheModal = $<HTMLElement>("#cache-modal");
+const elCacheThumbs = $<HTMLElement>("#cache-size-thumbs");
+const elCacheDb = $<HTMLElement>("#cache-size-db");
+const elCacheDecisions = $<HTMLElement>("#cache-size-decisions");
+const elCacheDir = $<HTMLElement>("#cache-dir");
+const elCacheScope = $<HTMLElement>("#cache-scope");
+const elCacheCancel = $<HTMLButtonElement>("#cache-cancel");
+const elCacheClear = $<HTMLButtonElement>("#cache-clear");
+
+// ---------------------------------------------------------------------------
+// 状态
+// ---------------------------------------------------------------------------
+
+const ROOT_KEY = "sp:root";
+const THEME_KEY = "sp:theme";
+const DEN_KEY = "sp:density";
+
+const PAGE_SIZE = 120;
+
+let rootPath: string | null = null;
+let scanning = false;
+
+let items: PairCard[] = [];
+let total = 0;
+let noMore = false;
+let loadingPage = false;
+/** 每次筛选条件变化就自增，用来丢弃过期请求的结果（防止旧页码插到新列表里）。 */
+let renderToken = 0;
+
+const filter: FilterState = {
+  pairState: "all",
+  cameraSerial: null,
+  day: null,
+  decision: "all",
+  stars: null,
+  search: "",
+  sort: "takenDesc",
+};
+
+/** 月份展开/折叠是用户明确选择过的，跨重新渲染要保住。 */
+const monthChoice = new Map<string, boolean>();
+
+/**
+ * 选中的照片（photos.id）。用 Set 是因为「选中」的判定在每个键盘事件里
+ * 都要发生，数组的 includes 在几千张时会开始拖手感。
+ *
+ * 选中和标记是两件事，刻意分开：选中说的是「我接下来要动的范围」，
+ * 标记说的是「我对这张照片的决定」。混成一个字段就没法表达
+ * 「把这一批全部标成保留」——那时候你既想保留它们，又想让它们继续被选中。
+ */
+const selection = new Set<number>();
+
+/** 按 id 找卡片数据。标记时要就地改数据再重画，不能重新发一次查询。 */
+const itemById = new Map<number, PairCard>();
+
+// ---------------------------------------------------------------------------
+// 工具
+// ---------------------------------------------------------------------------
+
+const baseName = (p: string) => p.split(/[\\/]/).pop() ?? p;
+
+const stem = (p: string) => {
+  const b = baseName(p);
+  const i = b.lastIndexOf(".");
+  return i > 0 ? b.slice(0, i) : b;
+};
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+function fmtExposure(c: PairCard): string {
+  const parts: string[] = [];
+  if (c.focalLen) parts.push(`${Math.round(c.focalLen)}mm`);
+  if (c.aperture) parts.push(`f/${c.aperture.toFixed(1)}`);
+  if (c.shutter) parts.push(c.shutter);
+  if (c.iso) parts.push(`ISO ${c.iso}`);
+  return parts.join(" · ");
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(0)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function setHint(text: string, tone: "ok" | "warn" | "error" = "ok") {
+  elHint.textContent = text;
+  elHint.classList.toggle("is-warn", tone === "warn");
+  elHint.classList.toggle("is-error", tone === "error");
+}
+
+const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+/** `2026-09-16` → `{ text: "09-16", weekday: "周三" }`（跨年时才带年份）。 */
+function dayParts(key: string): { text: string; weekday: string } {
+  const [y, m, d] = key.split("-").map(Number);
+  if (!y || !m || !d) return { text: key, weekday: "" };
+  const weekday = WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()] ?? "";
+  const thisYear = new Date().getFullYear();
+  const text = y === thisYear ? `${pad2(m)}-${pad2(d)}` : `${y}-${pad2(m)}-${pad2(d)}`;
+  return { text, weekday };
+}
+
+function monthLabel(ym: string): string {
+  const [y, m] = ym.split("-").map(Number);
+  if (!y || !m) return "无日期";
+  const thisYear = new Date().getFullYear();
+  return y === thisYear ? `${m} 月` : `${y} 年 ${m} 月`;
+}
+
+// ---------------------------------------------------------------------------
+// 主题
+// ---------------------------------------------------------------------------
+
+function applyTheme(theme: string) {
+  document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
+}
+
+function savedTheme(): string {
+  const stored = localStorage.getItem(THEME_KEY);
+  if (stored === "light" || stored === "dark") return stored;
+  // 摄影工具默认深色：照片在黑底上更准，眼睛也更省力
+  return "dark";
+}
+
+elTheme.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  applyTheme(next);
+  localStorage.setItem(THEME_KEY, next);
+});
+
+elBannerClose.addEventListener("click", () => {
+  elBanner.hidden = true;
+});
+
+/** 启动异常（比如数据库打不开）时，用一条醒目的横幅说清楚，而不是静默失败。 */
+async function showStartupError() {
+  try {
+    const msg = await invoke<string | null>("startup_status");
+    if (!msg) return;
+    elBannerText.textContent = msg;
+    elBanner.hidden = false;
+    setHint("数据库不可用，本次运行不会保存任何索引。", "error");
+  } catch {
+    /* 拿不到就算了，不影响主流程 */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 缩略图：4 路并发 + LRU
+//
+// 两个约束决定了这里的写法：
+// 1. 一次几千张，绝不能一上来就全要 —— 只有进入视口的卡片才发请求。
+// 2. 每张缩略图都要把原图解码一次（NEF 的预览往往是几千万像素），
+//    并发太高内存会炸，所以排一个 4 路的队。
+// ---------------------------------------------------------------------------
+
+const MAX_CONCURRENT = 4;
+/** 网格缩略图的缓存上限。512px 的 JPEG 约 30KB，900 张 ≈ 27MB。 */
+const GRID_CACHE_MAX = 900;
+/** 大图缓存单独一份、上限很低：1600px 一张就 170KB 上下，不能按网格的规模留。 */
+const LOUPE_CACHE_MAX = 40;
+/** 放大到 100% 用的高清档，一张几 MB，只留最近看过的两三张。 */
+const PREVIEW_CACHE_MAX = 3;
+
+const gridCache = new Map<number, ThumbPayload>();
+const loupeCache = new Map<number, ThumbPayload>();
+const previewCache = new Map<number, ThumbPayload>();
+const pending = new Map<string, Promise<ThumbPayload>>();
+let running = 0;
+const queue: Array<() => void> = [];
+
+function pump() {
+  while (running < MAX_CONCURRENT && queue.length > 0) {
+    const job = queue.shift()!;
+    running += 1;
+    job();
+  }
+}
+
+/** 插入即「最新使用」，从而让 Map 的插入顺序天然成为 LRU 顺序。 */
+function bump(cache: Map<number, ThumbPayload>, t: ThumbPayload) {
+  cache.delete(t.id);
+  cache.set(t.id, t);
+}
+
+function store(cache: Map<number, ThumbPayload>, max: number, t: ThumbPayload) {
+  bump(cache, t);
+  while (cache.size > max) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+/** 缩略图档位。4096 只在放大到 100% 时按需请求，常规浏览不会碰。 */
+type ThumbSize = 512 | 1600 | 4096;
+
+/** 同一个 id + 尺寸只会真正请求一次；重复请求复用同一个 Promise。 */
+function loadThumb(id: number, size: ThumbSize): Promise<ThumbPayload> {
+  const cache = size === 4096 ? previewCache : size === 1600 ? loupeCache : gridCache;
+  const hit = cache.get(id);
+  if (hit) {
+    bump(cache, hit);
+    return Promise.resolve(hit);
+  }
+
+  const key = `${id}:${size}`;
+  const inflight = pending.get(key);
+  if (inflight) return inflight;
+
+  const p = new Promise<ThumbPayload>((resolve, reject) => {
+    queue.push(() => {
+      invoke<ThumbPayload>("photo_thumbnail", { id, size })
+        .then((r) => {
+          // 后端可能按「顺带把 micro 也建了」的口径返回更大的尺寸，按实际尺寸归档
+          if (r.size >= 4096) store(previewCache, PREVIEW_CACHE_MAX, r);
+          else if (r.size >= 1600) store(loupeCache, LOUPE_CACHE_MAX, r);
+          else store(gridCache, GRID_CACHE_MAX, r);
+          resolve(r);
+        })
+        .catch(reject)
+        .finally(() => {
+          pending.delete(key);
+          running -= 1;
+          pump();
+        });
+    });
+    pump();
+  });
+
+  pending.set(key, p);
+  return p;
+}
+
+// ---------------------------------------------------------------------------
+// 卡片
+// ---------------------------------------------------------------------------
+
+function cardEl(c: PairCard): HTMLElement {
+  const card = document.createElement("article");
+  card.className = "card";
+  card.dataset.id = String(c.id);
+  card.dataset.state = "idle";
+  card.tabIndex = 0;
+  card.title = c.path;
+
+  const ph = document.createElement("span");
+  ph.className = "shot-placeholder";
+
+  const img = document.createElement("img");
+  img.className = "shot-img";
+  img.alt = stem(c.path);
+  img.decoding = "async";
+  img.hidden = true;
+
+  // 左上角的保留/淘汰圆勾。内容与显隐都由 paintCard 决定——
+  // 标记是会在原地反复变化的状态，不适合在建 DOM 时一次定死。
+  const mark = document.createElement("span");
+  mark.className = "card-mark";
+
+  const overlay = document.createElement("div");
+  overlay.className = "card-overlay";
+
+  const foot = document.createElement("div");
+  foot.className = "card-foot";
+
+  const name = document.createElement("div");
+  name.className = "card-name";
+  name.textContent = stem(c.path);
+  foot.appendChild(name);
+
+  if (c.takenAtText) {
+    const time = document.createElement("span");
+    time.className = "card-time";
+    time.textContent = c.takenAtText.slice(11);
+    foot.appendChild(time);
+  }
+
+  const stars = document.createElement("span");
+  stars.className = "card-stars";
+  foot.appendChild(stars);
+
+  const sub = document.createElement("div");
+  sub.className = "card-sub";
+  const bits = [fmtExposure(c)].filter(Boolean);
+  if (bits.length > 0) {
+    const span = document.createElement("span");
+    span.textContent = bits.join(" · ");
+    sub.appendChild(span);
+  }
+  overlay.append(foot, sub);
+
+  card.append(ph, img, mark, overlay);
+
+  // 徽标只给「配对不完整」的照片——正常照片不该被任何标签打扰
+  const broken = BROKEN_LABEL[c.pairState];
+  if (broken) {
+    const badge = document.createElement("span");
+    badge.className = "card-badge";
+    badge.textContent = broken;
+    card.appendChild(badge);
+  }
+
+  paintCard(card, c);
+  return card;
+}
+
+/**
+ * 把一张卡片的选片状态刷到 DOM 上。
+ *
+ * 标记之后只调这个，不重新渲染卡片：重新渲染会丢掉已经解码好的缩略图，
+ * 每次按 P 都要等图重新出来一遍，手感就废了。
+ */
+function paintCard(card: HTMLElement, c: PairCard) {
+  card.dataset.decision = c.decision;
+  card.dataset.sel = selection.has(c.id) ? "1" : "0";
+
+  const mark = card.querySelector<HTMLElement>(".card-mark");
+  if (mark) {
+    mark.textContent = c.decision === "keep" ? "✓" : c.decision === "reject" ? "✕" : "";
+  }
+
+  const stars = card.querySelector<HTMLElement>(".card-stars");
+  if (stars) {
+    stars.textContent = c.stars > 0 ? "★".repeat(c.stars) : "";
+  }
+}
+
+async function hydrate(card: HTMLElement) {
+  const id = Number(card.dataset.id);
+  if (!id) return;
+  if (card.dataset.state === "loading" || card.dataset.state === "ready") return;
+
+  const img = card.querySelector<HTMLImageElement>(".shot-img");
+  const ph = card.querySelector<HTMLElement>(".shot-placeholder");
+  if (!img || !ph) return;
+
+  card.dataset.state = "loading";
+  try {
+    const t = await loadThumb(id, 512);
+    // 期间可能被滚远了（状态被改回 idle），那就不要白占内存
+    if (card.dataset.state !== "loading") return;
+    img.src = t.dataUrl;
+    img.hidden = false;
+    ph.hidden = true;
+    ph.classList.remove("shot-placeholder--error");
+    if (t.sourceWidth) {
+      img.title = `${t.sourceWidth}×${t.sourceHeight} 像素 · 来源：${
+        ROUTE_LABEL[t.route] ?? t.route
+      }`;
+    }
+    card.dataset.state = "ready";
+  } catch (e) {
+    if (card.dataset.state !== "loading") return;
+    card.dataset.state = "error";
+    ph.hidden = false;
+    ph.classList.add("shot-placeholder--error");
+    ph.textContent = "预览提取失败";
+    ph.title = String(e);
+  }
+}
+
+/** 把已经解码好的位图还给系统（数据 URL 仍留在 JS 缓存里，回来时秒恢复）。 */
+function unloadThumb(card: HTMLElement) {
+  if (card.dataset.state !== "ready") return;
+  const img = card.querySelector<HTMLImageElement>(".shot-img");
+  const ph = card.querySelector<HTMLElement>(".shot-placeholder");
+  if (!img || !ph) return;
+  img.removeAttribute("src");
+  img.hidden = true;
+  ph.hidden = false;
+  card.dataset.state = "idle";
+}
+
+// 近处：进入视口就取图（提前一屏，滚动时不会看到空白）
+const nearObserver = new IntersectionObserver(
+  (entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      nearObserver.unobserve(entry.target);
+      void hydrate(entry.target as HTMLElement);
+    }
+  },
+  { root: elGrid, rootMargin: "800px 0px" }
+);
+
+// 远处：离得足够远的卡片释放位图。三千张 DOM 里若每张都挂着 512px 位图，
+// 光解码后的像素就是好几个 GB。
+const farObserver = new IntersectionObserver(
+  (entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) continue;
+      unloadThumb(entry.target as HTMLElement);
+    }
+  },
+  { root: elGrid, rootMargin: "2400px 0px" }
+);
+
+// ---------------------------------------------------------------------------
+// 网格渲染与分页
+// ---------------------------------------------------------------------------
+
+function observeCard(card: HTMLElement) {
+  nearObserver.observe(card);
+  farObserver.observe(card);
+}
+
+function currentFilterPayload() {
+  return {
+    pairState: filter.pairState,
+    cameraSerial: filter.cameraSerial,
+    day: filter.day,
+    // 「全部」在后端是不筛，用一个空值表达最清楚
+    decision: filter.decision === "all" ? null : filter.decision,
+    stars: filter.stars,
+    search: filter.search,
+    sort: filter.sort,
+  };
+}
+
+/** 有没有任何一个筛选条件在生效。决定「清除筛选」按钮显不显示。 */
+function isFiltered(): boolean {
+  return (
+    filter.pairState !== "all" ||
+    filter.cameraSerial !== null ||
+    filter.day !== null ||
+    filter.decision !== "all" ||
+    filter.stars !== null ||
+    filter.search.trim() !== ""
+  );
+}
+
+/**
+ * 当前筛选里有没有依赖「选片状态」的条件。
+ *
+ * 有依赖时，标记会让照片从当前视图里消失（这正是「只看未标记」时想要的效果——
+ * 一屏一屏地清空）。没有依赖时就不动它，免得照片毫无理由地跳走。
+ */
+function filterTracksMarks(): boolean {
+  return filter.decision !== "all" || filter.stars !== null;
+}
+
+async function reload() {
+  renderToken += 1;
+  const token = renderToken;
+
+  items = [];
+  total = 0;
+  noMore = false;
+  itemById.clear();
+  selection.clear();
+  nearObserver.disconnect();
+  farObserver.disconnect();
+  elGrid.innerHTML = "";
+  elGrid.scrollTop = 0;
+  updateCount();
+  updateCullInfo();
+
+  await loadMore(token);
+}
+
+async function loadMore(token: number) {
+  if (loadingPage || noMore || token !== renderToken) return;
+  loadingPage = true;
+
+  try {
+    const page = await invoke<PairPage>("list_pairs", {
+      filter: currentFilterPayload(),
+      limit: PAGE_SIZE,
+      offset: items.length,
+    });
+    if (token !== renderToken) return;
+
+    total = page.total;
+
+    if (page.items.length === 0) {
+      noMore = true;
+    } else {
+      items.push(...page.items);
+      appendCards(page.items);
+    }
+    if (items.length >= total) noMore = true;
+
+    updateCount();
+    if (items.length === 0) renderEmpty();
+
+    // 首屏没填满时继续取，直到出现滚动条或取完
+    if (!noMore && elGrid.scrollHeight <= elGrid.clientHeight + 200) {
+      loadingPage = false;
+      return loadMore(token);
+    }
+  } catch (e) {
+    setHint(`读取图库失败：${String(e)}`, "error");
+    noMore = true;
+  } finally {
+    loadingPage = false;
+  }
+}
+
+function appendCards(list: PairCard[]) {
+  const frag = document.createDocumentFragment();
+  const cards: HTMLElement[] = [];
+  for (const c of list) {
+    itemById.set(c.id, c);
+    const card = cardEl(c);
+    frag.appendChild(card);
+    cards.push(card);
+  }
+  elGrid.appendChild(frag);
+  // 必须先入 DOM 再 observe，否则 IntersectionObserver 拿不到位置
+  for (const card of cards) observeCard(card);
+}
+
+function updateCount() {
+  elClear.hidden = !isFiltered();
+  // 图库空的时候，一整条选片操作栏只是噪声——它要操作的东西还不存在
+  elCullbar.hidden = total === 0 && items.length === 0;
+
+  // 按钮的可用状态取决于「有没有选中」「库里有东西」，两件事都在总数变化时才会变
+  updateCullInfo();
+
+  if (total === 0 && items.length === 0) {
+    elCount.textContent = "";
+    return;
+  }
+  const parts = [`${total.toLocaleString()} 张`];
+  if (items.length < total) parts.push(`已加载 ${items.length.toLocaleString()}`);
+  if (loadingPage && items.length > 0) parts.push("读取中…");
+  elCount.textContent = parts.join(" · ");
+}
+
+function renderEmpty() {
+  elGrid.innerHTML = "";
+
+  const filtered = isFiltered();
+
+  const box = document.createElement("div");
+  box.className = "empty";
+
+  if (total === 0 && !filtered) {
+    // 图库是空的：给一个明确的下一步
+    box.innerHTML = `
+      <svg class="empty-icon" viewBox="0 0 48 48" aria-hidden="true">
+        <path d="M4 12a3 3 0 0 1 3-3h9l3.5 4H41a3 3 0 0 1 3 3v20a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V12Z"
+              fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+        <circle cx="17" cy="24" r="4" fill="none" stroke="currentColor" stroke-width="2.2"/>
+        <path d="M26 30l6-6 8 8" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>`;
+    const title = document.createElement("div");
+    title.className = "empty-title";
+    title.textContent = "还没有照片";
+    const text = document.createElement("div");
+    text.className = "empty-text";
+    text.textContent =
+      "选择一次拍摄的文件夹，扫描和缩略图都会自动完成，不用再点任何按钮。NEF 和 JPG 会按「一次快门」自动配对，所以卡片数就是你实际拍的张数。选完之后按 P 保留、X 淘汰，← → 翻页。";
+    const btn = document.createElement("button");
+    btn.className = "btn btn-primary";
+    btn.textContent = "选择文件夹";
+    btn.addEventListener("click", () => void pickFolder());
+    box.append(title, text, btn);
+  } else {
+    const title = document.createElement("div");
+    title.className = "empty-title";
+    title.textContent = "没有符合条件的照片";
+    const text = document.createElement("div");
+    text.className = "empty-text";
+    text.textContent = "当前筛选条件下没有结果。放宽一个条件再试试。";
+    box.append(title, text);
+  }
+
+  elGrid.appendChild(box);
+}
+
+elGrid.addEventListener(
+  "scroll",
+  () => {
+    if (elGrid.scrollHeight - elGrid.scrollTop - elGrid.clientHeight < 1400) {
+      void loadMore(renderToken);
+    }
+  },
+  { passive: true }
+);
+
+// ---------------------------------------------------------------------------
+// 筛选栏
+// ---------------------------------------------------------------------------
+
+function facetButton(opts: {
+  facet: string;
+  key: string;
+  label: string;
+  count: number;
+  active: boolean;
+  warn?: boolean;
+  extra?: HTMLElement;
+}): HTMLElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "facet";
+  b.dataset.facet = opts.facet;
+  b.dataset.key = opts.key;
+  if (opts.active) b.classList.add("is-active");
+  b.setAttribute("aria-pressed", String(opts.active));
+
+  if (opts.warn) {
+    const dot = document.createElement("span");
+    dot.className = "facet-dot";
+    b.appendChild(dot);
+  }
+
+  const label = document.createElement("span");
+  label.className = "facet-label";
+  label.textContent = opts.label;
+  label.title = opts.label;
+  b.appendChild(label);
+
+  if (opts.extra) b.appendChild(opts.extra);
+
+  const count = document.createElement("span");
+  count.className = "facet-count";
+  count.textContent = opts.count.toLocaleString();
+  b.appendChild(count);
+
+  return b;
+}
+
+function renderPairFacets(f: LibraryFacets) {
+  elFacetsPair.innerHTML = "";
+  for (const it of f.pairStates) {
+    elFacetsPair.appendChild(
+      facetButton({
+        facet: "pairState",
+        key: it.key,
+        label: it.label,
+        count: it.count,
+        active: filter.pairState === it.key,
+        warn: it.key === "orphan" && it.count > 0,
+      })
+    );
+  }
+}
+
+function renderDecisionFacets(f: LibraryFacets) {
+  elFacetsDecision.innerHTML = "";
+  for (const it of f.decisions) {
+    elFacetsDecision.appendChild(
+      facetButton({
+        facet: "decision",
+        key: it.key,
+        label: it.label,
+        count: it.count,
+        active: filter.decision === it.key,
+      })
+    );
+  }
+}
+
+function renderStarFacets(f: LibraryFacets) {
+  elFacetsStars.innerHTML = "";
+  for (const it of f.stars) {
+    elFacetsStars.appendChild(
+      facetButton({
+        facet: "stars",
+        key: it.key,
+        label: it.label,
+        count: it.count,
+        active: filter.stars === Number(it.key),
+      })
+    );
+  }
+}
+
+function renderCameraFacets(f: LibraryFacets) {
+  elFacetsCameras.innerHTML = "";
+  if (f.cameras.length === 0) {
+    const none = document.createElement("div");
+    none.className = "facet";
+    none.style.cursor = "default";
+    none.textContent = "—";
+    elFacetsCameras.appendChild(none);
+    return;
+  }
+
+  elFacetsCameras.appendChild(
+    facetButton({
+      facet: "camera",
+      key: "",
+      label: "全部机身",
+      count: f.total,
+      active: filter.cameraSerial === null,
+    })
+  );
+
+  for (const c of f.cameras) {
+    elFacetsCameras.appendChild(
+      facetButton({
+        facet: "camera",
+        key: c.key,
+        label: c.label,
+        count: c.count,
+        active: filter.cameraSerial === c.key,
+      })
+    );
+  }
+}
+
+function renderDayFacets(f: LibraryFacets) {
+  elFacetsDays.innerHTML = "";
+  elDaysNote.textContent = f.daysTruncated ? "（仅最近若干天）" : "";
+
+  elFacetsDays.appendChild(
+    facetButton({
+      facet: "day",
+      key: "",
+      label: "全部日期",
+      count: f.total,
+      active: filter.day === null,
+    })
+  );
+
+  // 按月份分组：几百天的时候，没有分组会翻到崩溃
+  const dated = f.days.filter((d) => d.key !== NONE_KEY);
+  const undated = f.days.filter((d) => d.key === NONE_KEY);
+
+  const groups = new Map<string, Facet[]>();
+  for (const d of dated) {
+    const ym = d.key.slice(0, 7);
+    const arr = groups.get(ym);
+    if (arr) arr.push(d);
+    else groups.set(ym, [d]);
+  }
+
+  let monthIndex = 0;
+  for (const [ym, list] of groups) {
+    // 默认只展开最近两个月，其余折叠——侧栏一屏放不下几百天。
+    // 用户手动展开过的月份记在 monthChoice 里，重新渲染时不会被默认值盖掉。
+    const collapsed = monthChoice.get(ym) ?? monthIndex >= 2;
+    const holdsActive = filter.day !== null && filter.day.startsWith(ym);
+
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "month";
+    if (collapsed && !holdsActive) head.classList.add("is-collapsed");
+    head.dataset.month = ym;
+
+    const caret = document.createElement("svg");
+    caret.setAttribute("viewBox", "0 0 12 12");
+    caret.classList.add("month-caret");
+    caret.innerHTML = `<path d="m4 2 4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`;
+
+    const name = document.createElement("span");
+    name.textContent = monthLabel(ym);
+
+    const sum = document.createElement("span");
+    sum.className = "month-count";
+    sum.textContent = list.reduce((a, b) => a + b.count, 0).toLocaleString();
+
+    head.append(caret, name, sum);
+
+    const wrap = document.createElement("div");
+    wrap.className = "month-days";
+
+    for (const d of list) {
+      const { text, weekday } = dayParts(d.key);
+      const wd = document.createElement("span");
+      wd.className = "facet-weekday";
+      wd.textContent = weekday;
+      const btn = facetButton({
+        facet: "day",
+        key: d.key,
+        label: text,
+        count: d.count,
+        active: filter.day === d.key,
+        extra: wd,
+      });
+      btn.classList.add("facet--day");
+      wrap.appendChild(btn);
+    }
+
+    elFacetsDays.append(head, wrap);
+    monthIndex += 1;
+  }
+
+  for (const d of undated) {
+    elFacetsDays.appendChild(
+      facetButton({
+        facet: "day",
+        key: NONE_KEY,
+        label: "无时间信息",
+        count: d.count,
+        active: filter.day === NONE_KEY,
+        warn: true,
+      })
+    );
+  }
+}
+
+elFacetsDays.addEventListener("click", (e) => {
+  const month = (e.target as HTMLElement).closest<HTMLElement>(".month");
+  if (!month?.dataset.month) return;
+  // 读 DOM 上的现状而不是我们以为的状态，展开/折叠永远自洽
+  const nowCollapsed = month.classList.contains("is-collapsed");
+  monthChoice.set(month.dataset.month, !nowCollapsed);
+  month.classList.toggle("is-collapsed", !nowCollapsed);
+});
+
+async function loadFacets() {
+  const f = await invoke<LibraryFacets>("library_facets");
+
+  if (f.total === 0) {
+    // 图库空的时候别摆一排 0，一句话说清就够了
+    for (const host of [
+      elFacetsDecision,
+      elFacetsStars,
+      elFacetsPair,
+      elFacetsCameras,
+      elFacetsDays,
+    ]) {
+      host.innerHTML = "";
+    }
+    const none = document.createElement("div");
+    none.className = "facet facet--none";
+    none.textContent = "图库还没有照片";
+    elFacetsDecision.appendChild(none);
+    elDaysNote.textContent = "";
+    return;
+  }
+
+  renderDecisionFacets(f);
+  renderStarFacets(f);
+  renderPairFacets(f);
+  renderCameraFacets(f);
+  renderDayFacets(f);
+}
+
+/**
+ * 只刷新侧栏计数，不重新拉列表。
+ *
+ * 标记之后每次都要更新计数（「未标记」的数字要往下掉），但重新拉一遍
+ * 整个列表会让网格闪一下、滚动位置也会丢——按 P 的时候那种顿挫就是它造成的。
+ */
+async function refreshFacetCounts() {
+  try {
+    const f = await invoke<LibraryFacets>("library_facets");
+    if (f.total === 0) return;
+    renderDecisionFacets(f);
+    renderStarFacets(f);
+  } catch {
+    /* 计数刷不上不影响标记本身 */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 筛选交互（事件委托：侧栏里的按钮是重建的，逐个绑会漏）
+// ---------------------------------------------------------------------------
+
+document.querySelector(".sidebar")?.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLElement>(".facet");
+  if (!btn?.dataset.facet || btn.dataset.key === undefined) return;
+  if (btn.style.cursor === "default") return;
+
+  const facet = btn.dataset.facet;
+  const key = btn.dataset.key;
+
+  if (facet === "pairState") {
+    filter.pairState = key;
+  } else if (facet === "camera") {
+    // 再点一次当前项＝取消这个条件，省得每次都跑去找「全部」
+    filter.cameraSerial = key === "" || key === filter.cameraSerial ? null : key;
+  } else if (facet === "day") {
+    filter.day = key === "" || key === filter.day ? null : key;
+  } else if (facet === "decision") {
+    // 和上面几维一样的规矩：再点一次当前项就回到「全部」
+    filter.decision = key === "all" || key === filter.decision ? "all" : key;
+  } else if (facet === "stars") {
+    const n = Number(key);
+    filter.stars = filter.stars === n ? null : n;
+  }
+
+  void applyFilterChange();
+});
+
+async function applyFilterChange() {
+  await loadFacets();
+  await reload();
+}
+
+elClear.addEventListener("click", () => {
+  filter.pairState = "all";
+  filter.cameraSerial = null;
+  filter.day = null;
+  filter.decision = "all";
+  filter.stars = null;
+  filter.search = "";
+  elSearch.value = "";
+  elSearchClear.hidden = true;
+  void applyFilterChange();
+});
+
+elSort.addEventListener("change", () => {
+  filter.sort = elSort.value;
+  void reload();
+});
+
+// 缩略图大小：粗筛时用紧凑一屏看更多，终选时用大图看细节
+elDensity.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-density]");
+  if (!btn?.dataset.density) return;
+  const density = btn.dataset.density;
+  if (density === "normal") delete elGrid.dataset.density;
+  else elGrid.dataset.density = density;
+  for (const b of elDensity.querySelectorAll("button")) {
+    b.classList.toggle("is-active", b === btn);
+  }
+  localStorage.setItem(DEN_KEY, density);
+});
+
+let searchTimer: number | undefined;
+elSearch.addEventListener("input", () => {
+  window.clearTimeout(searchTimer);
+  elSearchClear.hidden = elSearch.value === "";
+  searchTimer = window.setTimeout(() => {
+    filter.search = elSearch.value;
+    void reload();
+  }, 260);
+});
+
+elSearchClear.addEventListener("click", () => {
+  elSearch.value = "";
+  elSearchClear.hidden = true;
+  filter.search = "";
+  void reload();
+});
+
+// ---------------------------------------------------------------------------
+// 选片
+//
+// 整个应用的主循环在这里：选一张 → 按 P 或 X → 自动跳下一张 → 重复。
+// 三个细节决定了它好不好用：
+// 1. 标记先改画面、再落库（乐观更新）。等一次 IPC 再变色，连按几下就是「黏」。
+// 2. 落库失败要把画面退回去并明说——静默失败比慢得多更伤人。
+// 3. 标完自动前进。选片是几千次重复动作，每一下省掉的按键都乘以几千。
+// ---------------------------------------------------------------------------
+
+/** Shift 范围选择的锚点：上一次单击/切换的那张。 */
+let selAnchor: number | null = null;
+
+const DECISION_LABEL: Record<Decision, string> = {
+  none: "未标记",
+  keep: "保留",
+  reject: "淘汰",
+};
+
+function cardOf(id: number): HTMLElement | null {
+  return elGrid.querySelector<HTMLElement>(`.card[data-id="${id}"]`);
+}
+
+/** 把一批 id 重新画一遍。传 id 而不是卡片，是因为要画的往往正是没渲染的那些。 */
+function repaint(ids: Iterable<number>) {
+  for (const id of ids) {
+    const c = itemById.get(id);
+    const el = cardOf(id);
+    if (c && el) paintCard(el, c);
+  }
+}
+
+function updateCullInfo() {
+  const loupeOpen = !elLoupe.hidden;
+
+  if (loupeOpen) {
+    // 大图里信息条已经被照片参数占满，别再加一行
+    elCullInfo.textContent = "";
+  } else if (selection.size > 0) {
+    elCullInfo.textContent = `已选 ${selection.size.toLocaleString()} 张 —— P 保留 · X 淘汰 · U 清除`;
+  } else {
+    elCullInfo.textContent = "单击选中 · 双击看大图 · 选中后按 P / X";
+  }
+
+  const hasTarget = loupeOpen || selection.size > 0;
+  elBtnKeep.disabled = !hasTarget;
+  elBtnReject.disabled = !hasTarget;
+  elBtnUnmark.disabled = !hasTarget;
+  for (const b of elStars.querySelectorAll<HTMLButtonElement>("button")) {
+    b.disabled = !hasTarget;
+    // 只选了一张时，把它的星级点亮到操作栏上——想调整时照着点就行
+    const n = Number(b.dataset.stars);
+    const sole = selection.size === 1 ? itemById.get([...selection][0]) : undefined;
+    b.classList.toggle("is-active", !!sole && n > 0 && sole.stars >= n);
+  }
+  elBtnSelectNone.disabled = selection.size === 0;
+  elBtnInvert.disabled = total === 0;
+}
+
+function syncSelection() {
+  // 只改已经渲染出来的卡片。没渲染的那些不在 DOM 里，
+  // 但它们的数据还在 selection 里，等哪天被渲染出来时 paintCard 会自己补上。
+  for (const card of elGrid.querySelectorAll<HTMLElement>(".card")) {
+    const id = Number(card.dataset.id);
+    card.dataset.sel = selection.has(id) ? "1" : "0";
+  }
+  updateCullInfo();
+}
+
+function selectOnly(id: number) {
+  selection.clear();
+  selection.add(id);
+  selAnchor = id;
+  syncSelection();
+}
+
+function toggleSelected(id: number) {
+  if (selection.has(id)) selection.delete(id);
+  else selection.add(id);
+  selAnchor = id;
+  syncSelection();
+}
+
+/** Shift 范围选择：从锚点到目标，按**当前列表顺序**取中间全部。 */
+function selectRangeTo(id: number) {
+  const to = items.findIndex((c) => c.id === id);
+  if (to < 0) return;
+
+  let from = selAnchor === null ? -1 : items.findIndex((c) => c.id === selAnchor);
+  if (from < 0) from = to;
+
+  const [lo, hi] = from <= to ? [from, to] : [to, from];
+  for (let i = lo; i <= hi; i += 1) selection.add(items[i].id);
+  selAnchor = id;
+  syncSelection();
+}
+
+function clearSelection() {
+  selection.clear();
+  syncSelection();
+}
+
+/** 当前筛选下的**全部** id，由后端算——不能只拿滚出来的那几页。 */
+async function allMatchingIds(): Promise<number[]> {
+  try {
+    return await invoke<number[]>("list_pair_ids", { filter: currentFilterPayload() });
+  } catch (e) {
+    setHint(`读取照片列表失败：${String(e)}`, "error");
+    return [];
+  }
+}
+
+async function selectAll() {
+  const ids = await allMatchingIds();
+  if (ids.length === 0) {
+    setHint("当前筛选下没有照片可选。", "warn");
+    return;
+  }
+  selection.clear();
+  for (const id of ids) selection.add(id);
+  selAnchor = ids[0];
+  syncSelection();
+  setHint(`已选中 ${ids.length.toLocaleString()} 张（当前筛选下的全部）。按一下 P 或 X 一次标记完。`);
+}
+
+async function invertSelection() {
+  const ids = await allMatchingIds();
+  if (ids.length === 0) return;
+  for (const id of ids) {
+    if (selection.has(id)) selection.delete(id);
+    else selection.add(id);
+  }
+  syncSelection();
+}
+
+/**
+ * 这一次标记落在谁身上。
+ *
+ * 大图打开时就是眼前这一张：在大图里，你只可能在判断这一张，
+ * 让它去操作背后被选中的那一批是反直觉的，而且看不见后果。
+ * 网格里则是当前选中的那一批。
+ */
+function markTargets(): number[] {
+  if (!elLoupe.hidden) {
+    const c = items[loupeIndex];
+    return c ? [c.id] : [];
+  }
+  return [...selection];
+}
+
+/** 一张卡片在当前筛选下还应该出现吗。只在筛选涉及选片状态时才需要问。 */
+function stillMatches(c: PairCard): boolean {
+  if (filter.decision === "marked") {
+    if (c.decision === "none") return false;
+  } else if (filter.decision !== "all" && c.decision !== filter.decision) {
+    return false;
+  }
+  if (filter.stars !== null && c.stars !== filter.stars) return false;
+  return true;
+}
+
+/**
+ * 把标记过的照片从网格里拿掉。
+ *
+ * 只在筛选依赖选片状态时调用。这时候「标记」的语义就是「处理完了，别再让我看见」——
+ * 一屏一屏地清空，是选片里最爽的一环。
+ *
+ * 用直接摘 DOM 而不是重新查询：重新查询会把滚动位置和已经解码好的缩略图全丢掉，
+ * 连按 P 的时候就会一直闪。
+ */
+function dropFromView(ids: Set<number>): boolean {
+  if (ids.size === 0) return false;
+
+  let removed = 0;
+  const kept: PairCard[] = [];
+  for (const c of items) {
+    if (!ids.has(c.id)) {
+      kept.push(c);
+      continue;
+    }
+    const el = cardOf(c.id);
+    if (el) {
+      nearObserver.unobserve(el);
+      farObserver.unobserve(el);
+      el.remove();
+    }
+    itemById.delete(c.id);
+    selection.delete(c.id);
+    removed += 1;
+  }
+
+  if (removed === 0) return false;
+  items = kept;
+  // 被拿掉的一定是「当前筛选下符合条件」的那些，所以总数直接减就行
+  total = Math.max(0, total - removed);
+  updateCount();
+  return true;
+}
+
+function revealCard(id: number) {
+  cardOf(id)?.scrollIntoView({ block: "nearest" });
+}
+
+/**
+ * 网格没填满就继续取下一页。
+ *
+ * 只在滚动时补页是不够的：「只看未标记」时按几下 P 把当前这屏清空，
+ * 网格会变得比窗口还短——这时候不会再有任何滚动事件，
+ * 新的照片就永远不出现了，看起来像「没了」。
+ */
+function fillIfNeeded() {
+  if (noMore || loadingPage) return;
+  if (elGrid.scrollHeight <= elGrid.clientHeight + 200) {
+    void loadMore(renderToken);
+  }
+}
+
+/**
+ * 应用一次标记。`patch` 里没给的项就不动——
+ * 这样「只改星级」不会把已经做好的保留/淘汰决定冲掉。
+ */
+async function applyPatch(patch: { decision?: Decision; stars?: number }) {
+  const ids = markTargets();
+  if (ids.length === 0) {
+    setHint("先单击选中一张照片，或双击打开大图，再按 P / X。", "warn");
+    return;
+  }
+
+  const inLoupe = !elLoupe.hidden;
+  const current = inLoupe ? items[loupeIndex] : undefined;
+  const anchorIdx = items.findIndex((c) => c.id === ids[0]);
+
+  // ---- 乐观更新：先把画面改对，再等数据库确认 ----
+  const backup: Array<{ c: PairCard; decision: Decision; stars: number }> = [];
+  for (const id of ids) {
+    const c = itemById.get(id);
+    if (!c) continue;
+    backup.push({ c, decision: c.decision, stars: c.stars });
+
+    if (patch.decision !== undefined) {
+      c.decision = patch.decision;
+      // 「清除」要连星级一起清，否则会留下「未标记但有三颗星」这种看不懂的组合
+      if (patch.decision === "none") c.stars = 0;
+    }
+    if (patch.stars !== undefined) c.stars = patch.stars;
+  }
+  repaint(backup.map((b) => b.c.id));
+
+  try {
+    await invoke<number>("apply_decision", {
+      ids,
+      decision: patch.decision ?? null,
+      stars: patch.stars ?? null,
+    });
+  } catch (e) {
+    for (const b of backup) {
+      b.c.decision = b.decision;
+      b.c.stars = b.stars;
+    }
+    repaint(backup.map((b) => b.c.id));
+    setHint(`标记没能保存：${String(e)}`, "error");
+    return;
+  }
+
+  // 侧栏计数要立刻跟着动——「未标记」少一张是最直接的进度反馈
+  void refreshFacetCounts();
+
+  // ---- 处理掉的照片该不该离开当前视图 ----
+  const gone = new Set<number>();
+  if (filterTracksMarks()) {
+    for (const b of backup) if (!stillMatches(b.c)) gone.add(b.c.id);
+  }
+  const dropped = dropFromView(gone);
+  if (dropped) fillIfNeeded();
+
+  // ---- 自动前进 ----
+  //
+  // 保留/淘汰＝过片：一个键处理一张，手不离开键盘，这是选片真正的手感所在。
+  // 打星＝评价：**不前进**。按完 3 星还停在这张上，觉得该给 5 星就再按 5，
+  // 反悔了按 0——评价本来就要反复掂量，跳走了还谈什么调整。
+  // 批量标记＝一次批处理：清掉选择，免得下一次误按又把整批重标一遍。
+  const advance = patch.decision !== undefined;
+
+  if (inLoupe) {
+    if (dropped && current && gone.has(current.id)) {
+      // 当前这张被筛选拿掉了，同一个索引现在指的就是下一张
+      if (items.length === 0) closeLoupe();
+      else void openLoupe(Math.min(loupeIndex, items.length - 1));
+      return;
+    }
+    if (advance) {
+      stepLoupe(1);
+    } else {
+      // 停在原地：刷新大图上的星级显示，按钮点亮状态跟着走
+      const c = items[loupeIndex];
+      if (c) paintLoupeMark(c);
+      setHint(
+        c && c.stars > 0
+          ? `${"★".repeat(c.stars)} —— 再按 1-5 可调整，按 0 清除`
+          : "已清除星级",
+      );
+    }
+    return;
+  }
+
+  if (!advance) {
+    // 网格里打星同样不挪选中：停在这张上，随时按别的数字调整
+    syncSelection();
+    if (ids.length === 1) {
+      const c = itemById.get(ids[0]);
+      if (c) {
+        setHint(
+          c.stars > 0
+            ? `${"★".repeat(c.stars)} —— 再按 1-5 可调整，按 0 清除`
+            : "已清除星级",
+        );
+      }
+    }
+    return;
+  }
+
+  const single = ids.length === 1;
+  const next = single ? (dropped ? anchorIdx : anchorIdx + 1) : -1;
+
+  selection.clear();
+  if (next >= 0 && next < items.length) {
+    selection.add(items[next].id);
+    selAnchor = items[next].id;
+    revealCard(items[next].id);
+  }
+  syncSelection();
+}
+
+function applyDecision(d: Decision) {
+  void applyPatch({ decision: d });
+}
+
+function applyStars(n: number) {
+  void applyPatch({ stars: n });
+}
+
+// ---- 操作栏与网格的事件绑定 ----
+
+elBtnKeep.addEventListener("click", () => applyDecision("keep"));
+elBtnReject.addEventListener("click", () => applyDecision("reject"));
+elBtnUnmark.addEventListener("click", () => applyDecision("none"));
+elLoupeKeep.addEventListener("click", () => applyDecision("keep"));
+elLoupeReject.addEventListener("click", () => applyDecision("reject"));
+elLoupeUnmark.addEventListener("click", () => applyDecision("none"));
+
+elStars.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-stars]");
+  if (!btn?.dataset.stars) return;
+  applyStars(Number(btn.dataset.stars));
+});
+
+// 大图里的星按钮：markTargets 在大图打开时就是当前这一张，
+// 所以点哪儿改的就是眼前这张——打完不跳走，接着点就能调整。
+elLoupeStars.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-stars]");
+  if (!btn?.dataset.stars) return;
+  applyStars(Number(btn.dataset.stars));
+});
+
+elBtnSelectAll.addEventListener("click", () => void selectAll());
+elBtnInvert.addEventListener("click", () => void invertSelection());
+elBtnSelectNone.addEventListener("click", clearSelection);
+
+elGrid.addEventListener("click", (e) => {
+  const card = (e.target as HTMLElement).closest<HTMLElement>(".card");
+  if (!card) return;
+  const id = Number(card.dataset.id);
+  if (!id) return;
+
+  if (e.metaKey || e.ctrlKey) toggleSelected(id);
+  else if (e.shiftKey) selectRangeTo(id);
+  else selectOnly(id);
+});
+
+// 双击看大图。单击留给「选中」——选片时选中比看用得频繁得多，
+// 而看大图另外还有回车、空格两条路。
+elGrid.addEventListener("dblclick", (e) => {
+  const card = (e.target as HTMLElement).closest<HTMLElement>(".card");
+  if (!card) return;
+  const idx = items.findIndex((c) => String(c.id) === card.dataset.id);
+  if (idx >= 0) void openLoupe(idx);
+});
+
+// ---------------------------------------------------------------------------
+// 导出
+//
+// 「选完之后呢？」——这是选片必须回答的问题。答案是一份复制出来的好片，
+// 加一份清单。**不动原片**：不删、不移、不改名。淘汰的照片也只是被记下来，
+// 真正要删的时候由你自己动手；那张照片只被拍过一次，程序没有资格替你决定。
+// ---------------------------------------------------------------------------
+
+let lastExport: ExportSummary | null = null;
+
+function currentChoice(group: HTMLElement): string {
+  return group.querySelector<HTMLInputElement>("input:checked")?.value ?? "";
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"]/g, (c) =>
+    c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : "&quot;"
+  );
+}
+
+function showExportResult(html: string) {
+  elExportResult.innerHTML = html;
+  elExportResult.hidden = false;
+}
+
+function showExportProgress(p: ExportProgress) {
+  const label =
+    p.phase === "copying" ? "正在复制文件" : p.phase === "manifest" ? "正在写清单" : "正在整理";
+
+  if (p.total > 0) {
+    elExportFill.classList.remove("is-indeterminate");
+    elExportFill.style.width = `${Math.round((p.done / p.total) * 100)}%`;
+    elExportProgressText.textContent = `${label} ${p.done.toLocaleString()} / ${p.total.toLocaleString()}`;
+  } else {
+    elExportFill.classList.add("is-indeterminate");
+    elExportProgressText.textContent = label;
+  }
+}
+
+async function openExportDialog() {
+  let facets: LibraryFacets | null = null;
+  try {
+    facets = await invoke<LibraryFacets>("library_facets");
+  } catch {
+    /* 拿不到计数就把选项留空，不挡住导出本身 */
+  }
+  const count = (key: string) => facets?.decisions.find((d) => d.key === key)?.count ?? 0;
+  const fmt = (n: number) => `${n.toLocaleString()} 张`;
+
+  const keep = count("keep");
+  const reject = count("reject");
+  elNoteKeep.textContent = fmt(keep);
+  elNoteReject.textContent = fmt(reject);
+  elNoteMarked.textContent = fmt(keep + reject);
+  // 「全部」跟着当前筛选走，所以这里给的是筛选后的总数
+  elNoteAll.textContent = total > 0 ? fmt(total) : "";
+
+  elExportProgress.hidden = true;
+  elExportResult.hidden = true;
+  elExportReveal.hidden = true;
+  elExportConfirm.textContent = "选择文件夹并导出";
+  // 只有图库真的是空的才没得导——「全部」这一项任何时候都能用
+  elExportConfirm.disabled = total === 0;
+  elExportModal.hidden = false;
+}
+
+function closeExportDialog() {
+  elExportModal.hidden = true;
+}
+
+elBtnExport.addEventListener("click", () => void openExportDialog());
+elExportCancel.addEventListener("click", closeExportDialog);
+elExportModal.addEventListener("click", (e) => {
+  if (e.target === elExportModal) closeExportDialog();
+});
+
+elExportReveal.addEventListener("click", () => {
+  if (!lastExport) return;
+  // 在访达/资源管理器里把清单文件选出来，比只给一个路径有用
+  void revealItemInDir(lastExport.manifest).catch(() => {
+    setHint(`清单在：${lastExport?.manifest ?? ""}`);
+  });
+});
+
+elExportConfirm.addEventListener("click", () => {
+  void runExport();
+});
+
+async function runExport() {
+  const scope = currentChoice(elExportScope);
+  const mode = currentChoice(elExportMode);
+  if (!scope || !mode) return;
+
+  const dest = await open({ directory: true, multiple: false, title: "导出到哪个文件夹" });
+  if (typeof dest !== "string") return;
+
+  elExportConfirm.disabled = true;
+  elExportProgress.hidden = false;
+  elExportResult.hidden = true;
+  elExportReveal.hidden = true;
+  elExportFill.classList.add("is-indeterminate");
+  elExportFill.style.width = "0%";
+  elExportProgressText.textContent = "正在整理…";
+
+  try {
+    const summary = await invoke<ExportSummary>("export_selection", {
+      // 范围只由这个对话框决定（keep / reject / marked / all），
+      // 日期、机身、搜索这些条件继续生效——「把这一天的保留都导出」是最常用的组合。
+      // scope 为 "all" 时后端认不出这个取值，于是不按选片状态筛，正好是我们要的意思。
+      filter: { ...currentFilterPayload(), decision: scope },
+      dest,
+      mode,
+    });
+    lastExport = summary;
+
+    const lines: string[] = [];
+    if (mode === "copy") {
+      lines.push(
+        `复制了 <strong>${summary.copied.toLocaleString()}</strong> 个文件（${fmtBytes(summary.bytes)}），` +
+          `涉及 <strong>${summary.photos.toLocaleString()}</strong> 张照片`
+      );
+      if (summary.skipped > 0) {
+        lines.push(
+          `跳过 <strong>${summary.skipped.toLocaleString()}</strong> 个：目标文件夹里已经有同样大小的同名文件`
+        );
+      }
+      if (summary.failed > 0) {
+        lines.push(`<strong>${summary.failed.toLocaleString()}</strong> 个复制失败，原片还在原处`);
+      }
+    } else {
+      lines.push(`清单里共 <strong>${summary.photos.toLocaleString()}</strong> 张照片，没有复制文件`);
+    }
+    lines.push(`清单：<span class="result-path">${escapeHtml(summary.manifest)}</span>`);
+    showExportResult(lines.join("<br>"));
+    elExportReveal.hidden = false;
+    setHint(`导出完成（用时 ${(summary.elapsedMs / 1000).toFixed(1)} 秒）。原片一张没动。`);
+  } catch (e) {
+    showExportResult(`导出失败：${escapeHtml(String(e))}`);
+  } finally {
+    elExportProgress.hidden = true;
+    elExportFill.classList.remove("is-indeterminate");
+    elExportConfirm.disabled = false;
+    elExportConfirm.textContent = "再导出一次";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 扫描
+// ---------------------------------------------------------------------------
+
+function renderRoot() {
+  if (!rootPath) {
+    elRootChip.hidden = true;
+    return;
+  }
+  elRootChip.hidden = false;
+  elRootPath.textContent = rootPath;
+  elRootPath.title = rootPath;
+  elRootPath.parentElement?.setAttribute("title", rootPath);
+}
+
+const PHASE_LABEL: Record<ScanProgress["phase"], string> = {
+  walking: "正在遍历目录…",
+  parsing: "读取元数据",
+  writing: "写入索引…",
+  stats: "统计配对…",
+};
+
+function showProgress(p: ScanProgress) {
+  elProgress.hidden = false;
+  const label = PHASE_LABEL[p.phase] ?? p.phase;
+
+  if (p.phase === "parsing" && p.total > 0) {
+    elProgressFill.classList.remove("is-indeterminate");
+    elProgressFill.style.width = `${Math.round((p.done / p.total) * 100)}%`;
+    elProgressText.textContent = `${label} ${p.done.toLocaleString()} / ${p.total.toLocaleString()}`;
+  } else if (p.phase === "walking") {
+    elProgressFill.classList.add("is-indeterminate");
+    elProgressText.textContent = label;
+  } else {
+    elProgressFill.classList.remove("is-indeterminate");
+    elProgressFill.style.width = "100%";
+    elProgressText.textContent = label;
+  }
+}
+
+function hideProgress() {
+  elProgress.hidden = true;
+  elProgressFill.classList.remove("is-indeterminate");
+  elProgressFill.style.width = "0%";
+}
+
+function summaryText(r: ScanSummary): string {
+  const secs = (r.elapsedMs / 1000).toFixed(1);
+  if (r.scanned === 0) {
+    return `这个文件夹里没找到 NEF / JPG（用时 ${secs} 秒）。`;
+  }
+  const bits = [
+    `识别 ${r.scanned} 个文件`,
+    `配对 ${r.pairs} 张照片`,
+    `用时 ${secs} 秒`,
+  ];
+  if (r.inserted) bits.splice(1, 0, `新增 ${r.inserted}`);
+  if (r.updated) bits.splice(1, 0, `更新 ${r.updated}`);
+  if (r.removed) bits.push(`清理 ${r.removed}`);
+  if (r.failed) bits.push(`${r.failed} 个读不了`);
+  if (r.exifFailed) bits.push(`${r.exifFailed} 个无 EXIF`);
+  if (r.orphanRaw || r.orphanJpg) bits.push(`孤立 ${r.orphanRaw + r.orphanJpg}（左侧可筛）`);
+  return bits.join(" · ");
+}
+
+async function startScan(path: string, opts: { quiet: boolean }) {
+  if (scanning) return;
+  scanning = true;
+  elPick.disabled = true;
+  elRescan.disabled = true;
+  elProgressFill.classList.add("is-indeterminate");
+  elProgressText.textContent = "准备中…";
+  elProgress.hidden = false;
+
+  try {
+    const r = await invoke<ScanSummary>("scan_folder", { path });
+
+    const changed = r.inserted + r.updated + r.removed;
+    if (opts.quiet && changed === 0) {
+      // 启动时的自动重扫：图库没变化就别重排界面，免得白闪一下
+      setHint(`图库已是最新（${r.pairs.toLocaleString()} 张，检查用时 ${(r.elapsedMs / 1000).toFixed(1)} 秒）`);
+    } else {
+      setHint(summaryText(r), r.failed || r.exifFailed ? "warn" : "ok");
+      await refreshLibrary();
+    }
+  } catch (e) {
+    const msg = String(e);
+    if (msg.includes("目录不存在") || msg.includes("不是文件夹")) {
+      setHint(`文件夹访问不到：${path}（外置盘没插？）—— 图库内容仍然可用`, "warn");
+    } else {
+      setHint(`扫描失败：${msg}`, "error");
+    }
+  } finally {
+    scanning = false;
+    elPick.disabled = false;
+    elRescan.disabled = !rootPath;
+    hideProgress();
+    void refreshCacheInfo();
+  }
+}
+
+async function pickFolder() {
+  const picked = await open({ directory: true, multiple: false, title: "选择照片文件夹" });
+  if (typeof picked !== "string") return;
+
+  rootPath = picked;
+  localStorage.setItem(ROOT_KEY, picked);
+  renderRoot();
+  elRescan.disabled = false;
+  elRootMeta.textContent = "";
+
+  // 选完即扫，扫完自动出图——不需要任何额外的点击
+  setHint("正在扫描…缩略图会在过程中逐张出现。");
+  await startScan(picked, { quiet: false });
+}
+
+elPick.addEventListener("click", () => void pickFolder());
+
+elRescan.addEventListener("click", () => {
+  if (rootPath) void startScan(rootPath, { quiet: false });
+});
+
+// ---------------------------------------------------------------------------
+// 图库刷新
+// ---------------------------------------------------------------------------
+
+async function refreshLibrary() {
+  await loadFacets();
+  await reload();
+  await loadStats();
+  void refreshCacheInfo();
+}
+
+async function loadStats() {
+  try {
+    const s = await invoke<LibraryStats>("library_stats");
+    elRootMeta.textContent = s.pairs > 0 ? `${s.pairs.toLocaleString()} 张` : "";
+    if (!rootPath && s.pairs > 0) {
+      setHint(`图库里有 ${s.pairs.toLocaleString()} 张照片（${s.cameras} 台机身）。选一次拍摄的文件夹开始。`);
+    }
+  } catch {
+    /* 统计失败不影响主流程 */
+  }
+}
+
+/** 最近一次拿到的占用情况。清理前后各取一次，差值就是这次释放的空间。 */
+let lastCache: CacheStats | null = null;
+
+async function refreshCacheInfo() {
+  try {
+    const c = await invoke<CacheStats>("cache_stats");
+    lastCache = c;
+    renderCacheInfo(c);
+  } catch {
+    elCacheInfo.textContent = "";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 缓存清理
+//
+// 缩略图缓存是唯一会自己长大的东西（看过的每张照片都留 2~3 份 JPEG），
+// 也是唯一「删了无所谓」的东西——原片没动，下次浏览重新抠一次预览就回来。
+// 所以清理入口必须让人分得清三件事：能放心删的、删了要重扫的、删了就没了的。
+// ---------------------------------------------------------------------------
+
+function renderCacheInfo(c: CacheStats) {
+  const total = c.thumbsBytes + c.dbBytes;
+  elCacheInfo.textContent = total > 0 ? `缓存 ${fmtBytes(total)}` : "";
+  elCacheInfo.classList.toggle("is-link", total > 0);
+  if (total > 0) {
+    elCacheInfo.title =
+      `缩略图 ${fmtBytes(c.thumbsBytes)}（${c.thumbsFiles.toLocaleString()} 个文件）\n` +
+      `索引库 ${fmtBytes(c.dbBytes)}\n${c.thumbsDir}\n\n点这里清理`;
+  } else {
+    elCacheInfo.removeAttribute("title");
+  }
+}
+
+function paintCacheStats(c: CacheStats) {
+  elCacheThumbs.textContent =
+    c.thumbsFiles > 0
+      ? `${fmtBytes(c.thumbsBytes)} · ${c.thumbsFiles.toLocaleString()} 个文件`
+      : "空";
+  elCacheDb.textContent =
+    c.photos > 0
+      ? `${fmtBytes(c.dbBytes)} · ${c.photos.toLocaleString()} 张照片`
+      : `${fmtBytes(c.dbBytes)} · 无索引`;
+  elCacheDecisions.textContent = c.decisions > 0 ? `${c.decisions.toLocaleString()} 张` : "无";
+  elCacheDir.textContent = `缓存目录：${c.thumbsDir}`;
+  elNoteThumbs.textContent =
+    c.thumbsBytes > 0
+      ? `释放约 ${fmtBytes(c.thumbsBytes)}；索引和选片标记都在，下次浏览自动重建`
+      : "当前没有缩略图缓存";
+}
+
+async function openCacheDialog() {
+  elCacheModal.hidden = false;
+  elCacheClear.disabled = true;
+  elCacheThumbs.textContent = "读取中…";
+  elCacheDb.textContent = "读取中…";
+  elCacheDecisions.textContent = "读取中…";
+  elCacheDir.textContent = "";
+
+  try {
+    const c = await invoke<CacheStats>("cache_stats");
+    lastCache = c;
+    paintCacheStats(c);
+    elCacheClear.disabled = c.thumbsBytes + c.dbBytes === 0;
+  } catch (e) {
+    elCacheThumbs.textContent = "读取失败";
+    elCacheClear.disabled = true;
+    setHint(`读取缓存占用失败：${String(e)}`, "error");
+  }
+}
+
+function closeCacheDialog() {
+  elCacheModal.hidden = true;
+}
+
+async function runClearCache() {
+  const scope = currentChoice(elCacheScope);
+  if (!scope) return;
+
+  if (scope === "all") {
+    const n = lastCache?.decisions ?? 0;
+    const ok = await confirm(
+      n > 0
+        ? `会把 ${n.toLocaleString()} 张照片的保留 / 淘汰和星级一起删除，删掉之后找不回来。\n\n原片不受影响。确定继续吗？`
+        : "会清空照片索引和全部选片标记（当前没有已标记的照片）。\n\n原片不受影响。确定继续吗？",
+      { title: "全部清空", kind: "warning" }
+    );
+    if (!ok) return;
+  }
+
+  const before = (lastCache?.thumbsBytes ?? 0) + (lastCache?.dbBytes ?? 0);
+  elCacheClear.disabled = true;
+
+  try {
+    const after = await invoke<CacheStats>("clear_cache", { scope });
+    lastCache = after;
+    paintCacheStats(after);
+    renderCacheInfo(after);
+
+    // 前端内存里也缓存着一批 dataUrl，不清的话「占用」看着像没变
+    gridCache.clear();
+    loupeCache.clear();
+
+    const freed = Math.max(0, before - after.thumbsBytes - after.dbBytes);
+    const what = scope === "thumbs" ? "缩略图缓存" : scope === "index" ? "照片索引和缓存" : "全部数据";
+    setHint(
+      `已清理${what}，释放 ${fmtBytes(freed)}。原片一张没动。` +
+        (scope === "thumbs" ? "" : rootPath ? " 点「重新扫描」可重建索引。" : " 选一个文件夹即可重建索引。")
+    );
+
+    // 索引没了，界面上还挂着已经不存在的照片——必须重新拉一次
+    if (scope !== "thumbs") {
+      selection.clear();
+      await refreshLibrary();
+    }
+  } catch (e) {
+    setHint(`清理失败：${String(e)}`, "error");
+  } finally {
+    elCacheClear.disabled = false;
+  }
+}
+
+elCache.addEventListener("click", () => void openCacheDialog());
+// 页脚那个「缓存 128 MB」也是入口——数字本身就在提醒人去清理
+elCacheInfo.addEventListener("click", () => {
+  if (elCacheInfo.classList.contains("is-link")) void openCacheDialog();
+});
+elCacheCancel.addEventListener("click", closeCacheDialog);
+elCacheClear.addEventListener("click", () => void runClearCache());
+elCacheModal.addEventListener("click", (e) => {
+  if (e.target === elCacheModal) closeCacheDialog();
+});
+
+// ---------------------------------------------------------------------------
+// 大图查看
+// ---------------------------------------------------------------------------
+
+let loupeIndex = -1;
+
+// ---------------------------------------------------------------------------
+// 大图缩放
+//
+// 放大不是为了「看得更大」，是为了看清这张有没有对上焦。所以三件事必须同时成立：
+// 1. 手不用离开鼠标键盘就能缩放和平移（滚轮 / 双击 / 拖拽 / 按钮 / 快捷键）；
+// 2. 放大后要有更多像素可看——1600px 放大两倍就糊了，得按需换高清档；
+// 3. 翻页自动回到整图，不会一不小心停在 400% 上翻完整组。
+// ---------------------------------------------------------------------------
+
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 8;
+/** 双击一步到这个倍率：够看细节，又不至于一步飞进去找不着北。 */
+const ZOOM_DBL = 2.5;
+
+let zoom = ZOOM_MIN;
+let panX = 0;
+let panY = 0;
+/** 当前显示的这张图自身有多少像素宽，用来算「1:1」到底是几倍。 */
+let naturalW = 0;
+/** 当前用上的档位。高清档换上去之后就不再重复替换。 */
+let loupeSrcSize = 0;
+
+/**
+ * 图片「适应窗口」时的中心与尺寸。
+ *
+ * 注意 `getBoundingClientRect()` 读的是变换后的盒子，所以要把 pan 减掉才是基准值。
+ * 调用前提是 rect 与当前 pan 同步——也就是每次改完 pan/zoom 都立刻 apply 过。
+ */
+function baseBox(): Box {
+  const r = elLoupeImg.getBoundingClientRect();
+  return {
+    cx: r.left + r.width / 2 - panX,
+    cy: r.top + r.height / 2 - panY,
+    w: r.width / zoom,
+    h: r.height / zoom,
+  };
+}
+
+/** 把平移限制在「图边刚好贴住视口边」之内，别把图拖出视野。 */
+function clampPan(b: Box) {
+  const next = zoomMath.clampPan(
+    { x: panX, y: panY },
+    zoom,
+    b,
+    { w: window.innerWidth, h: window.innerHeight },
+  );
+  panX = next.x;
+  panY = next.y;
+}
+
+/** 「一个图像素占一个屏幕像素」时的倍率。图片还没加载出来时给 1。 */
+function actualZoom(): number {
+  // 布局宽度不受 transform 影响，所以放大之后再问 1:1 是多少倍，答案依然对
+  return zoomMath.actualZoom(naturalW, elLoupeImg.offsetWidth, ZOOM_MAX);
+}
+
+function applyZoom() {
+  elLoupeImg.style.transform =
+    zoom <= ZOOM_MIN && panX === 0 && panY === 0
+      ? ""
+      : `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  elLoupeZoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+  elLoupe.classList.toggle("is-zoomed", zoom > ZOOM_MIN);
+  elLoupeZoomActual.classList.toggle("is-active", Math.abs(zoom - actualZoom()) < 0.01);
+}
+
+/** 以屏幕上某点为锚点缩放——滚轮、双击都靠它，鼠标底下那一点必须纹丝不动。 */
+function zoomAt(mx: number, my: number, next: number) {
+  const b = baseBox();
+  const target = zoomMath.clampZoom(next, ZOOM_MIN, ZOOM_MAX);
+  const p = zoomMath.panForZoomAt({ x: mx, y: my }, b, { x: panX, y: panY }, zoom, target);
+  zoom = target;
+  panX = p.x;
+  panY = p.y;
+  clampPan(b);
+  applyZoom();
+  const c = items[loupeIndex];
+  if (c) scheduleDetail(c);
+}
+
+/** 以图片当前中心为锚点缩放，给键盘和 ± 按钮用。 */
+function zoomBy(factor: number) {
+  const r = elLoupeImg.getBoundingClientRect();
+  zoomAt(r.left + r.width / 2, r.top + r.height / 2, zoom * factor);
+}
+
+function resetZoom() {
+  zoom = ZOOM_MIN;
+  panX = 0;
+  panY = 0;
+  applyZoom();
+}
+
+// ---- 按需加载高清档 ----
+//
+// 4096px 那档一张就是几 MB，所以只在真的放大了才去要。1600px 顶着先看着，
+// 高清档到了再悄悄换上——倍率和平移都不变，视觉上只是突然变清晰。
+
+let detailTimer: number | undefined;
+let detailBusy = false;
+
+function scheduleDetail(c: PairCard) {
+  window.clearTimeout(detailTimer);
+  if (zoom <= 1.05) return;
+  // 停顿一下再要：滚轮连续放大时，中途那些倍率不值得各生成一次大图
+  detailTimer = window.setTimeout(() => void loadDetail(c), 220);
+}
+
+async function loadDetail(c: PairCard) {
+  if (detailBusy || items[loupeIndex]?.id !== c.id) return;
+  if (loupeSrcSize >= 4096) return;
+  const cached = previewCache.get(c.id);
+  if (cached) {
+    swapLoupeSrc(cached);
+    return;
+  }
+  detailBusy = true;
+  try {
+    const t = await loadThumb(c.id, 4096);
+    if (items[loupeIndex]?.id !== c.id) return;
+    swapLoupeSrc(t);
+  } catch {
+    // 高清档拿不到就继续用 1600，不打扰正在选片的人
+  } finally {
+    detailBusy = false;
+  }
+}
+
+function swapLoupeSrc(t: ThumbPayload) {
+  if (t.size <= loupeSrcSize) return;
+  // 先解码再替换，避免中间闪一下空白
+  const img = new Image();
+  img.onload = () => {
+    if (items[loupeIndex]?.id !== t.id) return;
+    loupeSrcSize = t.size;
+    elLoupeImg.src = t.dataUrl;
+    naturalW = img.naturalWidth;
+    elLoupeImg.title = `${t.sourceWidth}×${t.sourceHeight} 像素 · 来源：${
+      ROUTE_LABEL[t.route] ?? t.route
+    }`;
+    applyZoom();
+  };
+  img.src = t.dataUrl;
+}
+
+// ---- 交互 ----
+
+elLoupeImg.addEventListener("load", () => {
+  naturalW = elLoupeImg.naturalWidth;
+  applyZoom();
+});
+
+elLoupe.addEventListener(
+  "wheel",
+  (e) => {
+    if (elLoupe.hidden) return;
+    e.preventDefault();
+    // 触控板会连发几十个小 delta，用指数映射，手感才是连续的而不是一格一跳
+    zoomAt(e.clientX, e.clientY, zoom * Math.exp(-e.deltaY * 0.0022));
+  },
+  { passive: false },
+);
+
+elLoupeImg.addEventListener("dblclick", (e) => {
+  if (zoom > ZOOM_MIN) resetZoom();
+  else zoomAt(e.clientX, e.clientY, ZOOM_DBL);
+});
+
+let dragging = false;
+let dragBase: Box = { cx: 0, cy: 0, w: 0, h: 0 };
+let dragFrom = { x: 0, y: 0, panX: 0, panY: 0 };
+
+elLoupeImg.addEventListener("pointerdown", (e) => {
+  if (zoom <= ZOOM_MIN) return;
+  dragging = true;
+  dragBase = baseBox(); // 拖动期间视口不变，基准量一次就够
+  dragFrom = { x: e.clientX, y: e.clientY, panX, panY };
+  elLoupeImg.setPointerCapture(e.pointerId);
+  elLoupe.classList.add("is-grabbing");
+  // 这里不能 preventDefault：那会连掉后续的 click/dblclick，「双击缩小」就废了。
+  // 原生拖图和选中文字交给 CSS（user-select / -webkit-user-drag）和下面的 dragstart 拦。
+});
+
+// 放大后拖着图走，Safari/Chrome 会想把图片本身拖出去
+elLoupeImg.addEventListener("dragstart", (e) => e.preventDefault());
+
+elLoupeImg.addEventListener("pointermove", (e) => {
+  if (!dragging) return;
+  panX = dragFrom.panX + (e.clientX - dragFrom.x);
+  panY = dragFrom.panY + (e.clientY - dragFrom.y);
+  clampPan(dragBase);
+  applyZoom();
+});
+
+function endDrag(e: PointerEvent) {
+  if (!dragging) return;
+  dragging = false;
+  elLoupe.classList.remove("is-grabbing");
+  if (elLoupeImg.hasPointerCapture(e.pointerId)) elLoupeImg.releasePointerCapture(e.pointerId);
+}
+elLoupeImg.addEventListener("pointerup", endDrag);
+elLoupeImg.addEventListener("pointercancel", endDrag);
+
+elLoupeZoomIn.addEventListener("click", () => zoomBy(1.4));
+elLoupeZoomOut.addEventListener("click", () => zoomBy(1 / 1.4));
+elLoupeZoomLabel.addEventListener("click", () => resetZoom());
+elLoupeZoomActual.addEventListener("click", () => {
+  const z = actualZoom();
+  if (Math.abs(zoom - z) < 0.01) {
+    resetZoom();
+    return;
+  }
+  const r = elLoupeImg.getBoundingClientRect();
+  zoomAt(r.left + r.width / 2, r.top + r.height / 2, z);
+});
+
+// 窗口一改尺寸，适应窗口的基准就变了，继续保留倍率只会算出错误的平移边界
+window.addEventListener("resize", () => {
+  if (!elLoupe.hidden) resetZoom();
+});
+
+/** 大图底部那行「已保留 · ★★★」，顺便把星按钮的点亮状态刷对。空着就是还没标记。 */
+function paintLoupeMark(c: PairCard) {
+  const bits: string[] = [];
+  if (c.decision !== "none") bits.push(`已${DECISION_LABEL[c.decision]}`);
+  if (c.stars > 0) bits.push("★".repeat(c.stars));
+  elLoupeMark.textContent = bits.join(" · ");
+
+  // 点亮到当前星级为止的每一颗——点亮的数字本身也是可点的调整入口
+  for (const b of elLoupeStars.querySelectorAll<HTMLButtonElement>("button[data-stars]")) {
+    const n = Number(b.dataset.stars);
+    b.classList.toggle("is-active", n > 0 && c.stars >= n);
+  }
+}
+
+async function openLoupe(index: number) {
+  const c = items[index];
+  if (!c) return;
+  loupeIndex = index;
+  elLoupe.hidden = false;
+  // 换一张就是从头看：倍率、平移、高清档标记全部归零
+  resetZoom();
+  naturalW = 0;
+  loupeSrcSize = 0;
+  window.clearTimeout(detailTimer);
+  elLoupePos.textContent = `${index + 1} / ${items.length}`;
+
+  elLoupeName.textContent = baseName(c.path);
+  const exif = [
+    PAIR_LABEL[c.pairState],
+    c.cameraModel ?? "",
+    fmtExposure(c),
+    c.takenAtText ?? "",
+  ].filter(Boolean);
+  elLoupeExif.textContent = exif.join(" · ");
+  paintLoupeMark(c);
+  updateCullInfo();
+
+  elLoupeImg.removeAttribute("src");
+  elLoupeImg.alt = stem(c.path);
+  elLoupeImg.classList.add("is-loading");
+
+  try {
+    const t = await loadThumb(c.id, 1600);
+    if (loupeIndex !== index) return; // 期间已经翻页了
+    loupeSrcSize = t.size;
+    elLoupeImg.src = t.dataUrl;
+    elLoupeImg.title = `${t.sourceWidth}×${t.sourceHeight} 像素 · 来源：${
+      ROUTE_LABEL[t.route] ?? t.route
+    }`;
+  } catch (e) {
+    if (loupeIndex !== index) return;
+    elLoupeExif.textContent = `预览提取失败：${String(e)}`;
+  } finally {
+    if (loupeIndex === index) elLoupeImg.classList.remove("is-loading");
+  }
+}
+
+function closeLoupe() {
+  loupeIndex = -1;
+  elLoupe.hidden = true;
+  elLoupeImg.removeAttribute("src");
+  loupeSrcSize = 0;
+  window.clearTimeout(detailTimer);
+  resetZoom();
+  updateCullInfo();
+}
+
+function stepLoupe(delta: number) {
+  if (loupeIndex < 0) return;
+  const next = loupeIndex + delta;
+  if (next < 0 || next >= items.length) return;
+  void openLoupe(next);
+}
+
+elLoupeClose.addEventListener("click", closeLoupe);
+elLoupePrev.addEventListener("click", () => stepLoupe(-1));
+elLoupeNext.addEventListener("click", () => stepLoupe(1));
+elLoupe.addEventListener("click", (e) => {
+  if (e.target === elLoupe) closeLoupe();
+});
+
+/** 正在输入框里打字时，字母键不该被当成快捷键抢走。 */
+function typingInField(e: KeyboardEvent): boolean {
+  const t = e.target as HTMLElement | null;
+  if (!t) return false;
+  return (
+    t.tagName === "INPUT" ||
+    t.tagName === "TEXTAREA" ||
+    t.tagName === "SELECT" ||
+    t.isContentEditable
+  );
+}
+
+/** 焦点在按钮上时，回车/空格是「按这个按钮」，不该被我们抢去开大图。 */
+function onWidget(e: KeyboardEvent): boolean {
+  const t = e.target as HTMLElement | null;
+  return !!t && (t.tagName === "BUTTON" || t.tagName === "A");
+}
+
+/** 网格当前是几列。方向键要按视觉上的上下左右移动，就得知道这个。 */
+function gridColumns(): number {
+  const tracks = getComputedStyle(elGrid).gridTemplateColumns;
+  return Math.max(1, tracks.split(" ").filter(Boolean).length);
+}
+
+/** 方向键挪选中。没选中任何东西时，从第一张开始。 */
+function moveSelection(delta: number) {
+  if (items.length === 0) return;
+  const current = items.findIndex((c) => selection.has(c.id));
+  const next = current < 0 ? 0 : Math.min(items.length - 1, Math.max(0, current + delta));
+  selectOnly(items[next].id);
+  revealCard(items[next].id);
+}
+
+window.addEventListener("keydown", (e) => {
+  const meta = e.metaKey || e.ctrlKey;
+  const key = e.key;
+
+  // 导出对话框打开时，它才是当前的焦点
+  if (!elExportModal.hidden) {
+    if (key === "Escape") {
+      e.preventDefault();
+      closeExportDialog();
+    }
+    return;
+  }
+
+  // 清理对话框同理
+  if (!elCacheModal.hidden) {
+    if (key === "Escape") {
+      e.preventDefault();
+      closeCacheDialog();
+    }
+    return;
+  }
+
+  // ⌘A / Ctrl+A 全选。在输入框里就还给浏览器（选中文字）。
+  if (meta && key.toLowerCase() === "a") {
+    if (typingInField(e)) return;
+    e.preventDefault();
+    void selectAll();
+    return;
+  }
+
+  if (typingInField(e)) return;
+
+  // ---- 大图 ----
+  if (!elLoupe.hidden) {
+    if (key === "Escape") {
+      e.preventDefault();
+      closeLoupe();
+      return;
+    }
+    if (key === "ArrowRight") {
+      e.preventDefault();
+      stepLoupe(1);
+      return;
+    }
+    if (key === "ArrowLeft") {
+      e.preventDefault();
+      stepLoupe(-1);
+      return;
+    }
+
+    // 缩放：+ 放大、- 缩小、F 复位、A 到 1:1。
+    // 0 已经被「清除星级」占了，所以复位不用 0。
+    const lower = key.toLowerCase();
+    if (key === "+" || key === "=") {
+      e.preventDefault();
+      zoomBy(1.4);
+      return;
+    }
+    if (key === "-" || key === "_") {
+      e.preventDefault();
+      zoomBy(1 / 1.4);
+      return;
+    }
+    if (lower === "f") {
+      e.preventDefault();
+      resetZoom();
+      return;
+    }
+    if (lower === "a") {
+      e.preventDefault();
+      elLoupeZoomActual.click();
+      return;
+    }
+
+    // 标记完自动跳下一张——这就是选片的手感：一个键处理一张，手不离开键盘
+    if (lower === "p") {
+      e.preventDefault();
+      applyDecision("keep");
+      return;
+    }
+    if (lower === "x") {
+      e.preventDefault();
+      applyDecision("reject");
+      return;
+    }
+    if (lower === "u") {
+      e.preventDefault();
+      applyDecision("none");
+      return;
+    }
+    if (/^[0-5]$/.test(key)) {
+      e.preventDefault();
+      applyStars(Number(key));
+    }
+    return;
+  }
+
+  // ---- 网格 ----
+  if (key === "Escape") {
+    clearSelection();
+    return;
+  }
+
+  if (key === "Enter" || key === " ") {
+    if (onWidget(e)) return;
+    e.preventDefault();
+    const idx = items.findIndex((c) => selection.has(c.id));
+    if (idx >= 0) void openLoupe(idx);
+    else if (items.length > 0) selectOnly(items[0].id);
+    return;
+  }
+
+  if (key === "ArrowRight" || key === "ArrowLeft" || key === "ArrowDown" || key === "ArrowUp") {
+    e.preventDefault();
+    if (key === "ArrowRight") moveSelection(1);
+    else if (key === "ArrowLeft") moveSelection(-1);
+    else if (key === "ArrowDown") moveSelection(gridColumns());
+    else moveSelection(-gridColumns());
+    return;
+  }
+
+  if (key === "/") {
+    e.preventDefault();
+    elSearch.focus();
+    return;
+  }
+
+  const lower = key.toLowerCase();
+  if (lower === "p") {
+    e.preventDefault();
+    applyDecision("keep");
+    return;
+  }
+  if (lower === "x") {
+    e.preventDefault();
+    applyDecision("reject");
+    return;
+  }
+  if (lower === "u") {
+    e.preventDefault();
+    applyDecision("none");
+    return;
+  }
+  if (/^[0-5]$/.test(key)) {
+    e.preventDefault();
+    applyStars(Number(key));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 启动
+// ---------------------------------------------------------------------------
+
+async function boot() {
+  applyTheme(savedTheme());
+
+  const savedDensity = localStorage.getItem(DEN_KEY);
+  if (savedDensity) {
+    if (savedDensity !== "normal") elGrid.dataset.density = savedDensity;
+    for (const b of elDensity.querySelectorAll<HTMLButtonElement>("button")) {
+      b.classList.toggle("is-active", b.dataset.density === savedDensity);
+    }
+  }
+
+  await listen<ScanProgress>("scan://progress", (e) => showProgress(e.payload));
+  await listen<ExportProgress>("export://progress", (e) => showExportProgress(e.payload));
+  await showStartupError();
+
+  updateCullInfo();
+
+  // 恢复上次的文件夹，先把已有索引铺出来（不等待扫描）
+  const savedRoot = localStorage.getItem(ROOT_KEY);
+  if (savedRoot) {
+    rootPath = savedRoot;
+    renderRoot();
+    elRescan.disabled = false;
+    setHint("正在载入图库…");
+  }
+
+  await refreshLibrary();
+
+  if (savedRoot) {
+    // 图库铺好之后再增量重扫：文件没变的话是纯 stat，秒级完成，
+    // 没有这一步就不会发现「刚拷进来的一批新照片」。
+    void startScan(savedRoot, { quiet: true });
+  } else if (total === 0) {
+    setHint("选择一个装有 NEF / JPG 的文件夹，选完会自动扫描并出图。");
+  }
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  void boot().catch((e) => {
+    setHint(`初始化失败：${String(e)}`, "error");
+  });
+});

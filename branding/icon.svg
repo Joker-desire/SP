@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- 米白渐变：比纯白柔和，贴着稿 B 的暖调 -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#F8F0E1"/>
+      <stop offset="0.55" stop-color="#F2E7D3"/>
+      <stop offset="1" stop-color="#E9DAC0"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EA8A17"/>
+      <stop offset="1" stop-color="#D9700A"/>
+    </linearGradient>
+    <!-- 极浅的内描边，让圆角在海报/DMG 背景上也能立起来 -->
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#C9B48C" stop-opacity="0.45"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 圆角底板：macOS 图标是在方形画布上画圆角，圆角外必须透明 -->
+  <rect x="0" y="0" width="1024" height="1024" rx="228" ry="228" fill="url(#bg)"/>
+  <rect x="3" y="3" width="1018" height="1018" rx="226" ry="226" fill="none" stroke="url(#edge)" stroke-width="6"/>
+
+  <!-- 字母：S 与 P 分开画，中间留给光圈点 -->
+  <g fill="#26262B" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-weight="700" font-size="418" text-anchor="middle">
+    <text x="332" y="618">S</text>
+    <text x="706" y="618">P</text>
+  </g>
+
+  <!-- 中间那点 = 光圈：三片浅色缝隙均匀切开，读起来是相机光圈而不是扇形图 -->
+  <g transform="translate(519 464)">
+    <circle r="46" fill="url(#amber)"/>
+    <g fill="#F5EBD8">
+      <path d="M0 0 L46 -9.6 A46 46 0 0 1 39 24.3 Z"/>
+      <path d="M0 0 L46 -9.6 A46 46 0 0 1 39 24.3 Z" transform="rotate(120)"/>
+      <path d="M0 0 L46 -9.6 A46 46 0 0 1 39 24.3 Z" transform="rotate(240)"/>
+    </g>
+    <circle r="9" fill="url(#amber)"/>
+  </g>
+
+  <!-- 底片边：一条橙色短线，位置和长度照着稿 B -->
+  <rect x="372" y="741" width="280" height="21" rx="10.5" fill="url(#amber)"/>
+</svg>

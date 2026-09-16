@@ -1,0 +1,1730 @@
+/* ===========================================================================
+   选片 · 界面样式
+   ---------------------------------------------------------------------------
+   两条设计取向：
+   1. **照片是主角**。界面所有颜色都退到后面，网格里除了图什么都不抢眼；
+      只有「配对缺失」这种真需要你看一眼的信息才给彩色徽标。
+   2. **一行信息只出现一次**。文件名常驻卡片底部（要靠它找文件），
+      曝光参数悬停时才浮出来（判断参数时才会看）。
+   =========================================================================== */
+
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei",
+    Inter, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+
+  --topbar-h: 52px;
+  --footer-h: 30px;
+  --sidebar-w: 236px;
+  --radius: 10px;
+
+  --accent: #4d9dff;
+  --accent-soft: rgba(77, 157, 255, 0.16);
+  --accent-text: #a9ceff;
+  --warn: #f0a44a;
+  --warn-soft: rgba(240, 164, 74, 0.16);
+  --danger: #ff7a7a;
+  --keep: #4ecb7a;
+  --keep-soft: rgba(78, 203, 122, 0.16);
+  --reject: #ff7a7a;
+  --reject-soft: rgba(255, 122, 122, 0.16);
+}
+
+/* ---------- 深色（默认，摄影工具的常规选择：照片在黑底上更准） ---------- */
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #131315;
+  --bg-panel: #191a1d;
+  --bg-elev: #202125;
+  --bg-hover: #2a2b30;
+  --bg-input: #17181b;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.17);
+  --text: #eceef1;
+  --text-dim: #9a9da5;
+  --text-mute: #6b6e77;
+  --shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  --ph-a: #22232a;
+  --ph-b: #2c2e36;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f1f2f5;
+  --bg-panel: #ffffff;
+  --bg-elev: #f7f8fa;
+  --bg-hover: #eceef2;
+  --bg-input: #ffffff;
+  --border: rgba(0, 0, 0, 0.09);
+  --border-strong: rgba(0, 0, 0, 0.2);
+  --text: #1b1c20;
+  --text-dim: #5d6067;
+  --text-mute: #8b8e96;
+  --shadow: 0 6px 20px rgba(20, 24, 32, 0.14);
+  --ph-a: #e6e8ec;
+  --ph-b: #f1f2f5;
+
+  --accent: #1f6feb;
+  --accent-soft: rgba(31, 111, 235, 0.12);
+  --accent-text: #1a5fd0;
+  --warn: #b8760f;
+  --warn-soft: rgba(184, 118, 15, 0.14);
+
+  /* 保留/淘汰是选片里的红绿。这里不是行情涨跌，所以用摄影工具的通用约定：
+     绿＝留下、红＝不要。浅色主题下把两者都压深一档，否则白底上会发飘。 */
+  --danger: #c8383c;
+  --keep: #1f8f4d;
+  --keep-soft: rgba(31, 143, 77, 0.12);
+  --reject: #c8383c;
+  --reject-soft: rgba(200, 56, 60, 0.1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--bg);
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+.icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+/* =========== 顶栏 =========== */
+
+.topbar {
+  flex: 0 0 auto;
+  height: var(--topbar-h);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* 真 logo（白底黑字 S·P）：深色顶栏上一小块白反而成了视觉锚点，
+   圆角和投影让它看起来就是一枚缩小的 app 图标 */
+.brand-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: block;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+.brand-name {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* Slogan 只在宽窗口露出，窄了就藏——它是点缀，不是信息。
+   中英两行：英文在上当主句，中文在下压得更小更淡，不抢视线 */
+.brand-slogan {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.25;
+  color: var(--text-mute);
+  white-space: nowrap;
+}
+
+.brand-slogan-en {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.brand-slogan-cn {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  opacity: 0.78;
+}
+
+@media (max-width: 1100px) {
+  .brand-slogan {
+    display: none;
+  }
+}
+
+.root {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.root-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* 路径太长时保留尾部（文件名所在处） */
+  text-align: left;
+  color: var(--text);
+}
+
+.root-meta {
+  flex: 0 0 auto;
+  color: var(--text-mute);
+  white-space: nowrap;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* =========== 按钮 =========== */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.14s, border-color 0.14s, opacity 0.14s;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 500;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent);
+  filter: brightness(1.1);
+}
+
+.btn-icon {
+  padding: 0;
+  width: 30px;
+  justify-content: center;
+}
+
+:root[data-theme="dark"] .icon-sun,
+:root[data-theme="light"] .icon-moon {
+  display: none;
+}
+
+/* =========== 主体布局 =========== */
+
+.workspace {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+
+/* ---------- 左侧筛选栏 ---------- */
+
+.sidebar {
+  flex: 0 0 var(--sidebar-w);
+  width: var(--sidebar-w);
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  min-height: 0;
+}
+
+.sidebar-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 6px 0 20px;
+}
+
+.facet-group + .facet-group {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.facet-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  padding: 10px 14px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text-mute);
+  text-transform: uppercase;
+}
+
+.facet-title-note {
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  color: var(--text-mute);
+}
+
+.facet-list {
+  display: flex;
+  flex-direction: column;
+  padding: 0 8px;
+}
+
+.facet-list--days {
+  max-height: none;
+}
+
+.facet {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.facet:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.facet.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+.facet-label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.facet--none {
+  cursor: default;
+  color: var(--text-mute);
+  font-style: normal;
+}
+
+.facet--none:hover {
+  background: transparent;
+  color: var(--text-mute);
+}
+
+.facet-count {
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.facet.is-active .facet-count {
+  color: var(--accent-text);
+}
+
+.facet-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--warn);
+}
+
+.facet--day {
+  padding-left: 12px;
+  font-size: 12px;
+}
+
+.facet-weekday {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--text-mute);
+}
+
+/* 月份分组：几百天的时候靠它收敛 */
+
+.month {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px 3px;
+  border: 0;
+  background: transparent;
+  color: var(--text-mute);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  text-align: left;
+}
+
+.month:hover {
+  color: var(--text);
+}
+
+.month-caret {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  transition: transform 0.15s;
+  transform: rotate(90deg);
+}
+
+.month.is-collapsed .month-caret {
+  transform: rotate(0deg);
+}
+
+.month-count {
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.month.is-collapsed + .month-days {
+  display: none;
+}
+
+.month-days {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- 主区 ---------- */
+
+.content {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  max-width: 360px;
+}
+
+.search-icon {
+  position: absolute;
+  left: 9px;
+  color: var(--text-mute);
+  pointer-events: none;
+}
+
+.search {
+  width: 100%;
+  height: 30px;
+  padding: 0 26px 0 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 0.14s, box-shadow 0.14s;
+}
+
+.search::placeholder {
+  color: var(--text-mute);
+}
+
+.search:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.search::-webkit-search-cancel-button {
+  display: none;
+}
+
+.search-clear {
+  position: absolute;
+  right: 6px;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.search-clear:hover {
+  color: var(--text);
+}
+
+.select {
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+  outline: none;
+}
+
+.toolbar-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------- 分段控件（缩略图大小） ---------- */
+
+.segmented {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+}
+
+.segmented button {
+  width: 26px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-mute);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.segmented button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.segmented button.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* ---------- 启动异常横幅 ---------- */
+
+.banner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 14px;
+  background: var(--warn-soft);
+  border-bottom: 1px solid rgba(240, 164, 74, 0.35);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.banner[hidden] {
+  display: none;
+}
+
+.banner .icon {
+  margin-top: 2px;
+}
+
+.banner-text {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  min-width: 0;
+}
+
+.banner-close {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.banner-close:hover {
+  background: rgba(240, 164, 74, 0.2);
+}
+
+/* ---------- 扫描进度 ---------- */
+
+.progress {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
+}
+
+.progress-track {
+  flex: 1 1 auto;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+
+.progress-fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), #7b5cff);
+  transition: width 0.2s ease-out;
+}
+
+.progress-fill.is-indeterminate {
+  width: 35%;
+  animation: slide 1.1s ease-in-out infinite;
+}
+
+@keyframes slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(340%);
+  }
+}
+
+.progress-text {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------- 网格 ---------- */
+
+.grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px 14px 28px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(202px, 1fr));
+  gap: 10px;
+  align-content: start;
+}
+
+.grid[data-density="compact"] {
+  grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));
+  gap: 7px;
+}
+
+.grid[data-density="large"] {
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 12px;
+}
+
+/* ---------- 卡片 ---------- */
+
+.card {
+  position: relative;
+  aspect-ratio: 3 / 2;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--ph-a);
+  border: 1px solid transparent;
+  cursor: zoom-in;
+  outline: none;
+}
+
+.grid[data-density="large"] .card {
+  aspect-ratio: 3 / 2;
+}
+
+.card:hover {
+  border-color: var(--border-strong);
+}
+
+.card:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.shot-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.shot-placeholder {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, var(--ph-a) 30%, var(--ph-b) 50%, var(--ph-a) 70%);
+  background-size: 220% 100%;
+  animation: shimmer 1.5s linear infinite;
+  color: var(--text-mute);
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 10px;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 140% 0;
+  }
+  100% {
+    background-position: -140% 0;
+  }
+}
+
+.shot-placeholder--error {
+  animation: none;
+  background: var(--bg-elev);
+  color: var(--danger);
+}
+
+/* `hidden` 属性必须能压住上面的 display —— 这是图片未到/已释放两种状态的开关 */
+.shot-img[hidden],
+.shot-placeholder[hidden] {
+  display: none;
+}
+
+/* 底部信息条：文件名常驻，曝光参数悬停浮出 */
+
+.card-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 22px 9px 7px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.78), rgba(0, 0, 0, 0.42) 45%, transparent);
+  color: #fff;
+  pointer-events: none;
+}
+
+/* 文件名 + 时刻 + 星级挤在同一行：卡片很小，多占一行就少看一列照片 */
+.card-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.card-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+/* 星级：打了星才出现，金色是照片工具里的通用记号 */
+.card-stars {
+  flex: 0 0 auto;
+  color: #ffd166;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+}
+
+.card-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.78);
+  opacity: 0;
+  max-height: 0;
+  transform: translateY(3px);
+  transition: opacity 0.15s, max-height 0.15s, transform 0.15s;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.card:hover .card-sub,
+.card:focus-visible .card-sub {
+  opacity: 1;
+  max-height: 16px;
+  transform: translateY(0);
+}
+
+.card-sub-sep {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* 徽标只在「配对不完整」时出现——正常照片不该被任何标签打扰。
+   占右上角：左上角留给保留/淘汰的圆勾，两个角互不打扰。 */
+
+.card-badge {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  background: var(--warn-soft);
+  color: var(--warn);
+  border: 1px solid rgba(240, 164, 74, 0.4);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+:root[data-theme="light"] .card-badge {
+  background: rgba(255, 247, 235, 0.94);
+}
+
+/* 拍摄时刻。原来浮在右上角、只在悬停时出现；现在挪进底部那一行常驻——
+   选连拍时「这两张差几秒」是判断依据，藏在悬停后面等于没有。 */
+.card-time {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: rgba(255, 255, 255, 0.62);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* ---------- 空状态 ---------- */
+
+.empty {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 64px 20px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.empty-text {
+  font-size: 12.5px;
+  line-height: 1.7;
+  max-width: 420px;
+}
+
+.empty-icon {
+  width: 42px;
+  height: 42px;
+  color: var(--text-mute);
+  opacity: 0.55;
+}
+
+.grid-loading {
+  grid-column: 1 / -1;
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-mute);
+}
+
+/* ---------- 页脚 ---------- */
+
+.footer {
+  flex: 0 0 auto;
+  height: var(--footer-h);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 14px;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-mute);
+}
+
+.footer-hint {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.footer-hint.is-warn {
+  color: var(--warn);
+}
+
+.footer-hint.is-error {
+  color: var(--danger);
+}
+
+.footer-right {
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+}
+
+/* 页脚的缓存占用是清理面板的第二个入口：数字本身就在提醒人该清了 */
+#cache-info.is-link {
+  cursor: pointer;
+  color: var(--text-dim);
+  border-bottom: 1px dotted var(--border-strong);
+}
+
+#cache-info.is-link:hover {
+  color: var(--text);
+}
+
+/* =========== 大图查看 =========== */
+
+.loupe {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(8, 8, 10, 0.94);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 放大后图片会超出窗口，多出来的部分必须裁掉，否则会撑出滚动条 */
+  overflow: hidden;
+}
+
+/* 缩放控件浮在右上角：放大是高频动作，不该让人去底栏找按钮 */
+.loupe-zoom {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(20, 21, 24, 0.72);
+  backdrop-filter: blur(10px);
+}
+
+.zbtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #e9eaee;
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s;
+}
+
+.zbtn .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.zbtn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.zbtn.is-active {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.loupe[hidden] {
+  display: none;
+}
+
+.loupe-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: calc(100vw - 120px);
+  max-height: 100vh;
+  padding: 22px 0;
+}
+
+.loupe-img {
+  max-width: 100%;
+  /* 减去底下的标记按钮行 + 信息条 + 上下留白。少了这一行，图会被压小。 */
+  max-height: calc(100vh - 168px);
+  object-fit: contain;
+  border-radius: 6px;
+  background: #16171a;
+  transition: opacity 0.14s;
+  cursor: zoom-in;
+  /* 拖拽平移时别让浏览器把图片当成可拖走的元素 */
+  -webkit-user-drag: none;
+  user-select: none;
+  touch-action: none;
+}
+
+.loupe.is-zoomed .loupe-img {
+  cursor: grab;
+}
+
+.loupe.is-grabbing .loupe-img {
+  cursor: grabbing;
+}
+
+.loupe-img.is-loading {
+  opacity: 0.3;
+}
+
+.loupe-bar {
+  position: relative;
+  /* 放大后图片会铺满整个视口，底栏得压在图上才看得清 */
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  background: rgba(8, 8, 10, 0.6);
+  backdrop-filter: blur(8px);
+  color: #e9eaee;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.loupe-name {
+  flex: 0 1 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loupe-exif {
+  flex: 1 1 auto;
+  color: #a2a5ad;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.loupe-pos {
+  flex: 0 0 auto;
+  color: #a2a5ad;
+  font-variant-numeric: tabular-nums;
+}
+
+.loupe-keys {
+  flex: 0 0 auto;
+  color: #6f727a;
+}
+
+.loupe-close {
+  flex: 0 0 auto;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #e9eaee;
+}
+
+.loupe-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e9eaee;
+  cursor: pointer;
+  transition: background 0.14s, opacity 0.14s;
+}
+
+.loupe-nav .icon {
+  width: 22px;
+  height: 22px;
+}
+
+.loupe-nav:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.loupe-nav--prev {
+  left: 18px;
+}
+
+.loupe-nav--next {
+  right: 18px;
+}
+
+/* ===========================================================================
+   选片
+   ---------------------------------------------------------------------------
+   这个界面原来只能看，现在它要能下决定。两条原则：
+   1. **状态一眼可见**。保留＝绿环 + 绿勾，淘汰＝红环 + 压暗，未标记＝什么都不加。
+      「哪些还没看过」是选片时最常问的问题，答案应该能从整屏直接看出来。
+   2. **选中与标记是两层**。选中画蓝轮廓（在卡片外面），标记用绿/红内环（在卡片里面）。
+      「我选中了它」和「我决定留下它」是两件事，用同一套颜色表达会看不懂。
+      所以这两者刻意用了不同的 CSS 属性（outline 对 box-shadow），能叠加而不是互相覆盖。
+   =========================================================================== */
+
+/* ---------- 卡片上的标记 ---------- */
+
+.card-mark {
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.card[data-decision="keep"] {
+  box-shadow: inset 0 0 0 2px var(--keep);
+}
+
+.card[data-decision="keep"] .card-mark {
+  display: flex;
+  background: var(--keep);
+}
+
+.card[data-decision="reject"] {
+  box-shadow: inset 0 0 0 2px var(--reject);
+}
+
+.card[data-decision="reject"] .card-mark {
+  display: flex;
+  background: var(--reject);
+}
+
+/* 淘汰的照片压暗、去一点饱和：一眼扫过去，「不要的」自然沉下去，
+   剩下的构图问题才看得清楚。 */
+.card[data-decision="reject"] .shot-img,
+.card[data-decision="reject"] .shot-placeholder {
+  filter: grayscale(0.5) brightness(0.62);
+}
+
+/* 选中：画在卡片外面，和上面的内环叠加而不打架 */
+.card[data-sel="1"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  z-index: 1;
+}
+
+.grid:focus-within .card[data-sel="1"] {
+  outline-color: var(--accent);
+}
+
+/* ---------- 选片操作栏 ---------- */
+
+.cullbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  user-select: none;
+}
+
+.cullbar[hidden] {
+  display: none;
+}
+
+.cullbar-side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.cullbar-side--end {
+  margin-left: auto;
+}
+
+.cullbar-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+
+.cbtn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.cbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 保留/淘汰常驻着色：不用悬停就知道哪个键是哪个动作 */
+.cbtn--keep {
+  color: var(--keep);
+}
+
+.cbtn--reject {
+  color: var(--reject);
+}
+
+.cbtn--keep:hover:not(:disabled) {
+  background: var(--keep-soft);
+  border-color: var(--keep);
+}
+
+.cbtn--reject:hover:not(:disabled) {
+  background: var(--reject-soft);
+  border-color: var(--reject);
+}
+
+kbd {
+  display: inline-block;
+  min-width: 14px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-hover);
+  color: var(--text-mute);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+/* ---------- 星级选择器 ---------- */
+
+.cullbar-stars {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+}
+
+.cullbar-stars button {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-mute);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.cullbar-stars button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--warn);
+}
+
+.cullbar-stars button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 只选了一张时，这张的星级会点亮到这里——照着点就是调整 */
+.cullbar-stars button.is-active {
+  color: var(--warn);
+}
+
+.cullbar-stars button.is-clear {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* ---------- 侧栏：星级分面 ---------- */
+
+.facet-list--stars .facet-label {
+  color: var(--warn);
+  letter-spacing: 0.08em;
+}
+
+/* ---------- 大图里的标记按钮 ---------- */
+
+.loupe-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 大图浮层的底永远是深色的（照片在黑底上判色才准），所以这里的
+   保留/淘汰色写死成亮色，不跟随主题——跟随的话浅色主题下会变成
+   深绿深红，压在黑底上根本看不清。 */
+.loupe-actions .cbtn {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: #e9eaee;
+}
+
+.loupe-actions .cbtn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.17);
+}
+
+.loupe-actions .cbtn--keep {
+  color: #5fdc90;
+}
+
+.loupe-actions .cbtn--reject {
+  color: #ff9090;
+}
+
+.loupe-actions kbd {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: #a2a5ad;
+}
+
+/* 大图里的星按钮：和操作栏的那排同样的交互，但底是纯黑照片墙，
+   颜色写死亮色不跟主题（同上面 cbtn 的理由）。 */
+.loupe-stars {
+  display: inline-flex;
+  gap: 1px;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.loupe-stars button {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #8f929a;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.loupe-stars button:hover {
+  background: rgba(255, 255, 255, 0.17);
+  color: #ffc94d;
+}
+
+/* 点亮到当前星级：亮星压黑底必须够黄，暗掉的星也要能和背景分清 */
+.loupe-stars button.is-active {
+  color: #ffc94d;
+  text-shadow: 0 0 8px rgba(255, 201, 77, 0.35);
+}
+
+.loupe-stars button.is-clear {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.loupe-mark {
+  margin-left: 4px;
+  font-size: 12px;
+  color: #a2a5ad;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 导出对话框 ---------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(6, 6, 8, 0.58);
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal-box {
+  width: min(540px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 18px 20px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow);
+}
+
+.modal-title {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.field-label {
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: var(--text-mute);
+}
+
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    "radio main"
+    "radio note";
+  align-items: center;
+  gap: 0 9px;
+  padding: 8px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  cursor: pointer;
+  transition: border-color 0.14s, background 0.14s;
+}
+
+.choice:hover {
+  border-color: var(--border-strong);
+}
+
+/* 选中态用 :has()——用 JS 同步一个 class 也行，但那意味着
+   两处状态可能对不上；这里只让浏览器自己判断。 */
+.choice:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.choice input {
+  grid-area: radio;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.choice-main {
+  grid-area: main;
+  font-size: 12.5px;
+}
+
+.choice-note {
+  grid-area: note;
+  font-size: 11px;
+  color: var(--text-mute);
+}
+
+.choice input:disabled ~ .choice-main,
+.choice input:disabled ~ .choice-note {
+  opacity: 0.5;
+}
+
+.modal-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.75;
+  color: var(--text-dim);
+}
+
+.modal-note strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* 缓存占用一览：数字右对齐、等宽，才能一眼比出哪块最大 */
+.stat-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.stat-list li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 7px 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stat-list li:last-child {
+  border-bottom: none;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.stat-value {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* 危险选项：选中的话会丢数据，所以连选中态都换成警告色 */
+.choice--danger .choice-main {
+  color: var(--danger);
+}
+
+.choice--danger:has(input:checked) {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+
+.cache-path {
+  display: block;
+  margin-top: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--text-mute);
+  word-break: break-all;
+}
+
+.modal-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.modal-progress[hidden] {
+  display: none;
+}
+
+.modal-result {
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.modal-result[hidden] {
+  display: none;
+}
+
+.modal-result strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.modal-result .result-path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text);
+}
+
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.modal-foot .btn[hidden] {
+  display: none;
+}
+
+/* =========== 滚动条 =========== */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-mute);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* =========== 无障碍 =========== */
+
+@media (prefers-reduced-motion: reduce) {
+  .shot-placeholder,
+  .progress-fill.is-indeterminate {
+    animation: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .sidebar {
+    flex-basis: 190px;
+    width: 190px;
+  }
+
+  .btn-text {
+    display: none;
+  }
+
+  .btn {
+    padding: 0 9px;
+  }
+}

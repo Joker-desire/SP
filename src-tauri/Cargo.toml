@@ -1,0 +1,59 @@
+[package]
+name = "sp"
+version = "0.1.0"
+description = "S·P —— 本地摄影选片工具"
+authors = ["Joker-desire"]
+license = "MIT"
+repository = "https://github.com/Joker-desire/SP"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "sp_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+walkdir = "2.5.0"
+rayon = "1.12.0"
+kamadak-exif = "0.6.1"
+blake3 = "1.8.7"
+anyhow = "1.0.104"
+tauri-plugin-dialog = "2.7.3"
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+memmap2 = "0.9.11"
+base64 = "0.23.1"
+
+
+# 依赖一律用优化级别 3 编译，自己的代码保持默认（快速增量）。
+#
+# 为什么必须这么做：缩略图这条链路（解码 + 三级缩放编码）在 debug 下比 release
+# 慢一个数量级（二十倍上下）。瓶颈全在 image / zune-jpeg 这些依赖里，
+# 而我们日常跑的是 `tauri dev`（debug）。不这么设，滚动一屏照片要等好几分钟。
+#
+# debug-assertions / overflow-checks 也一起关掉：它们是逐像素访问带边界检查的元凶，
+# 在依赖里关掉、自己的代码保留，既能拿到性能又不丢自己逻辑的检查。
+[profile.dev.package."*"]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+debug = false
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

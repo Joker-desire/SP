@@ -1,0 +1,110 @@
+# 发版：推一个 v* 的 tag，就出三平台安装包并自动建 GitHub Release。
+#
+# 本地不再产出安装包——macOS / Windows / Linux 的包全部由这里出，
+# 一是省掉「本机装没装工具链」的问题，二是产物和 tag 严格一一对应。
+
+name: 发布
+
+on:
+  push:
+    tags: ["v*"]
+  # 手动触发用于出测试包：不会建 Release，产物在 Artifacts 里下载
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            arch: apple-silicon
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            arch: intel
+          - os: windows-latest
+            target: ""
+            arch: x64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 安装 Linux 依赖
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Rust 编译缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 取版本号
+        id: version
+        shell: bash
+        run: echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: 打包
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # 故意不传 tagName：让 tauri-action 只负责构建，
+          # Release 由下面统一创建并上传改名后的产物，避免出现两份同内容不同名的文件
+          args: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+
+      - name: 重命名产物（加平台与版本）
+        shell: bash
+        run: |
+          mkdir -p out
+          v="${GITHUB_REF_NAME#v}"
+          # 手动触发时没有 tag，用 package.json 里的版本兜底
+          [ "$v" = "${GITHUB_REF_NAME}" ] && v=$(node -p "require('./package.json').version")
+          find src-tauri/target -path '*/release/bundle/*' \
+            \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) \
+            -exec sh -c 'cp "$1" "out/S·P_${v}_${{ matrix.os }}_${{ matrix.arch }}.${1##*.}"' _ {} \;
+          ls -lh out
+
+      - name: 建 Release 并上传（仅打 tag 时）
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          # 多个平台并行跑，谁先到谁建；后来的只上传
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" out/* --clobber
+          else
+            extra=()
+            [[ "$GITHUB_REF_NAME" == *-* ]] && extra+=(--prerelease)
+            gh release create "$GITHUB_REF_NAME" out/* \
+              --title "S·P v${v}" \
+              --generate-notes "${extra[@]}"
+          fi
+
+      - name: 上传 Artifacts（手动触发时的下载入口）
+        uses: actions/upload-artifact@v4
+        with:
+          name: S·P-${{ matrix.os }}-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
