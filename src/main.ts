@@ -1420,34 +1420,41 @@ elFacetsDays.addEventListener("click", (e) => {
   month.classList.toggle("is-collapsed", !nowCollapsed);
 });
 
+/** 侧栏摆出「图库空」的状态：各分组清掉，只留一句话。
+ *  图库查出来是 0 张时用，手动「清空当前文件夹」后也直接用它——
+ *  那种时候不该再拿 roots=null 去查后端（那会把历史文件夹的照片全数出来）。 */
+function renderFacetsEmpty() {
+  for (const host of [
+    elFacetsDecision,
+    elFacetsStars,
+    elFacetsPair,
+    elFacetsCameras,
+    elFacetsDays,
+    elFacetsQuality,
+    elFacetsLens,
+    elFacetsFocal,
+    elFacetsIso,
+  ]) {
+    host.innerHTML = "";
+  }
+  elGroupQuality.hidden = true;
+  elGroupLens.hidden = true;
+  elGroupParams.hidden = true;
+  elGroupIso.hidden = true;
+  const none = document.createElement("div");
+  none.className = "facet facet--none";
+  none.textContent = "图库还没有照片";
+  elFacetsDecision.appendChild(none);
+  elDaysNote.textContent = "";
+}
+
 async function loadFacets() {
   const f = await invoke<LibraryFacets>("library_facets", { roots: currentRoots() });
   lastFacets = f;
 
   if (f.total === 0) {
     // 图库空的时候别摆一排 0，一句话说清就够了
-    for (const host of [
-      elFacetsDecision,
-      elFacetsStars,
-      elFacetsPair,
-      elFacetsCameras,
-      elFacetsDays,
-      elFacetsQuality,
-      elFacetsLens,
-      elFacetsFocal,
-      elFacetsIso,
-    ]) {
-      host.innerHTML = "";
-    }
-    elGroupQuality.hidden = true;
-    elGroupLens.hidden = true;
-    elGroupParams.hidden = true;
-    elGroupIso.hidden = true;
-    const none = document.createElement("div");
-    none.className = "facet facet--none";
-    none.textContent = "图库还没有照片";
-    elFacetsDecision.appendChild(none);
-    elDaysNote.textContent = "";
+    renderFacetsEmpty();
     return;
   }
 
@@ -1522,7 +1529,9 @@ async function applyFilterChange() {
   await reload();
 }
 
-elClear.addEventListener("click", () => {
+/** 把所有筛选条件拨回「全部」，搜索框也清空。只改状态不重查——
+ *  查询由调用方决定（按钮点完要 applyFilterChange，清空图库时不用查）。 */
+function resetFilter() {
   filter.pairState = "all";
   filter.cameraSerial = null;
   filter.day = null;
@@ -1535,6 +1544,10 @@ elClear.addEventListener("click", () => {
   filter.search = "";
   elSearch.value = "";
   elSearchClear.hidden = true;
+}
+
+elClear.addEventListener("click", () => {
+  resetFilter();
   void applyFilterChange();
 });
 
@@ -2788,9 +2801,14 @@ function clearLibrary() {
   elGrid.classList.remove("is-grouped");
   groupMap = null;
   clearUndo();
+  lastFacets = null;
+  // 筛选条件是跟着「当前文件夹」走的，文件夹都没了就别留着——
+  // 留着的话下一个文件夹会被旧条件悄悄过滤掉几张，很难查。
+  resetFilter();
   renderRoot();
+  renderFacetsEmpty();
+  updateCount();
   elRescan.disabled = true;
-  elCullbar.hidden = true;
   elCount.textContent = "";
   setHint("已清空。选择一个装有 NEF / JPG 的文件夹，选完会自动扫描并出图。");
   void refreshCacheInfo();
