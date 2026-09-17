@@ -195,7 +195,10 @@
           </section>
 
           <section class="facet-group">
-            <h3 class="facet-title">机身</h3>
+            <h3 class="facet-title">
+              机身
+              <button class="facet-link" id="btn-time-offset" hidden title="两台机身时钟不同步时，在这里校正">时间校正</button>
+            </h3>
             <div class="facet-list" id="facets-cameras"></div>
           </section>
 
@@ -558,6 +561,25 @@
     </div>
 
     <!-- ── 清理缓存 ───────────────────────────────────────────────────── -->
+    <div class="modal" id="offset-modal" hidden>
+      <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="offset-title">
+        <h2 class="modal-title" id="offset-title">机身时间校正</h2>
+
+        <div class="modal-body">
+          <p class="modal-note">
+            两台机身的时钟不一样时，混在一起排序和连拍分组都会错。给快的那台填一个
+            <strong>负数</strong>、慢的那台填正数（单位：秒），排序与分组会立刻按校正后的时间重算。
+          </p>
+          <div id="offset-list" class="offset-list"></div>
+          <p class="modal-note" id="offset-empty" hidden>这个文件夹里还没读到机身序列号。</p>
+        </div>
+
+        <div class="modal-foot">
+          <button class="btn" id="offset-cancel">关闭</button>
+        </div>
+      </div>
+    </div>
+
     <div class="modal" id="cache-modal" hidden>
       <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="cache-title">
         <h2 class="modal-title" id="cache-title">清理缓存</h2>

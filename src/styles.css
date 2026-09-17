@@ -320,6 +320,69 @@ select {
   color: var(--text-mute);
 }
 
+/* 机身标题后面的「时间校正」入口：不是主要功能，做成安静的文字按钮 */
+.facet-link {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 10.5px;
+  color: var(--text-mute);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+}
+.facet-link:hover {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+
+/* 时间校正：一行一个机身，数字输入框 + 应用 */
+.offset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.offset-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "name input"
+    "sub  apply";
+  gap: 2px 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.offset-name {
+  grid-area: name;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.offset-sub {
+  grid-area: sub;
+  font-size: 10.5px;
+  color: var(--text-mute);
+}
+
+.offset-input {
+  grid-area: input;
+  width: 92px;
+  justify-self: end;
+}
+
+.offset-row .btn-sm {
+  grid-area: apply;
+  justify-self: end;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+
 .facet-list {
   display: flex;
   flex-direction: column;

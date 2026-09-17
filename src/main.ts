@@ -66,6 +66,13 @@ interface PairCard {
   underexposed: number | null;
 }
 
+interface CameraBody {
+  serial: string;
+  model: string;
+  offsetSeconds: number;
+  photos: number;
+}
+
 interface AnalyzeSummary {
   analyzed: number;
   failed: number;
@@ -232,10 +239,15 @@ const elFacetsQuality = $<HTMLElement>("#facets-quality");
 const elFacetsLens = $<HTMLElement>("#facets-lens");
 const elFacetsFocal = $<HTMLElement>("#facets-focal");
 const elFacetsIso = $<HTMLElement>("#facets-iso");
+const elBtnTimeOffset = $<HTMLButtonElement>("#btn-time-offset");
+const elOffsetModal = $<HTMLElement>("#offset-modal");
+const elOffsetList = $<HTMLElement>("#offset-list");
+const elOffsetEmpty = $<HTMLElement>("#offset-empty");
+const elOffsetCancel = $<HTMLButtonElement>("#offset-cancel");
+const elGroupQuality = $<HTMLElement>("#group-quality");
 const elGroupLens = $<HTMLElement>("#group-lens");
 const elGroupParams = $<HTMLElement>("#group-params");
 const elGroupIso = $<HTMLElement>("#group-iso");
-const elGroupQuality = $<HTMLElement>("#group-quality");
 const elQualityNote = $<HTMLElement>("#quality-note");
 const elFacetsDays = $<HTMLElement>("#facets-days");
 const elFacetsCameras = $<HTMLElement>("#facets-cameras");
@@ -1272,6 +1284,9 @@ function renderStarFacets(f: LibraryFacets) {
 }
 
 function renderCameraFacets(f: LibraryFacets) {
+  // 两台以上机身才需要时间校正——单机身时这个按钮只是噪音
+  const bodies = f.cameras.filter((it) => it.key !== "" && it.count > 0);
+  elBtnTimeOffset.hidden = bodies.length < 2;
   elFacetsCameras.innerHTML = "";
   if (f.cameras.length === 0) {
     const none = document.createElement("div");
@@ -2625,6 +2640,81 @@ async function startScan(
  * 不挂在扫描里：扫描的KPI是快点出图，分析要解码，混在一起就是干等。
  * 这里只算「还没算过的」，所以中断了下次接着来，不用从头开始。
  */
+// ── 机身时间校正 ────────────────────────────────────────────────────────
+//
+// 单机身时这一栏没有意义，所以按钮只在读到两个以上机身时才出现。
+async function openOffsetDialog() {
+  let bodies: CameraBody[] = [];
+  try {
+    bodies = await invoke<CameraBody[]>("list_camera_bodies", { roots: currentRoots() });
+  } catch {
+    setHint("读不到机身信息。", "warn");
+    return;
+  }
+
+  elOffsetList.innerHTML = "";
+  elOffsetEmpty.hidden = bodies.length > 0;
+
+  for (const b of bodies) {
+    const row = document.createElement("div");
+    row.className = "offset-row";
+
+    const name = document.createElement("div");
+    name.className = "offset-name";
+    name.textContent = b.serial === NONE_KEY ? "读不到序列号" : b.model;
+    name.title = b.serial === NONE_KEY ? "这批照片里没有机身序列号" : b.serial;
+
+    const sub = document.createElement("div");
+    sub.className = "offset-sub";
+    sub.textContent = `${b.photos.toLocaleString()} 张`;
+
+    const input = document.createElement("input");
+    input.className = "input offset-input";
+    input.type = "number";
+    input.step = "1";
+    input.value = String(b.offsetSeconds);
+    input.title = "正数＝这台机身时钟慢了，要往后加；负数＝快了，要往回减";
+
+    const apply = document.createElement("button");
+    apply.className = "btn btn-ghost btn-sm";
+    apply.textContent = "应用";
+    apply.addEventListener("click", () => {
+      const secs = Math.trunc(Number(input.value));
+      if (!Number.isFinite(secs)) {
+        setHint("请填一个整数秒数。", "warn");
+        return;
+      }
+      void (async () => {
+        try {
+          await invoke("set_camera_offset", { serial: b.serial, offsetSeconds: secs });
+          // 校正会重算所有照片的排序时间，视图必须整个重铺
+          await refreshLibrary();
+          setHint(
+            secs === 0
+              ? "已清除这台机身的时间校正。"
+              : `已校正：${b.model} ${secs > 0 ? "+" : ""}${secs} 秒，排序与连拍分组已按新时间重算。`,
+          );
+        } catch (e) {
+          setHint(`校正失败：${String(e)}`, "error");
+        }
+      })();
+    });
+
+    row.append(name, sub, input, apply);
+    elOffsetList.appendChild(row);
+  }
+
+  elOffsetModal.hidden = false;
+}
+
+elBtnTimeOffset.addEventListener("click", () => void openOffsetDialog());
+elOffsetCancel.addEventListener("click", () => {
+  elOffsetModal.hidden = true;
+});
+elOffsetModal.addEventListener("click", (e) => {
+  if (e.target === elOffsetModal) elOffsetModal.hidden = true;
+});
+
 async function runAnalysis() {
   if (analyzing || !rootPath) return;
   analyzing = true;

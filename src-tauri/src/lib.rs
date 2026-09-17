@@ -1955,6 +1955,61 @@ async fn set_camera_offset(
     .map_err(|e| e.to_string())?
 }
 
+/// 列出库里出现过的机身及其时间偏移，供「时间校正」界面用。
+///
+/// 单机身时这一栏没什么用，但两台机身时钟不同步时，排序和连拍分组会全乱——
+/// 那时候它是唯一的解药。
+#[tauri::command]
+async fn list_camera_bodies(
+    state: tauri::State<'_, AppState>,
+    roots: Option<Vec<String>>,
+) -> Result<Vec<CameraBody>, String> {
+    let db = state.db.clone();
+    let roots = roots.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let (scope, sargs) = scope_where(if roots.is_empty() { None } else { Some(&roots) });
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT COALESCE(p.camera_serial, '{NONE_KEY}') AS serial,
+                        COALESCE(MAX(p.camera_model), '未知机身') AS model,
+                        COALESCE((SELECT cb.time_offset_seconds FROM camera_bodies cb
+                                   WHERE cb.serial = p.camera_serial), 0) AS off,
+                        COUNT(*) AS n
+                 {FROM_PHOTOS} WHERE p.is_primary = 1{scope}
+                 GROUP BY serial ORDER BY n DESC, model"
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(sargs.iter()), |r| {
+                Ok(CameraBody {
+                    serial: r.get(0)?,
+                    model: r.get(1)?,
+                    offset_seconds: r.get(2)?,
+                    photos: r.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CameraBody {
+    serial: String,
+    model: String,
+    /// 正数＝这台机身的时钟比实际快（要把时间往回拨）
+    offset_seconds: i64,
+    photos: i64,
+}
+
 fn now_epoch() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2231,6 +2286,7 @@ pub fn run() {
             scan_folder,
             list_subdirs,
             analyze_library,
+            list_camera_bodies,
             library_stats,
             library_facets,
             list_pairs,
