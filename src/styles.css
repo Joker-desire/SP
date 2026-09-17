@@ -1922,6 +1922,8 @@ kbd {
 .ld-body {
   flex: 1 1 auto;
   overflow-y: auto;
+  /* 面板滚到头别把滚动传给上层（大图那边会当成缩放手势） */
+  overscroll-behavior: contain;
   padding: 4px 12px 14px;
 }
 

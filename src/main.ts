@@ -3378,12 +3378,36 @@ elLoupe.addEventListener(
   "wheel",
   (e) => {
     if (elLoupe.hidden) return;
+    // 光标在详细信息面板上滚，滚的是面板内容，不是图片——
+    // 面板自己有滚动条，这里抢走事件就会变成「想看下面的参数，图却跟着放大」。
+    if (overDetailBody(e.target, e.deltaY)) return;
     e.preventDefault();
     // 触控板会连发几十个小 delta，用指数映射，手感才是连续的而不是一格一跳
     zoomAt(e.clientX, e.clientY, zoom * Math.exp(-e.deltaY * 0.0022));
   },
   { passive: false },
 );
+
+/**
+ * 这次滚轮是不是落在详情面板里、且面板还有得滚。
+ *
+ * 面板内容没超出高度时也算「归面板」：那种情况下滚了本来也不动，
+ * 反手去缩放图片只会让人莫名其妙。
+ */
+function overDetailBody(target: EventTarget | null, deltaY: number): boolean {
+  if (!detailOpen || !(target instanceof Element)) return false;
+  const panel = target.closest(".loupe-detail");
+  if (!panel) return false;
+  const body = panel.querySelector<HTMLElement>(".ld-body");
+  if (!body || body.scrollHeight <= body.clientHeight + 1) return true;
+
+  // 已经滚到头了还继续同方向滚，就把手势交还给图片，别让人以为卡住
+  const atTop = body.scrollTop <= 0;
+  const atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 1;
+  if (deltaY < 0 && atTop) return false;
+  if (deltaY > 0 && atBottom) return false;
+  return true;
+}
 
 elLoupeImg.addEventListener("dblclick", (e) => {
   if (zoom > ZOOM_MIN) resetZoom();
