@@ -256,6 +256,15 @@ struct PairFilter {
     /// 门槛在 analyze.rs 里，前后端共用同一套常量。
     #[serde(default)]
     quality: Option<String>,
+    /// 镜头型号，或 "__none__"
+    #[serde(default)]
+    lens: Option<String>,
+    /// 焦段分档：wide / normal / tele / super
+    #[serde(default)]
+    focal: Option<String>,
+    /// ISO 分档：low / mid / high / veryHigh
+    #[serde(default)]
+    iso: Option<String>,
 }
 
 /// 网格用的照片卡片。以「一次快门」为单位，而不是以文件为单位。
@@ -329,6 +338,12 @@ struct LibraryFacets {
     /// 画面质量：可能糊了 / 高光溢出 / 暗部死黑。分析还没跑完时计数偏小，
     /// 这是正常的——跑完一趟再打开侧栏就补齐了。
     quality: Vec<Facet>,
+    /// 镜头型号（有几种列几种）
+    lenses: Vec<Facet>,
+    /// 焦段分档：wide / normal / tele / super
+    focals: Vec<Facet>,
+    /// ISO 分档：low / mid / high / veryHigh
+    isos: Vec<Facet>,
 }
 
 /// 搜索关键词里的 LIKE 通配符要转义，否则输入一个 `%` 会把整个库匹配出来。
@@ -458,6 +473,25 @@ fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
         args.push(Value::Integer(s.clamp(0, 5)));
     }
 
+    if let Some(l) = f.lens.as_deref().filter(|s| !s.is_empty()) {
+        if l == NONE_KEY {
+            conds.push("p.lens IS NULL".to_string());
+        } else {
+            conds.push("p.lens = ?".to_string());
+            args.push(Value::Text(l.to_string()));
+        }
+    }
+    if let Some((lo, hi)) = focal_range(f.focal.as_deref()) {
+        conds.push("p.focal_len >= ? AND p.focal_len < ?".to_string());
+        args.push(Value::Real(lo));
+        args.push(Value::Real(hi));
+    }
+    if let Some((lo, hi)) = iso_range(f.iso.as_deref()) {
+        conds.push("p.iso >= ? AND p.iso < ?".to_string());
+        args.push(Value::Integer(lo));
+        args.push(Value::Integer(hi));
+    }
+
     // 画面质量。没分析过的照片（sharpness IS NULL）一律不算「有问题」——
     // 分析是后台跑的，刚扫完就筛会把还没轮到的照片全列进「糊了」，那是误报。
     match f.quality.as_deref() {
@@ -477,6 +511,29 @@ fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
     }
 
     (conds.join(" AND "), args)
+}
+
+/// 焦段分档。档位而不是自由区间：选片时想的是「这批广角」「那批长焦」，
+/// 让人填 24–70 反而多一步。上界取开区间，相邻档不会重叠漏张。
+fn focal_range(key: Option<&str>) -> Option<(f64, f64)> {
+    match key.unwrap_or("") {
+        "wide" => Some((0.0, 24.0)),
+        "normal" => Some((24.0, 70.0)),
+        "tele" => Some((70.0, 200.0)),
+        "super" => Some((200.0, f64::MAX)),
+        _ => None,
+    }
+}
+
+/// ISO 分档。边界按相机实际的档位跳变来切（400 / 1600 / 6400）。
+fn iso_range(key: Option<&str>) -> Option<(i64, i64)> {
+    match key.unwrap_or("") {
+        "low" => Some((0, 400)),
+        "mid" => Some((400, 1600)),
+        "high" => Some((1600, 6400)),
+        "veryHigh" => Some((6400, i64::MAX)),
+        _ => None,
+    }
 }
 
 fn order_by(sort: Option<&str>) -> &'static str {
@@ -852,6 +909,59 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         ]
     };
 
+    // 镜头：和机身一样按型号聚合，读不到镜头的归到「未知」
+    let lenses = {
+        let mut out: Vec<Facet> = Vec::new();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT COALESCE(p.lens, '{NONE_KEY}') AS l, COUNT(*)
+             {FROM_PHOTOS} WHERE p.is_primary = 1{scope}
+             GROUP BY l ORDER BY COUNT(*) DESC, l"
+        ))?;
+        let mut rows = stmt.query(sp())?;
+        while let Some(r) = rows.next()? {
+            let key: String = r.get(0)?;
+            let label = if key == NONE_KEY {
+                "未知镜头".into()
+            } else {
+                key.clone()
+            };
+            out.push(Facet {
+                key,
+                label,
+                count: r.get(1)?,
+            });
+        }
+        out
+    };
+
+    // 焦段 / ISO：固定档位全部列出（包括 0 的），位置不随素材跳动
+    let focals = bucket_facets(
+        conn,
+        "p.focal_len",
+        &[
+            ("wide", 0.0, 24.0),
+            ("normal", 24.0, 70.0),
+            ("tele", 70.0, 200.0),
+            ("super", 200.0, f64::MAX),
+        ],
+        scope.as_str(),
+        &sargs,
+        &["24 以下", "24–70", "70–200", "200 以上"],
+    )?;
+    let isos = bucket_facets(
+        conn,
+        "p.iso",
+        &[
+            ("low", 0.0, 400.0),
+            ("mid", 400.0, 1600.0),
+            ("high", 1600.0, 6400.0),
+            ("veryHigh", 6400.0, f64::MAX),
+        ],
+        scope.as_str(),
+        &sargs,
+        &["400 以下", "400–1600", "1600–6400", "6400 以上"],
+    )?;
+
     Ok(LibraryFacets {
         total,
         pair_states,
@@ -861,7 +971,44 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         decisions,
         stars,
         quality,
+        lenses,
+        focals,
+        isos,
     })
+}
+
+/// 数固定档位里各有多少张。档位写死在调用方，前后端两侧用同一套 key。
+fn bucket_facets(
+    conn: &Connection,
+    column: &str,
+    buckets: &[(&str, f64, f64)],
+    scope: &str,
+    sargs: &[rusqlite::types::Value],
+    labels: &[&str],
+) -> anyhow::Result<Vec<Facet>> {
+    let cases = buckets
+        .iter()
+        .map(|(_, lo, hi)| {
+            format!(
+                "COALESCE(SUM(CASE WHEN {column} >= {lo} AND {column} < {hi} THEN 1 ELSE 0 END), 0)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT {cases} {FROM_PHOTOS} WHERE p.is_primary = 1{scope}");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(sargs.iter()))?;
+    let mut out: Vec<Facet> = Vec::new();
+    if let Some(r) = rows.next()? {
+        for (i, (key, _, _)) in buckets.iter().enumerate() {
+            out.push(Facet {
+                key: (*key).to_string(),
+                label: labels[i].to_string(),
+                count: r.get(i)?,
+            });
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2979,6 +3126,156 @@ mod tests {
             first[0].sharpness,
             first[1].sharpness
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 镜头 / 焦段 / ISO：这三个维度的取值是 EXIF 里的连续量，
+    /// 最容易错的地方是档位边界（24 / 70 / 200 到底归哪一档、会不会漏张）。
+    #[test]
+    fn lens_focal_and_iso_filters_respect_their_buckets() {
+        let (dir, conn) = seeded("params");
+        {
+            let c = conn.lock().unwrap();
+            // 三张照片分别落在不同档位上，边界值故意取在档位的分界点
+            c.execute(
+                "UPDATE photos SET lens = 'NIKKOR Z 24-70', focal_len = 24, iso = 400 WHERE path LIKE '%0001.NEF'",
+                [],
+            )
+            .unwrap();
+            c.execute(
+                "UPDATE photos SET lens = 'NIKKOR Z 70-200', focal_len = 199, iso = 1600 WHERE path LIKE '%0002.NEF'",
+                [],
+            )
+            .unwrap();
+            c.execute(
+                "UPDATE photos SET lens = NULL, focal_len = 300, iso = 12800 WHERE path LIKE '%0003.NEF'",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 镜头：按型号筛，读不到镜头的那张归到「未知」
+        assert_eq!(
+            count(
+                &conn,
+                PairFilter {
+                    lens: Some("NIKKOR Z 24-70".into()),
+                    ..Default::default()
+                }
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &conn,
+                PairFilter {
+                    lens: Some(NONE_KEY.into()),
+                    ..Default::default()
+                }
+            ),
+            1,
+            "没有镜头信息的该能单独筛出来"
+        );
+
+        // 焦段：24 属于「24–70」而不是「24 以下」，200 以上归 super
+        assert_eq!(
+            count(
+                &conn,
+                PairFilter {
+                    focal: Some("wide".into()),
+                    ..Default::default()
+                }
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &conn,
+                PairFilter {
+                    focal: Some("normal".into()),
+                    ..Default::default()
+                }
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &conn,
+                PairFilter {
+                    focal: Some("tele".into()),
+                    ..Default::default()
+                }
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &conn,
+                PairFilter {
+                    focal: Some("super".into()),
+                    ..Default::default()
+                }
+            ),
+            1
+        );
+
+        // ISO：400 落在 mid，不是 low
+        assert_eq!(
+            count(
+                &conn,
+                PairFilter {
+                    iso: Some("low".into()),
+                    ..Default::default()
+                }
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &conn,
+                PairFilter {
+                    iso: Some("mid".into()),
+                    ..Default::default()
+                }
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &conn,
+                PairFilter {
+                    iso: Some("high".into()),
+                    ..Default::default()
+                }
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                &conn,
+                PairFilter {
+                    iso: Some("veryHigh".into()),
+                    ..Default::default()
+                }
+            ),
+            1
+        );
+
+        // 档位加起来要等于总数，不许有漏在档外的
+        let buckets = ["wide", "normal", "tele", "super"]
+            .iter()
+            .map(|k| {
+                count(
+                    &conn,
+                    PairFilter {
+                        focal: Some(k.to_string()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .sum::<i64>();
+        assert_eq!(buckets, 3, "所有照片都该落在某一档里");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

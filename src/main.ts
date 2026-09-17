@@ -104,6 +104,10 @@ interface LibraryFacets {
   stars: Facet[];
   /** 画面质量：blur / over / under。后端还没分析过时三项计数都是 0。 */
   quality: Facet[];
+  /** 镜头：有几种列几种；ISO 与焦段是固定档位，计数为 0 也会出现。 */
+  lenses: Facet[];
+  focals: Facet[];
+  isos: Facet[];
 }
 
 interface ThumbPayload {
@@ -174,6 +178,12 @@ interface FilterState {
   stars: number | null;
   /** 画面质量：null / blur / over / under */
   quality: string | null;
+  /** 镜头型号，null＝不筛 */
+  lens: string | null;
+  /** 焦段分档：null / wide / normal / tele / super */
+  focal: string | null;
+  /** ISO 分档：null / low / mid / high / veryHigh */
+  iso: string | null;
   search: string;
   sort: string;
 }
@@ -219,6 +229,12 @@ const elFacetsDecision = $<HTMLElement>("#facets-decision");
 const elFacetsStars = $<HTMLElement>("#facets-stars");
 const elFacetsPair = $<HTMLElement>("#facets-pair");
 const elFacetsQuality = $<HTMLElement>("#facets-quality");
+const elFacetsLens = $<HTMLElement>("#facets-lens");
+const elFacetsFocal = $<HTMLElement>("#facets-focal");
+const elFacetsIso = $<HTMLElement>("#facets-iso");
+const elGroupLens = $<HTMLElement>("#group-lens");
+const elGroupParams = $<HTMLElement>("#group-params");
+const elGroupIso = $<HTMLElement>("#group-iso");
 const elGroupQuality = $<HTMLElement>("#group-quality");
 const elQualityNote = $<HTMLElement>("#quality-note");
 const elFacetsDays = $<HTMLElement>("#facets-days");
@@ -380,6 +396,9 @@ const filter: FilterState = {
   decision: "all",
   stars: null,
   quality: null,
+  lens: null,
+  focal: null,
+  iso: null,
   search: "",
   sort: "takenDesc",
 };
@@ -817,6 +836,9 @@ function currentFilterPayload() {
     decision: filter.decision === "all" ? null : filter.decision,
     stars: filter.stars,
     quality: filter.quality,
+    lens: filter.lens,
+    focal: filter.focal,
+    iso: filter.iso,
     search: filter.search,
     sort: filter.sort,
     roots: currentRoots(),
@@ -832,6 +854,9 @@ function isFiltered(): boolean {
     filter.decision !== "all" ||
     filter.stars !== null ||
     filter.quality !== null ||
+    filter.lens !== null ||
+    filter.focal !== null ||
+    filter.iso !== null ||
     filter.search.trim() !== ""
   );
 }
@@ -1181,6 +1206,41 @@ function renderQualityFacets(f: LibraryFacets) {
   elQualityNote.textContent = "自动判断";
 }
 
+/**
+ * 焦段 / ISO：档位是固定的，所以整组里只要有任何一档有照片就显示，
+ * 计数为 0 的档也留着——位置固定，眼睛不用重新找。
+ */
+function renderBucketFacets(host: HTMLElement, group: HTMLElement, items: Facet[], facet: string, current: string | null) {
+  host.innerHTML = "";
+  const any = items.some((it) => it.count > 0);
+  group.hidden = !any;
+  if (!any) return;
+  for (const it of items) {
+    host.appendChild(
+      facetButton({ facet, key: it.key, label: it.label, count: it.count, active: current === it.key })
+    );
+  }
+}
+
+function renderLensFacets(f: LibraryFacets) {
+  elFacetsLens.innerHTML = "";
+  // 只有一种镜头（或全都没读到）时这一栏没有信息量，反而占地方
+  const useful = f.lenses.filter((it) => it.count > 0).length > 1;
+  elGroupLens.hidden = !useful;
+  if (!useful) return;
+  for (const it of f.lenses) {
+    elFacetsLens.appendChild(
+      facetButton({
+        facet: "lens",
+        key: it.key,
+        label: it.label,
+        count: it.count,
+        active: filter.lens === it.key,
+      })
+    );
+  }
+}
+
 function renderDecisionFacets(f: LibraryFacets) {
   elFacetsDecision.innerHTML = "";
   for (const it of f.decisions) {
@@ -1358,10 +1418,16 @@ async function loadFacets() {
       elFacetsCameras,
       elFacetsDays,
       elFacetsQuality,
+      elFacetsLens,
+      elFacetsFocal,
+      elFacetsIso,
     ]) {
       host.innerHTML = "";
     }
     elGroupQuality.hidden = true;
+    elGroupLens.hidden = true;
+    elGroupParams.hidden = true;
+    elGroupIso.hidden = true;
     const none = document.createElement("div");
     none.className = "facet facet--none";
     none.textContent = "图库还没有照片";
@@ -1376,6 +1442,9 @@ async function loadFacets() {
   renderCameraFacets(f);
   renderDayFacets(f);
   renderQualityFacets(f);
+  renderLensFacets(f);
+  renderBucketFacets(elFacetsFocal, elGroupParams, f.focals, "focal", filter.focal);
+  renderBucketFacets(elFacetsIso, elGroupIso, f.isos, "iso", filter.iso);
 }
 
 /**
@@ -1422,6 +1491,12 @@ document.querySelector(".sidebar")?.addEventListener("click", (e) => {
     filter.stars = filter.stars === n ? null : n;
   } else if (facet === "quality") {
     filter.quality = key === filter.quality ? null : key;
+  } else if (facet === "lens") {
+    filter.lens = key === filter.lens ? null : key;
+  } else if (facet === "focal") {
+    filter.focal = key === filter.focal ? null : key;
+  } else if (facet === "iso") {
+    filter.iso = key === filter.iso ? null : key;
   }
 
   void applyFilterChange();
@@ -1439,6 +1514,9 @@ elClear.addEventListener("click", () => {
   filter.decision = "all";
   filter.stars = null;
   filter.quality = null;
+  filter.lens = null;
+  filter.focal = null;
+  filter.iso = null;
   filter.search = "";
   elSearch.value = "";
   elSearchClear.hidden = true;
