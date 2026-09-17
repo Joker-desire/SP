@@ -138,8 +138,7 @@
           <span class="btn-text">撤销</span>
         </button>
 
-        <select class="select" id="group-mode" aria-label="分组方式" title="选择网格分组的依据，组可逐个折叠 / 展开">
-          <option value="none">不分组</option>
+        <select class="select" id="group-mode" aria-label="分组依据" title="分组视图按什么依据收组" hidden>
           <option value="folder">按文件夹分组</option>
           <option value="decision">按选片状态分组</option>
           <option value="stars">按星级分组</option>
@@ -248,24 +247,32 @@
             <option value="sizeDesc">文件大小 · 大 → 小</option>
           </select>
 
-          <div class="segmented" id="density" role="group" aria-label="缩略图大小">
-            <button type="button" data-density="compact" title="紧凑">
+          <div class="segmented" id="view-mode" role="group" aria-label="视图">
+            <button type="button" data-view="grid" title="网格视图">
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
-                <rect x="1.5" y="1.5" width="5.4" height="5.4" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                <rect x="9.1" y="1.5" width="5.4" height="5.4" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                <rect x="1.5" y="9.1" width="5.4" height="5.4" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                <rect x="9.1" y="9.1" width="5.4" height="5.4" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+                <rect x="1.5" y="1.5" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
+                <rect x="6.05" y="1.5" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
+                <rect x="10.6" y="1.5" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
+                <rect x="1.5" y="6.05" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
+                <rect x="6.05" y="6.05" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
+                <rect x="10.6" y="6.05" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
+                <rect x="1.5" y="10.6" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
+                <rect x="6.05" y="10.6" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
+                <rect x="10.6" y="10.6" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
               </svg>
             </button>
-            <button type="button" data-density="normal" title="标准" class="is-active">
+            <button type="button" data-view="group" title="分组视图（依据用旁边的选择器定）">
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
-                <rect x="1.5" y="2.5" width="13" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
-                <rect x="1.5" y="8.5" width="13" height="5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/>
+                <rect x="1.5" y="2" width="13" height="5.2" rx="1" fill="currentColor"/>
+                <rect x="1.5" y="9.4" width="3.9" height="4.4" rx="0.8" fill="currentColor"/>
+                <rect x="6.05" y="9.4" width="3.9" height="4.4" rx="0.8" fill="currentColor"/>
+                <rect x="10.6" y="9.4" width="3.9" height="4.4" rx="0.8" fill="currentColor"/>
               </svg>
             </button>
-            <button type="button" data-density="large" title="大图">
+            <button type="button" data-view="large" title="大图视图">
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
-                <rect x="1.5" y="3" width="13" height="10" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.3"/>
+                <rect x="1.8" y="2.2" width="5.6" height="11.6" rx="1" fill="currentColor"/>
+                <rect x="8.6" y="2.2" width="5.6" height="11.6" rx="1" fill="currentColor"/>
               </svg>
             </button>
           </div>
@@ -362,6 +369,15 @@
 
         <img class="loupe-img" id="loupe-img" alt="" />
 
+        <!-- 详细信息面板：库里有的全摆出来。覆盖在图右侧，按 I 开关，翻页自动跟着换内容 -->
+        <aside class="loupe-detail" id="loupe-detail-panel" hidden>
+          <div class="ld-head">
+            <span>详细信息</span>
+            <button class="ld-close" id="loupe-detail-close" title="关闭（I）" aria-label="关闭详细信息">×</button>
+          </div>
+          <div class="ld-body" id="loupe-detail-body"></div>
+        </aside>
+
         <!-- 大图里的标记按钮和网格里的是同一批操作，只是位置更顺手 -->
         <div class="loupe-actions">
           <button class="cbtn cbtn--keep" id="loupe-keep" title="保留并看下一张（P）">
@@ -377,6 +393,7 @@
             淘汰<kbd>X</kbd>
           </button>
           <button class="cbtn" id="loupe-unmark" title="清除标记（U）">清除<kbd>U</kbd></button>
+          <button class="cbtn" id="loupe-detail" title="详细信息（I）">详情<kbd>I</kbd></button>
 
           <!-- 星级放一组可点的按钮：按 1-5 打星，按完停在原地，
                再按别的数字就是调整——打星是评价，不是过片 -->
@@ -396,7 +413,7 @@
           <span class="loupe-name" id="loupe-name"></span>
           <span class="loupe-exif" id="loupe-exif"></span>
           <span class="loupe-pos" id="loupe-pos"></span>
-          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · 滚轮缩放 · 双击放大 · F 复位 · Esc 关闭</span>
+          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · I 详情 · 滚轮缩放 · 双击放大 · F 复位 · Esc 关闭</span>
           <button class="btn btn-ghost loupe-close" id="loupe-close">关闭</button>
         </div>
       </div>

@@ -669,6 +669,171 @@ async fn library_facets(
 /// 日期列表的上限。超过就只给最近的若干天——一次选片不会翻到三年前。
 const DAY_FACET_LIMIT: i64 = 400;
 
+// ── 照片详情 ─────────────────────────────────────────────────────────────
+//
+// 大图查看时的「详细信息」面板。网格卡片只摆关键参数，这里把库里有的
+// 全部摆出来：文件、EXIF、画面分析、库内指纹，一次问齐，翻页时重查。
+
+/// 同一次快门的另一半文件（NEF ↔ JPG）。`exists` 现查现答——
+/// 原片可能已经被挪走，库存记录不代表文件还在。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SiblingFile {
+    id: i64,
+    path: String,
+    file_kind: String,
+    file_size: i64,
+    exists: bool,
+}
+
+/// 单张照片的完整档案。时间一律返回现成的文本（和侧栏 / 底栏同一套语义），
+/// 前端不再自己拿时间戳换算，免得时区口径出现第二套。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhotoDetail {
+    id: i64,
+    path: String,
+    file_name: String,
+    dir: String,
+    pair_key: String,
+    file_kind: String,
+    is_primary: bool,
+    file_size: i64,
+    /// exif = EXIF 拍摄时间（含机身校正），mtime = 文件修改时间兜底
+    time_source: String,
+    time_text: Option<String>,
+    width: Option<i64>,
+    height: Option<i64>,
+    camera_model: Option<String>,
+    camera_serial: Option<String>,
+    lens: Option<String>,
+    focal_len: Option<f64>,
+    aperture: Option<f64>,
+    shutter: Option<String>,
+    iso: Option<i64>,
+    orientation: Option<i64>,
+    exif_ok: bool,
+    indexed_text: Option<String>,
+    sharpness: Option<f64>,
+    overexposed: Option<f64>,
+    underexposed: Option<f64>,
+    /// 缩略图链路最终用的解码来源（内嵌预览 / 标准解码 / RAW 解码 / 占位图）
+    decode_path: Option<String>,
+    fingerprint: String,
+    content_hash: Option<String>,
+    phash: Option<String>,
+    decision: String,
+    stars: i64,
+    siblings: Vec<SiblingFile>,
+}
+
+fn photo_detail_of(conn: &Connection, id: i64) -> anyhow::Result<PhotoDetail> {
+    let sql = format!(
+        "SELECT p.path, p.pair_key, p.file_kind, p.is_primary, p.file_size,
+                p.width, p.height,
+                {TIME_TEXT},
+                CASE WHEN p.taken_at_corrected IS NOT NULL THEN 'exif' ELSE 'mtime' END,
+                p.camera_model, p.camera_serial, p.lens, p.focal_len, p.aperture,
+                p.shutter, p.iso, p.orientation, p.exif_ok,
+                strftime('%Y-%m-%d %H:%M:%S', p.indexed_at, 'unixepoch', 'localtime'),
+                p.sharpness, p.overexposed, p.underexposed, p.decode_path,
+                p.fingerprint, p.content_hash, p.phash,
+                {DECISION}, {STARS}
+         {FROM_PHOTOS} WHERE p.id = ?1"
+    );
+
+    let mut detail = conn.query_row(&sql, [id], |r| {
+        Ok(PhotoDetail {
+            id,
+            path: r.get(0)?,
+            pair_key: r.get(1)?,
+            file_kind: r.get(2)?,
+            is_primary: r.get(3)?,
+            file_size: r.get(4)?,
+            width: r.get(5)?,
+            height: r.get(6)?,
+            time_text: r.get(7)?,
+            time_source: r.get(8)?,
+            camera_model: r.get(9)?,
+            camera_serial: r.get(10)?,
+            lens: r.get(11)?,
+            focal_len: r.get(12)?,
+            aperture: r.get(13)?,
+            shutter: r.get(14)?,
+            iso: r.get(15)?,
+            orientation: r.get(16)?,
+            exif_ok: r.get(17)?,
+            indexed_text: r.get(18)?,
+            sharpness: r.get(19)?,
+            overexposed: r.get(20)?,
+            underexposed: r.get(21)?,
+            decode_path: r.get(22)?,
+            fingerprint: r.get(23)?,
+            content_hash: r.get(24)?,
+            phash: r.get(25)?,
+            decision: r.get(26)?,
+            stars: r.get(27)?,
+            file_name: String::new(),
+            dir: String::new(),
+            siblings: Vec::new(),
+        })
+    })?;
+
+    let p = std::path::Path::new(&detail.path);
+    detail.file_name = p
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| detail.path.clone());
+    detail.dir = p
+        .parent()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // 同一次快门的另一半（NEF ↔ JPG）。逐个 stat 一下才知道还在不在——
+    // 详情面板是单张操作，几十微秒的 stat 换「文件没了」的明确提示，值。
+    let pid = id.to_string();
+    detail.siblings = conn
+        .prepare(
+            "SELECT id, path, file_kind, file_size
+             FROM photos WHERE pair_key = ?1 AND id != ?2 ORDER BY path",
+        )?
+        .query_map([&detail.pair_key, pid.as_str()], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|(sid, spath, kind, size)| {
+            let exists = std::fs::metadata(&spath).is_ok();
+            SiblingFile {
+                id: sid,
+                path: spath,
+                file_kind: kind,
+                file_size: size,
+                exists,
+            }
+        })
+        .collect();
+
+    Ok(detail)
+}
+
+/// 大图详情面板的数据源：按 photo id 查整行 + 同组文件。
+#[tauri::command]
+async fn photo_detail(state: tauri::State<'_, AppState>, id: i64) -> Result<PhotoDetail, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        photo_detail_of(&conn, id).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<LibraryFacets> {
     // 和网格用同一个目录范围，否则侧栏数字是整库的、网格是当前文件夹的，两边对不上
     let (scope, sargs) = scope_where(roots);
@@ -2291,6 +2456,7 @@ pub fn run() {
             library_facets,
             list_pairs,
             list_pair_ids,
+            photo_detail,
             apply_decision,
             similar_groups,
             export_selection,
@@ -3622,6 +3788,66 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))
             .unwrap();
         assert_eq!(still, 1, "只清缩略图时不该碰数据库");
+    }
+
+    #[test]
+    fn photo_detail_returns_full_row_and_sibling_existence() {
+        let mut conn = db::open_in_memory().unwrap();
+        let dir = temp_dir("detail");
+        std::fs::create_dir_all(&dir).unwrap();
+        let jpg = dir.join("DSC_0001.JPG");
+        std::fs::write(&jpg, b"jpeg").unwrap();
+
+        conn.execute(
+            "INSERT INTO photos(path, pair_key, file_kind, is_primary, file_size, width, height,
+                                taken_at_corrected, camera_model, camera_serial, lens, focal_len,
+                                aperture, shutter, iso, orientation, exif_ok, indexed_at,
+                                sharpness, overexposed, underexposed, fingerprint)
+             VALUES(?1, '/d/DSC_0001', 'raw', 1, 24000000, 6000, 4000, 1787000000,
+                    'Nikon Z 50II', '8069200', 'NIKKOR Z 24-70mm', 35.0, 2.8, '1/250', 400, 1, 1,
+                    strftime('%s','now'), 87.5, 0.0, 0.0, 'fp-0001')",
+            [dir.join("DSC_0001.NEF").to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO photos(path, pair_key, file_kind, is_primary, file_size)
+             VALUES(?1, '/d/DSC_0001', 'jpeg', 0, 8000000)",
+            [jpg.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO decisions(pair_key, decision, stars) VALUES('/d/DSC_0001', 'keep', 4)",
+            [],
+        )
+        .unwrap();
+
+        let nef_id: i64 = conn
+            .query_row("SELECT id FROM photos WHERE file_kind = 'raw'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        let d = photo_detail_of(&conn, nef_id).unwrap();
+        assert_eq!(d.file_name, "DSC_0001.NEF");
+        assert_eq!(d.camera_model.as_deref(), Some("Nikon Z 50II"));
+        assert_eq!(d.decision, "keep");
+        assert_eq!(d.stars, 4);
+        assert_eq!(d.time_source, "exif");
+        assert!(
+            d.time_text.as_deref().unwrap().starts_with("2026-"),
+            "时间文本要和侧栏同一套语义"
+        );
+        assert_eq!(d.siblings.len(), 1, "同一次快门的 JPG 要作为同组文件出现");
+        assert_eq!(d.siblings[0].file_kind, "jpeg");
+        assert!(d.siblings[0].exists, "JPG 实际存在，必须报存在");
+
+        // 把 JPG 删掉再查：exists 要如实翻转——库存里有不代表文件还在
+        std::fs::remove_file(&jpg).unwrap();
+        let d2 = photo_detail_of(&conn, nef_id).unwrap();
+        assert!(!d2.siblings[0].exists, "文件已挪走还报存在就是误导");
+
+        // 查不存在的 id 要报错：详情面板对空值明确报错，而不是画一屏空行
+        assert!(photo_detail_of(&conn, -1).is_err());
     }
 
     #[test]

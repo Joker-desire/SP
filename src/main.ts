@@ -255,7 +255,7 @@ const elDaysNote = $<HTMLElement>("#days-note");
 
 const elSearch = $<HTMLInputElement>("#search");const elSearchClear = $<HTMLButtonElement>("#search-clear");
 const elSort = $<HTMLSelectElement>("#sort");
-const elDensity = $<HTMLElement>("#density");
+const elViewMode = $<HTMLElement>("#view-mode");
 const elClear = $<HTMLButtonElement>("#btn-clear");
 const elCount = $<HTMLElement>("#count");
 const elGrid = $<HTMLElement>("#grid");
@@ -290,6 +290,10 @@ const elLoupeNext = $<HTMLButtonElement>("#loupe-next");
 const elLoupeKeep = $<HTMLButtonElement>("#loupe-keep");
 const elLoupeReject = $<HTMLButtonElement>("#loupe-reject");
 const elLoupeUnmark = $<HTMLButtonElement>("#loupe-unmark");
+const elLoupeDetailBtn = $<HTMLButtonElement>("#loupe-detail");
+const elLoupeDetailPanel = $<HTMLElement>("#loupe-detail-panel");
+const elLoupeDetailClose = $<HTMLButtonElement>("#loupe-detail-close");
+const elLoupeDetailBody = $<HTMLElement>("#loupe-detail-body");
 const elLoupeMark = $<HTMLElement>("#loupe-mark");
 const elLoupeStars = $<HTMLElement>("#loupe-stars");
 const elLoupeZoomLabel = $<HTMLButtonElement>("#loupe-zoom-reset");
@@ -369,10 +373,23 @@ let lastFacets: LibraryFacets | null = null;
 
 /** 上次扫描时勾选的文件夹范围；重新扫描沿用同一范围，不必每次重选。 */
 let lastScopeDirs: string[] | null = null;
+/** 视图模式，对应顶栏三格图标切换器（参考通用修图软件的画法）：
+ *  grid = 平铺网格，group = 分组视图（依据看 #group-mode），large = 大图两列。 */
+type ViewMode = "grid" | "group" | "large";
+const VIEW_KEY = "sp:view";
+
+function loadViewMode(): ViewMode {
+  const v = localStorage.getItem(VIEW_KEY);
+  if (v === "grid" || v === "group" || v === "large") return v;
+  // 老版本只有密度开关：选过大图的迁移到大图视图，其余落到网格
+  if (localStorage.getItem(DEN_KEY) === "large") return "large";
+  return "grid";
+}
+
 /** 分组依据。左侧筛选栏的每一维都能当分组，再加上「所在文件夹」。
- *  值与 index.html 里 #group-mode 的 option value 一一对应。 */
+ *  值与 index.html 里 #group-mode 的 option value 一一对应。
+ *  「不分组」不再是一个依据——分不分组由视图切换器决定，这里只存依据。 */
 type GroupMode =
-  | "none"
   | "folder"
   | "decision"
   | "stars"
@@ -384,19 +401,28 @@ type GroupMode =
   | "focal"
   | "iso";
 
-/** 从 localStorage 读分组方式，兼容旧版只存 0/1 的开关值。 */
+const GROUP_MODES: GroupMode[] = [
+  "folder",
+  "decision",
+  "stars",
+  "pairState",
+  "day",
+  "camera",
+  "quality",
+  "lens",
+  "focal",
+  "iso",
+];
+
+/** 从 localStorage 读分组依据，兼容旧版（0/1 开关和含「none」的版本）。 */
 function loadGroupMode(): GroupMode {
   const v = localStorage.getItem(GROUP_KEY);
   if (v === "1") return "folder";
-  if (v === "0" || v === null) return "none";
-  if (
-    ["folder", "decision", "stars", "pairState", "day", "camera", "quality", "lens", "focal", "iso"].includes(v)
-  ) {
-    return v as GroupMode;
-  }
-  return "none";
+  if (GROUP_MODES.includes(v as GroupMode)) return v as GroupMode;
+  return "folder";
 }
 
+let viewMode: ViewMode = loadViewMode();
 let groupMode: GroupMode = loadGroupMode();
 /** 分组模式下，组 key → 该组 DOM 与计数。 */
 let groupMap: Map<string, { el: HTMLElement; body: HTMLElement; count: number }> | null = null;
@@ -932,8 +958,11 @@ async function reload(opts?: { keepView?: boolean }) {
   nearObserver.disconnect();
   farObserver.disconnect();
   elGrid.innerHTML = "";
-  elGrid.classList.toggle("is-grouped", groupMode !== "none");
-  groupMap = groupMode !== "none" ? new Map() : null;
+  const grouped = viewMode === "group";
+  elGrid.classList.toggle("is-grouped", grouped);
+  if (viewMode === "large") elGrid.dataset.density = "large";
+  else delete elGrid.dataset.density;
+  groupMap = grouped ? new Map() : null;
   elGrid.scrollTop = 0;
   updateCount();
   updateCullInfo();
@@ -1010,7 +1039,7 @@ async function loadMore(token: number) {
 }
 
 function appendCards(list: PairCard[]) {
-  if (groupMode !== "none") {
+  if (viewMode === "group") {
     appendGrouped(list);
     return;
   }
@@ -1039,10 +1068,18 @@ function baseOf(path: string): string {
   return i < 0 ? path : path.slice(i + 1);
 }
 
-/** 分组标题：优先显示目录名，拿不到名字时退回到完整路径。 */
-function folderLabel(path: string): string {
-  const dir = dirOf(path);
-  return baseOf(dir) || dir || "(根目录)";
+/** 文件夹分组的组名：显示**相对当前所选根目录**的路径，子文件夹自带母文件夹
+ *  （如「外拍/精修」），不同深处的同名子目录不会混在一起；根目录自己那一层
+ *  没有可显示的相对路径，就标「(根目录)」。拿不到相对关系时退回目录名。 */
+function folderGroupLabel(dir: string): string {
+  if (!dir) return "(根目录)";
+  const root = rootPath?.replace(/[\\/]+$/, "");
+  if (root) {
+    if (dir === root) return "(根目录)";
+    const sep = dir.startsWith(root + "/") ? "/" : dir.startsWith(root + "\\") ? "\\" : null;
+    if (sep) return dir.slice(root.length + 1).replace(/\\/g, "/");
+  }
+  return baseOf(dir) || dir;
 }
 
 /** 分组模式下，拿到或创建一个分组容器（标题 + 卡片网格）。
@@ -1115,14 +1152,12 @@ function qualityOf(c: PairCard): { key: string; label: string } {
   return { key: "ok", label: "正常" };
 }
 
-/** 按当前 groupMode 算出一张照片的组。返回 null 表示这种模式不该分组（none）。 */
-function groupKeyOf(c: PairCard, mode: GroupMode): { key: string; label: string; title?: string } | null {
+/** 按分组依据算出一张照片的组。 */
+function groupKeyOf(c: PairCard, mode: GroupMode): { key: string; label: string; title?: string } {
   switch (mode) {
-    case "none":
-      return null;
     case "folder": {
       const dir = dirOf(c.path);
-      return { key: dir || "(根目录)", label: folderLabel(dir), title: dir };
+      return { key: dir || "(根目录)", label: folderGroupLabel(dir), title: dir };
     }
     case "decision":
       return { key: c.decision, label: DECISION_LABEL[c.decision] };
@@ -1659,24 +1694,30 @@ elSort.addEventListener("change", () => {
   void reload();
 });
 
-// 缩略图大小：粗筛时用紧凑一屏看更多，终选时用大图看细节
-elDensity.addEventListener("click", (e) => {
-  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-density]");
-  if (!btn?.dataset.density) return;
-  const density = btn.dataset.density;
-  if (density === "normal") delete elGrid.dataset.density;
-  else elGrid.dataset.density = density;
-  for (const b of elDensity.querySelectorAll("button")) {
-    b.classList.toggle("is-active", b === btn);
+// ── 视图切换器（网格 / 分组 / 大图） ────────────────────────────────────
+
+/** 把当前 viewMode 铺到界面上：密度、分组开关、分组依据选择器的显隐。 */
+function applyView() {
+  localStorage.setItem(VIEW_KEY, viewMode);
+  for (const b of elViewMode.querySelectorAll<HTMLButtonElement>("button[data-view]")) {
+    b.classList.toggle("is-active", b.dataset.view === viewMode);
   }
-  // 分组模式下真正的卡片网格在 .group-grid 里，密度得同步过去
-  if (groupMap) {
-    for (const g of groupMap.values()) {
-      if (density === "normal") delete g.body.dataset.density;
-      else g.body.dataset.density = density;
-    }
+  // 分组依据选择器只在分组视图下有意义，其余视图藏掉免得占地方
+  elGroupMode.hidden = viewMode !== "group";
+  // 改了视图就重铺——密度和分组都影响网格结构
+  if (rootPath) void reload();
+  else {
+    // 没有图库时也要把密度落对，免得空状态下宽度跳一下
+    if (viewMode === "large") elGrid.dataset.density = "large";
+    else delete elGrid.dataset.density;
   }
-  localStorage.setItem(DEN_KEY, density);
+}
+
+elViewMode.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-view]");
+  if (!btn?.dataset.view || btn.dataset.view === viewMode) return;
+  viewMode = btn.dataset.view as ViewMode;
+  applyView();
 });
 
 let searchTimer: number | undefined;
@@ -3416,6 +3457,221 @@ function paintLoupeMark(c: PairCard) {
   }
 }
 
+// ── 大图 · 详细信息面板 ─────────────────────────────────────────────────
+//
+// 网格卡片只摆关键参数；想核对完整档案（EXIF、画面分析、同组文件、库内指纹）
+// 按 I 呼出。面板内容跟着翻页走，慢查询回来发现已经翻页就丢弃，不闪旧数据。
+
+interface SiblingFile {
+  id: number;
+  path: string;
+  fileKind: string;
+  fileSize: number;
+  exists: boolean;
+}
+
+interface PhotoDetail {
+  id: number;
+  path: string;
+  fileName: string;
+  dir: string;
+  pairKey: string;
+  fileKind: string;
+  isPrimary: boolean;
+  fileSize: number;
+  timeSource: "exif" | "mtime";
+  timeText: string | null;
+  width: number | null;
+  height: number | null;
+  cameraModel: string | null;
+  cameraSerial: string | null;
+  lens: string | null;
+  focalLen: number | null;
+  aperture: number | null;
+  shutter: string | null;
+  iso: number | null;
+  orientation: number | null;
+  exifOk: boolean;
+  indexedText: string | null;
+  sharpness: number | null;
+  overexposed: number | null;
+  underexposed: number | null;
+  decodePath: string | null;
+  fingerprint: string;
+  contentHash: string | null;
+  phash: string | null;
+  decision: string;
+  stars: number;
+  siblings: SiblingFile[];
+}
+
+let detailOpen = false;
+/** 面板当前展示的是哪张：异步回来对不上号就整包丢弃。 */
+let detailForId: number | null = null;
+
+function toggleDetail(force?: boolean) {
+  detailOpen = force ?? !detailOpen;
+  elLoupeDetailPanel.hidden = !detailOpen;
+  elLoupeDetailBtn.classList.toggle("is-active", detailOpen);
+  if (detailOpen) {
+    const c = items[loupeIndex];
+    if (c) void loadPhotoDetail(c.id);
+  }
+}
+
+async function loadPhotoDetail(id: number) {
+  detailForId = id;
+  elLoupeDetailBody.innerHTML = "";
+  const loading = document.createElement("div");
+  loading.className = "ld-section ld-title";
+  loading.textContent = "读取中…";
+  elLoupeDetailBody.appendChild(loading);
+
+  try {
+    const d = await invoke<PhotoDetail>("photo_detail", { id });
+    if (!detailOpen || detailForId !== id) return; // 期间翻页 / 关面板了
+    renderDetail(d);
+  } catch (e) {
+    if (!detailOpen || detailForId !== id) return;
+    elLoupeDetailBody.textContent = `读取详情失败：${String(e)}`;
+  }
+}
+
+/** 一行「键：值」。值可以是字符串，也可以是现成的元素（同组文件那节要用）。 */
+function detailRow(k: string, v: string | HTMLElement, clip = false): HTMLElement | null {
+  if (typeof v === "string" && v.trim() === "") return null;
+  const row = document.createElement("div");
+  row.className = "ld-row";
+  const key = document.createElement("span");
+  key.className = "ld-key";
+  key.textContent = k;
+  const val = document.createElement("span");
+  val.className = clip ? "ld-val ld-val--clip" : "ld-val";
+  if (typeof v === "string") {
+    val.textContent = v;
+  } else {
+    val.appendChild(v);
+  }
+  row.append(key, val);
+  return row;
+}
+
+/** 长路径 / 指纹：缩略显示、悬停看全文、点击复制。 */
+function copyableRow(k: string, v: string): HTMLElement | null {
+  if (!v) return null;
+  const row = detailRow(k, v, true);
+  if (!row) return null;
+  const val = row.querySelector<HTMLElement>(".ld-val")!;
+  val.title = v;
+  val.addEventListener("click", () => {
+    void navigator.clipboard.writeText(v);
+    setHint("已复制到剪贴板。");
+  });
+  return row;
+}
+
+function detailSection(title: string, rows: Array<HTMLElement | null>): HTMLElement {
+  const sec = document.createElement("div");
+  sec.className = "ld-section";
+  const h = document.createElement("h4");
+  h.className = "ld-title";
+  h.textContent = title;
+  sec.appendChild(h);
+  for (const r of rows) if (r) sec.appendChild(r);
+  return sec;
+}
+
+function renderDetail(d: PhotoDetail) {
+  elLoupeDetailBody.innerHTML = "";
+
+  const kindLabel = d.fileKind === "raw" ? "RAW" : d.fileKind === "jpeg" ? "JPG" : d.fileKind;
+
+  const mp = d.width && d.height ? (d.width * d.height) / 1e6 : null;
+  const orientationLabel =
+    d.orientation === null || d.orientation === undefined || d.orientation === 1
+      ? ""
+      : `（EXIF 方向 ${d.orientation}，已按此摆正）`;
+
+  // 同组文件每行带「还在不在」：挪走 / 删了的路径要点名，不能让人以为导出也会带上它
+  const sibSec = detailSection("同组文件", [
+    d.siblings.length === 0 ? detailRow("说明", "没有同组文件（孤立的 RAW 或 JPG）") : null,
+  ]);
+  for (const s of d.siblings) {
+    const nameEl = document.createElement("span");
+    nameEl.textContent = `${s.fileKind === "raw" ? "RAW" : "JPG"} · ${baseName(s.path)} · ${fmtBytes(s.fileSize)}`;
+    if (!s.exists) {
+      nameEl.classList.add("ld-missing");
+      nameEl.textContent += " · 文件已不在原位置";
+    }
+    const row = detailRow(s.exists ? "副本" : "缺失", nameEl);
+    if (!row) continue;
+    const val = row.querySelector<HTMLElement>(".ld-val")!;
+    val.classList.add("ld-val--clip");
+    val.title = s.path;
+    sibSec.appendChild(row);
+  }
+
+  elLoupeDetailBody.append(
+    detailSection("文件", [
+      detailRow("文件名", d.fileName),
+      copyableRow("路径", d.dir),
+      detailRow("大小", fmtBytes(d.fileSize)),
+      detailRow("类型", kindLabel),
+      detailRow(
+        "像素",
+        d.width && d.height ? `${d.width} × ${d.height}${mp ? `（${mp.toFixed(1)} MP）` : ""}` : "",
+      ),
+      detailRow("方向", orientationLabel),
+    ]),
+    detailSection("拍摄", [
+      detailRow(
+        "拍摄时间",
+        d.timeText ? `${d.timeText}${d.timeSource === "exif" ? "（EXIF）" : "（文件时间）"}` : "",
+      ),
+      detailRow(
+        "机身",
+        [d.cameraModel, d.cameraSerial ? `序列号 ${d.cameraSerial}` : ""].filter(Boolean).join(" · "),
+      ),
+      detailRow("镜头", d.lens ?? ""),
+      detailRow("焦段", d.focalLen ? `${Math.round(d.focalLen)} mm` : ""),
+      detailRow("光圈", d.aperture ? `f/${d.aperture.toFixed(1)}` : ""),
+      detailRow("快门", d.shutter ?? ""),
+      detailRow("ISO", d.iso ? String(d.iso) : ""),
+      detailRow("EXIF", d.exifOk ? "读取正常" : "读取失败（部分参数缺失）"),
+    ]),
+    detailSection(
+      "画面分析",
+      d.sharpness === null && d.overexposed === null && d.underexposed === null
+        ? [detailRow("状态", "还没分析（后台分析排队中或不支持）")]
+        : [
+            detailRow("清晰度", d.sharpness === null ? "" : `${Math.round(d.sharpness)} 分（< 25 判跑焦）`),
+            detailRow(
+              "高光溢出",
+              d.overexposed === null ? "" : `${(d.overexposed * 100).toFixed(1)}%（≥ 2% 判溢出）`,
+            ),
+            detailRow(
+              "暗部死黑",
+              d.underexposed === null ? "" : `${(d.underexposed * 100).toFixed(1)}%（≥ 25% 判死黑）`,
+            ),
+          ],
+    ),
+    sibSec,
+    detailSection("库内", [
+      detailRow("选片状态", DECISION_LABEL[(d.decision as Decision) ?? "none"] ?? d.decision),
+      detailRow("星级", d.stars > 0 ? "★".repeat(d.stars) : "未评分"),
+      copyableRow("pair_key", d.pairKey),
+      copyableRow("指纹", d.fingerprint),
+      copyableRow("内容哈希", d.contentHash ?? ""),
+      copyableRow("pHash", d.phash ?? ""),
+      copyableRow("缩略图来源", d.decodePath ?? ""),
+      detailRow("入库时间", d.indexedText ?? ""),
+    ]),
+  );
+}
+
+elLoupeDetailBtn.addEventListener("click", () => toggleDetail());
+elLoupeDetailClose.addEventListener("click", () => toggleDetail(false));
+
 async function openLoupe(index: number) {
   const c = items[index];
   if (!c) return;
@@ -3437,6 +3693,8 @@ async function openLoupe(index: number) {
   ].filter(Boolean);
   elLoupeExif.textContent = exif.join(" · ");
   paintLoupeMark(c);
+  // 详情面板开着就跟着翻页换内容；读取是异步的，回来对不上号会自己丢弃
+  if (detailOpen) void loadPhotoDetail(c.id);
   updateCullInfo();
 
   elLoupeImg.removeAttribute("src");
@@ -3464,6 +3722,8 @@ function closeLoupe() {
   elLoupe.hidden = true;
   elLoupeImg.removeAttribute("src");
   loupeSrcSize = 0;
+  // 大图关了详情也收起来，下次进来从干净状态开始
+  if (detailOpen) toggleDetail(false);
   window.clearTimeout(detailTimer);
   resetZoom();
   updateCullInfo();
@@ -3597,6 +3857,11 @@ window.addEventListener("keydown", (e) => {
       elLoupeZoomActual.click();
       return;
     }
+    if (lower === "i") {
+      e.preventDefault();
+      toggleDetail();
+      return;
+    }
 
     // 标记完自动跳下一张——这就是选片的手感：一个键处理一张，手不离开键盘
     if (lower === "p") {
@@ -3680,16 +3945,13 @@ window.addEventListener("keydown", (e) => {
 async function boot() {
   applyTheme(savedTheme());
 
-  const savedDensity = localStorage.getItem(DEN_KEY);
-  if (savedDensity) {
-    if (savedDensity !== "normal") elGrid.dataset.density = savedDensity;
-    for (const b of elDensity.querySelectorAll<HTMLButtonElement>("button")) {
-      b.classList.toggle("is-active", b.dataset.density === savedDensity);
-    }
-  }
-
-  // 同步分组方式的初始状态
+  // 同步视图切换器与分组依据的初始状态（applyView 里不 reload，首屏加载自己会铺）
   elGroupMode.value = groupMode;
+  for (const b of elViewMode.querySelectorAll<HTMLButtonElement>("button[data-view]")) {
+    b.classList.toggle("is-active", b.dataset.view === viewMode);
+  }
+  elGroupMode.hidden = viewMode !== "group";
+  if (viewMode === "large") elGrid.dataset.density = "large";
   updateUndoBtn();
 
   await listen<ScanProgress>("scan://progress", (e) => showProgress(e.payload));
