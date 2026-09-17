@@ -2247,7 +2247,15 @@ async function startScan(
       // 启动时的自动重扫：图库没变化就别重排界面，免得白闪一下
       setHint(`图库已是最新（${r.pairs.toLocaleString()} 张，检查用时 ${(r.elapsedMs / 1000).toFixed(1)} 秒）`);
     } else {
-      setHint(summaryText(r), r.failed || r.exifFailed ? "warn" : "ok");
+      if (r.pairs === 0 && opts.includeDirs?.length === 0) {
+        // 一个子文件夹都没勾、根目录自己这层又没照片：把出路说清楚，别让人对着空网格猜
+        setHint(
+          "当前文件夹里没有照片（没有进入子文件夹）。点「重扫」重新选择，勾上里面的子文件夹再试。",
+          "warn",
+        );
+      } else {
+        setHint(summaryText(r), r.failed || r.exifFailed ? "warn" : "ok");
+      }
       await refreshLibrary();
     }
   } catch (e) {
@@ -2384,13 +2392,12 @@ elScopeOk.addEventListener("click", () => {
     .filter((cb) => cb.checked)
     .map((cb) => cb.value);
   closeScopeModal();
-  if (chosen.length === 0) {
-    setHint("至少勾选一个子文件夹才能扫描。", "warn");
-    return;
-  }
   const root = scopeTargetPath;
   scopePrevRoot = null;
-  setHint("正在扫描…缩略图会在过程中逐张出现。");
+  // 一个都不勾不是错误，意思是「只读这个文件夹自己那一层的照片」
+  setHint(
+    chosen.length > 0 ? "正在扫描…缩略图会在过程中逐张出现。" : "正在扫描当前文件夹里的照片（不进子文件夹）…",
+  );
   void startScan(root, { quiet: false, includeDirs: chosen });
 });
 

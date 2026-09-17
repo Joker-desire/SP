@@ -49,15 +49,26 @@ async fn scan_folder(
     include_dirs: Option<Vec<String>>,
 ) -> Result<indexer::ScanSummary, String> {
     let db = state.db.clone();
-    let roots: Vec<PathBuf> = match include_dirs {
-        Some(d) if !d.is_empty() => d.into_iter().map(PathBuf::from).collect(),
-        _ => vec![PathBuf::from(&path)],
+    // includeDirs 的三种取值各有含义，别合并：
+    //   None      → 递归整个根目录（启动时自动重扫、没有子目录可勾时的默认行为）
+    //   Some([])  → 只扫根目录自己那一层：文件夹里既有照片又有子文件夹，
+    //               用户一个子文件夹都不勾时就是这个意思
+    //   Some(dirs)→ 只扫勾选的这些子目录
+    let (roots, max_depth): (Vec<PathBuf>, Option<usize>) = match include_dirs {
+        Some(d) if !d.is_empty() => (d.into_iter().map(PathBuf::from).collect(), None),
+        Some(_) => (vec![PathBuf::from(&path)], Some(1)),
+        None => (vec![PathBuf::from(&path)], None),
     };
     tauri::async_runtime::spawn_blocking(move || {
-        indexer::scan_with_progress(&roots, &db, |p| {
-            // 推送失败不是错误：窗口已经关了而已，扫描本身该继续跑完
-            let _ = app.emit("scan://progress", &p);
-        })
+        indexer::scan_with_progress(
+            &roots,
+            &db,
+            |p| {
+                // 推送失败不是错误：窗口已经关了而已，扫描本身该继续跑完
+                let _ = app.emit("scan://progress", &p);
+            },
+            max_depth,
+        )
         .map_err(|e| format!("{e:#}"))
     })
     .await
@@ -2079,7 +2090,7 @@ mod tests {
         std::fs::write(ab.join("DSC_0009.NEF"), "nef-9").unwrap();
 
         let db = Arc::new(Mutex::new(db::open_in_memory().unwrap()));
-        indexer::scan_with_progress(&[a.clone(), ab.clone()], &db, |_| {}).unwrap();
+        indexer::scan_with_progress(&[a.clone(), ab.clone()], &db, |_| {}, None).unwrap();
 
         // 不限范围：两个目录都在，一共 3 张
         assert_eq!(count(&db, PairFilter::default()), 3);

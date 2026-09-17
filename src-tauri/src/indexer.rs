@@ -109,7 +109,7 @@ pub struct ScanSummary {
 /// 这个包装只剩测试在用——测试关心的是「扫出什么结果」，不是进度条。
 #[cfg(test)]
 pub fn scan(root: &Path, db: &Arc<Mutex<Connection>>) -> Result<ScanSummary> {
-    scan_with_progress(&[root.to_path_buf()], db, |_| {})
+    scan_with_progress(&[root.to_path_buf()], db, |_| {}, None)
 }
 
 /// 扫描并流式上报进度。
@@ -123,10 +123,15 @@ pub fn scan(root: &Path, db: &Arc<Mutex<Connection>>) -> Result<ScanSummary> {
 ///
 /// `roots` 是「要扫描哪些目录」——可以是用户勾选的若干子文件夹，而不是
 /// 永远递归整个根目录（见文件夹范围选择）。
+///
+/// `max_depth` 用来表达「只读这一层」：文件夹里既有照片又有子文件夹、用户一个
+/// 子文件夹都不勾时，就按 `Some(1)` 扫，只把根目录自己的照片读出来。
+/// `None` 表示不限层数。
 pub fn scan_with_progress<F>(
     roots: &[PathBuf],
     db: &Arc<Mutex<Connection>>,
     on_progress: F,
+    max_depth: Option<usize>,
 ) -> Result<ScanSummary>
 where
     F: Fn(ScanProgress) + Send + Sync,
@@ -148,7 +153,12 @@ where
     on_progress(ScanProgress::new("walking", 0, 0));
     let mut files: Vec<PathBuf> = Vec::new();
     for r in roots {
-        for entry in WalkDir::new(r).follow_links(false).into_iter() {
+        let walker = WalkDir::new(r).follow_links(false);
+        let it = match max_depth {
+            Some(d) => walker.max_depth(d).into_iter(),
+            None => walker.into_iter(),
+        };
+        for entry in it {
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -928,9 +938,14 @@ mod tests {
 
         let db = Arc::new(Mutex::new(crate::db::open_in_memory().unwrap()));
         let seen = std::sync::Mutex::new(Vec::new());
-        scan_with_progress(&[dir.clone()], &db, |p| {
-            seen.lock().unwrap().push(p.phase);
-        })
+        scan_with_progress(
+            &[dir.clone()],
+            &db,
+            |p| {
+                seen.lock().unwrap().push(p.phase);
+            },
+            None,
+        )
         .unwrap();
 
         let phases = seen.into_inner().unwrap();
@@ -955,7 +970,7 @@ mod tests {
 
         let db = Arc::new(Mutex::new(crate::db::open_in_memory().unwrap()));
         // 只扫 A 目录
-        scan_with_progress(&[a.clone()], &db, |_| {}).unwrap();
+        scan_with_progress(&[a.clone()], &db, |_| {}, None).unwrap();
         let only_a: i64 = db
             .lock()
             .unwrap()
@@ -964,13 +979,44 @@ mod tests {
         assert_eq!(only_a, 1, "只应扫到 A 里的 1 个文件");
 
         // 再扫 B：A 不应被清理（因为本次根目录不包含 A）
-        scan_with_progress(&[b.clone()], &db, |_| {}).unwrap();
+        scan_with_progress(&[b.clone()], &db, |_| {}, None).unwrap();
         let both: i64 = db
             .lock()
             .unwrap()
             .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))
             .unwrap();
         assert_eq!(both, 2, "B 追加进来，A 的老记录应保留");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 一个子文件夹都不勾时：只读根目录自己那一层的照片，不进子文件夹。
+    #[test]
+    fn scans_only_the_root_level_when_depth_is_one() {
+        let dir = temp_dir("shallow");
+        let sub = dir.join("子文件夹");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(dir.join("DSC_ROOT.NEF"), "root").unwrap();
+        std::fs::write(sub.join("DSC_SUB.NEF"), "sub").unwrap();
+
+        let db = Arc::new(Mutex::new(crate::db::open_in_memory().unwrap()));
+
+        scan_with_progress(&[dir.clone()], &db, |_| {}, Some(1)).unwrap();
+        let n: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "只应读到根目录自己的 1 个文件");
+
+        // 不限层数时两个都该进来，确认上面的差别确实来自 max_depth
+        scan_with_progress(&[dir.clone()], &db, |_| {}, None).unwrap();
+        let all: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(all, 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
