@@ -203,6 +203,13 @@ struct PairFilter {
     /// takenDesc（默认）/ takenAsc / nameAsc / nameDesc / sizeDesc / starsDesc
     #[serde(default)]
     sort: Option<String>,
+    /// 只看这些目录下的照片（绝对路径）。`None`／空＝不限，查整个图库。
+    ///
+    /// 换文件夹时旧文件夹的记录**故意留在库里**（选片标记是按 pair_key 存的，
+    /// 留住它们，回头再选同一个文件夹时标记会自己回来），所以视图必须靠这个
+    /// 条件限定在「当前选中的文件夹」上，否则换完文件夹会看到上次的照片还在。
+    #[serde(default)]
+    roots: Option<Vec<String>>,
 }
 
 /// 网格用的照片卡片。以「一次快门」为单位，而不是以文件为单位。
@@ -275,11 +282,69 @@ fn escape_like(s: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// 目录前缀。末尾补上分隔符，这样 `/a/b` 不会把兄弟目录 `/a/bc` 也算进来。
+fn dir_prefix(dir: &str) -> String {
+    let trimmed = dir.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("{}{}", trimmed, std::path::MAIN_SEPARATOR)
+}
+
+/// 目录范围条件：`substr(p.path, 1, length(?)) = ?`。
+///
+/// 长度交给 SQLite 自己算（`length()` 按字符数，中文目录名也不会错位），
+/// 比在 Rust 里取字节长度再传进去稳。返回空串表示「不限」。
+fn scope_group(roots: Option<&[String]>) -> (String, Vec<rusqlite::types::Value>) {
+    use rusqlite::types::Value;
+
+    let roots = match roots {
+        Some(r) if !r.is_empty() => r,
+        _ => return (String::new(), Vec::new()),
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    let mut args: Vec<Value> = Vec::new();
+    for r in roots {
+        let prefix = dir_prefix(r);
+        if prefix.is_empty() {
+            continue;
+        }
+        parts.push("substr(p.path, 1, length(?)) = ?".to_string());
+        // 同一个前缀要绑两次：一次给 length()，一次给比较
+        args.push(Value::Text(prefix.clone()));
+        args.push(Value::Text(prefix));
+    }
+
+    if parts.is_empty() {
+        (String::new(), Vec::new())
+    } else {
+        (format!("({})", parts.join(" OR ")), args)
+    }
+}
+
+/// 拼在 `WHERE` 后面的版本：不限时是空串，方便直接追加。
+fn scope_where(roots: Option<&[String]>) -> (String, Vec<rusqlite::types::Value>) {
+    let (group, args) = scope_group(roots);
+    if group.is_empty() {
+        (String::new(), args)
+    } else {
+        (format!(" AND {group}"), args)
+    }
+}
+
 fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
     use rusqlite::types::Value;
 
     let mut conds: Vec<String> = vec!["p.is_primary = 1".to_string()];
     let mut args: Vec<Value> = Vec::new();
+
+    // 目录范围必须放在最前面，后面的参数占位符顺序才对得上
+    let (scope, scope_args) = scope_group(f.roots.as_deref());
+    if !scope.is_empty() {
+        conds.push(scope);
+        args.extend(scope_args);
+    }
 
     match f.pair_state.as_deref().unwrap_or("all") {
         "both" => conds.push(format!("({HAS_RAW} AND {HAS_JPG})")),
@@ -440,11 +505,14 @@ fn query_pairs(
 /// 计数是**整个图库**的口径（不是「在当前筛选结果里再统计」），
 /// 这样点开筛选栏时看到的数字始终稳定，不会因为叠加条件而变小到看不懂。
 #[tauri::command]
-async fn library_facets(state: tauri::State<'_, AppState>) -> Result<LibraryFacets, String> {
+async fn library_facets(
+    state: tauri::State<'_, AppState>,
+    roots: Option<Vec<String>>,
+) -> Result<LibraryFacets, String> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db.lock().map_err(|e| e.to_string())?;
-        facets_of(&conn).map_err(|e| format!("{e:#}"))
+        facets_of(&conn, roots.as_deref()).map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -453,10 +521,14 @@ async fn library_facets(state: tauri::State<'_, AppState>) -> Result<LibraryFace
 /// 日期列表的上限。超过就只给最近的若干天——一次选片不会翻到三年前。
 const DAY_FACET_LIMIT: i64 = 400;
 
-fn facets_of(conn: &Connection) -> anyhow::Result<LibraryFacets> {
+fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<LibraryFacets> {
+    // 和网格用同一个目录范围，否则侧栏数字是整库的、网格是当前文件夹的，两边对不上
+    let (scope, sargs) = scope_where(roots);
+    let sp = || rusqlite::params_from_iter(sargs.iter());
+
     let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM photos p WHERE p.is_primary = 1",
-        [],
+        &format!("SELECT COUNT(*) FROM photos p WHERE p.is_primary = 1{scope}"),
+        sp(),
         |r| r.get(0),
     )?;
 
@@ -466,9 +538,9 @@ fn facets_of(conn: &Connection) -> anyhow::Result<LibraryFacets> {
                 COALESCE(SUM(CASE WHEN {HAS_RAW} AND {HAS_JPG} THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN {HAS_RAW} AND NOT {HAS_JPG} THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN NOT {HAS_RAW} AND {HAS_JPG} THEN 1 ELSE 0 END), 0)
-             FROM photos p WHERE p.is_primary = 1"
+             FROM photos p WHERE p.is_primary = 1{scope}"
         ),
-        [],
+        sp(),
         |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -508,16 +580,16 @@ fn facets_of(conn: &Connection) -> anyhow::Result<LibraryFacets> {
 
     let mut cameras = Vec::new();
     {
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT COALESCE(p.camera_serial, '__none__') AS serial,
                     COALESCE(MAX(p.camera_model), '未知机身') AS model,
                     COUNT(*) AS n
              FROM photos p
-             WHERE p.is_primary = 1
+             WHERE p.is_primary = 1{scope}
              GROUP BY serial
-             ORDER BY n DESC, model",
-        )?;
-        let mut rows = stmt.query([])?;
+             ORDER BY n DESC, model"
+        ))?;
+        let mut rows = stmt.query(sp())?;
         while let Some(r) = rows.next()? {
             let key: String = r.get(0)?;
             let model: String = r.get(1)?;
@@ -538,14 +610,16 @@ fn facets_of(conn: &Connection) -> anyhow::Result<LibraryFacets> {
     let distinct_days: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM (SELECT DISTINCT {day_expr} AS d FROM photos p
-                WHERE p.is_primary = 1 AND {day_expr} IS NOT NULL)"
+                WHERE p.is_primary = 1 AND {day_expr} IS NOT NULL{scope})"
         ),
-        [],
+        sp(),
         |r| r.get(0),
     )?;
     let undated: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM photos p WHERE p.is_primary = 1 AND {day_expr} IS NULL"),
-        [],
+        &format!(
+            "SELECT COUNT(*) FROM photos p WHERE p.is_primary = 1 AND {day_expr} IS NULL{scope}"
+        ),
+        sp(),
         |r| r.get(0),
     )?;
 
@@ -554,12 +628,12 @@ fn facets_of(conn: &Connection) -> anyhow::Result<LibraryFacets> {
         let mut stmt = conn.prepare(&format!(
             "SELECT {day_expr} AS d, COUNT(*) AS n
              FROM photos p
-             WHERE p.is_primary = 1 AND {day_expr} IS NOT NULL
+             WHERE p.is_primary = 1 AND {day_expr} IS NOT NULL{scope}
              GROUP BY d
              ORDER BY d DESC
              LIMIT {DAY_FACET_LIMIT}"
         ))?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query(sp())?;
         while let Some(r) = rows.next()? {
             let key: String = r.get(0)?;
             days.push(Facet {
@@ -586,9 +660,9 @@ fn facets_of(conn: &Connection) -> anyhow::Result<LibraryFacets> {
                 COALESCE(SUM(CASE WHEN {DECISION} = 'none'   THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN {DECISION} = 'keep'   THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN {DECISION} = 'reject' THEN 1 ELSE 0 END), 0)
-             {FROM_PHOTOS} WHERE p.is_primary = 1"
+             {FROM_PHOTOS} WHERE p.is_primary = 1{scope}"
         ),
-        [],
+        sp(),
         |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -637,9 +711,9 @@ fn facets_of(conn: &Connection) -> anyhow::Result<LibraryFacets> {
     {
         let mut stmt = conn.prepare(&format!(
             "SELECT {STARS} AS s, COUNT(*) {FROM_PHOTOS}
-             WHERE p.is_primary = 1 GROUP BY s"
+             WHERE p.is_primary = 1{scope} GROUP BY s"
         ))?;
-        let mut rows = stmt.query([])?;
+        let mut rows = stmt.query(sp())?;
         while let Some(r) = rows.next()? {
             let s: i64 = r.get(0)?;
             if let Some(slot) = stars.get_mut(s.clamp(0, 5) as usize) {
@@ -1984,6 +2058,64 @@ mod tests {
             .total
     }
 
+    /// 换文件夹之后，视图必须只属于新文件夹。
+    ///
+    /// 旧文件夹的记录是**故意留着不清的**（标记按 pair_key 存，留着回头再选
+    /// 同一个文件夹时标记会自己回来），所以这个范围条件是换文件夹不出错的唯一依靠。
+    #[test]
+    fn roots_scope_the_view_to_the_selected_folder() {
+        let base = std::env::temp_dir().join(format!("sp-roots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let a = base.join("A");
+        // 故意造一个前缀相近的兄弟目录：只比前缀的话 "…/A" 会把 "…/AB" 也算进来
+        let ab = base.join("AB");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&ab).unwrap();
+
+        for i in ["0001", "0002"] {
+            std::fs::write(a.join(format!("DSC_{i}.NEF")), format!("nef-{i}")).unwrap();
+            std::fs::write(a.join(format!("DSC_{i}.JPG")), format!("jpg-{i}")).unwrap();
+        }
+        std::fs::write(ab.join("DSC_0009.NEF"), "nef-9").unwrap();
+
+        let db = Arc::new(Mutex::new(db::open_in_memory().unwrap()));
+        indexer::scan_with_progress(&[a.clone(), ab.clone()], &db, |_| {}).unwrap();
+
+        // 不限范围：两个目录都在，一共 3 张
+        assert_eq!(count(&db, PairFilter::default()), 3);
+
+        let a_str = a.to_string_lossy().to_string();
+        let ab_str = ab.to_string_lossy().to_string();
+
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    roots: Some(vec![a_str.clone()]),
+                    ..Default::default()
+                }
+            ),
+            2,
+            "选了 A 就只看到 A 的两张"
+        );
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    roots: Some(vec![ab_str.clone()]),
+                    ..Default::default()
+                }
+            ),
+            1,
+            "选了 AB 就只看到 AB 的一张，不能被 A 的前缀带进来"
+        );
+
+        // 侧栏计数也得跟着范围走，否则它报整库的数字、网格显示当前文件夹
+        let f = facets_of(&db.lock().unwrap(), Some(&[a_str])).unwrap();
+        assert_eq!(f.total, 2);
+        assert_eq!(facets_of(&db.lock().unwrap(), None).unwrap().total, 3);
+    }
+
     #[test]
     fn filters_by_pair_state() {
         let (dir, conn) = seeded("pairstate");
@@ -2132,7 +2264,7 @@ mod tests {
     #[test]
     fn facets_cover_every_dimension() {
         let (dir, conn) = seeded("facets");
-        let f = facets_of(&conn.lock().unwrap()).unwrap();
+        let f = facets_of(&conn.lock().unwrap(), None).unwrap();
 
         assert_eq!(f.total, 3);
         let pick = |key: &str| {
@@ -2406,7 +2538,7 @@ mod tests {
         )
         .unwrap();
 
-        let f = facets_of(&conn.lock().unwrap()).unwrap();
+        let f = facets_of(&conn.lock().unwrap(), None).unwrap();
         let pick = |list: &[Facet], key: &str| {
             list.iter()
                 .find(|x| x.key == key)

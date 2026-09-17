@@ -708,6 +708,21 @@ function observeCard(card: HTMLElement) {
   farObserver.observe(card);
 }
 
+/**
+ * 当前视图的目录范围。
+ *
+ * 换文件夹时旧文件夹的照片**故意留在库里**不删（标记是按 pair_key 存的，留着
+ * 回头再选同一个文件夹时标记会自己回来），所以每次查询都得带上范围，否则换完
+ * 文件夹会看到上一个文件夹的照片还挂在网格里。
+ *
+ * 勾过子目录就用勾选结果，没勾过就是整个选中的文件夹；「清空」之后没有文件夹，
+ * 返回 null —— 那种情况视图本来就该是空的（见 loadMore）。
+ */
+function currentRoots(): string[] | null {
+  if (lastScopeDirs && lastScopeDirs.length > 0) return lastScopeDirs;
+  return rootPath ? [rootPath] : null;
+}
+
 function currentFilterPayload() {
   return {
     pairState: filter.pairState,
@@ -718,6 +733,7 @@ function currentFilterPayload() {
     stars: filter.stars,
     search: filter.search,
     sort: filter.sort,
+    roots: currentRoots(),
   };
 }
 
@@ -743,9 +759,20 @@ function filterTracksMarks(): boolean {
   return filter.decision !== "all" || filter.stars !== null;
 }
 
-async function reload() {
+/**
+ * 重新铺一遍网格。
+ *
+ * keepView 用于「扫描进行中的渐进刷新」：那种刷新一秒来好几次，如果每次都把滚动
+ * 位置弹回顶部、把选中清掉，用户等于一边扫一边被抢走鼠标，渐进显示就没意义了。
+ * 所以这个模式下先把滚动位置和选中项记下来，铺完再原样放回去。
+ */
+async function reload(opts?: { keepView?: boolean }) {
   renderToken += 1;
   const token = renderToken;
+
+  const keepView = opts?.keepView === true;
+  const keepScroll = keepView ? elGrid.scrollTop : 0;
+  const keepSelection = keepView ? Array.from(selection) : null;
 
   items = [];
   total = 0;
@@ -762,11 +789,41 @@ async function reload() {
   updateCullInfo();
 
   await loadMore(token);
+
+  // 期间又发起了一次刷新（或页面被清掉）就别再动手了，交给后发起的那次收尾
+  if (token !== renderToken) return;
+
+  if (!keepView) return;
+
+  if (keepSelection && keepSelection.length > 0) {
+    for (const id of keepSelection) {
+      if (itemById.has(id)) selection.add(id);
+    }
+    // 选中态是画在卡片上的，卡片重建过，得照着新的 selection 再刷一遍
+    for (const card of elGrid.querySelectorAll<HTMLElement>(".card[data-id]")) {
+      const id = Number(card.dataset.id);
+      card.dataset.sel = selection.has(id) ? "1" : "0";
+    }
+  }
+  elGrid.scrollTop = keepScroll;
+  updateCount();
+  updateCullInfo();
 }
 
 async function loadMore(token: number) {
   if (loadingPage || noMore || token !== renderToken) return;
   loadingPage = true;
+
+  // 没选文件夹时视图就是空的：库里可能还留着上次文件夹的照片（标记要留着复用），
+  // 不带范围去查会把它们全捞出来，看起来就像「清空」没生效。
+  if (!rootPath) {
+    total = 0;
+    noMore = true;
+    updateCount();
+    renderEmpty();
+    loadingPage = false;
+    return;
+  }
 
   try {
     const page = await invoke<PairPage>("list_pairs", {
@@ -1176,7 +1233,7 @@ elFacetsDays.addEventListener("click", (e) => {
 });
 
 async function loadFacets() {
-  const f = await invoke<LibraryFacets>("library_facets");
+  const f = await invoke<LibraryFacets>("library_facets", { roots: currentRoots() });
 
   if (f.total === 0) {
     // 图库空的时候别摆一排 0，一句话说清就够了
@@ -1212,7 +1269,7 @@ async function loadFacets() {
  */
 async function refreshFacetCounts() {
   try {
-    const f = await invoke<LibraryFacets>("library_facets");
+    const f = await invoke<LibraryFacets>("library_facets", { roots: currentRoots() });
     if (f.total === 0) return;
     renderDecisionFacets(f);
     renderStarFacets(f);
@@ -1740,7 +1797,7 @@ function showExportProgress(p: ExportProgress) {
 async function openExportDialog() {
   let facets: LibraryFacets | null = null;
   try {
-    facets = await invoke<LibraryFacets>("library_facets");
+    facets = await invoke<LibraryFacets>("library_facets", { roots: currentRoots() });
   } catch {
     /* 拿不到计数就把选项留空，不挡住导出本身 */
   }
@@ -2146,7 +2203,8 @@ function startProgressiveRefresh() {
   const tick = async () => {
     if (!scanning) return;
     try {
-      await reload();
+      // keepView：扫描中用户可能已经在翻、在选了，别把人弹回顶部
+      await reload({ keepView: true });
     } catch {
       /* 扫描中途偶发读不到无所谓，下一拍再试 */
     }
