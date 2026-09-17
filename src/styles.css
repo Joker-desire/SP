@@ -1071,12 +1071,13 @@ select {
   overflow: hidden;
 }
 
-/* 缩放控件浮在右上角：放大是高频动作，不该让人去底栏找按钮 */
+/* 缩放控件浮在右上角：放大是高频动作，不该让人去底栏找按钮。
+   z-index 要比放大后的图片高（transform 会让图片也进入同一层叠层）。 */
 .loupe-zoom {
   position: absolute;
   top: 18px;
   right: 18px;
-  z-index: 2;
+  z-index: 4;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -1213,6 +1214,8 @@ select {
 .loupe-nav {
   position: absolute;
   top: 50%;
+  /* 同 .loupe-actions：放大后的图片会盖住没有 z-index 的兄弟节点 */
+  z-index: 3;
   transform: translateY(-50%);
   width: 44px;
   height: 72px;
@@ -1464,11 +1467,22 @@ kbd {
 
 /* ---------- 大图里的标记按钮 ---------- */
 
+/* 放大后图片会铺满整个视口，这一排必须压在图上、并且自带底衬才看得清——
+   不然放大一看细节，保留 / 淘汰按钮就先被图盖住了。 */
 .loupe-actions {
+  position: relative;
+  z-index: 3;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 8px;
+  padding: 6px 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(8, 8, 10, 0.66);
+  backdrop-filter: blur(8px);
 }
 
 /* 大图浮层的底永远是深色的（照片在黑底上判色才准），所以这里的
@@ -1871,6 +1885,12 @@ kbd {
   overflow: hidden;
 }
 
+/* 作者样式的 display:flex 会盖掉 [hidden] 的 display:none（同一特异度、后来者胜），
+   不写这一行面板就会一进大图自己弹出来。 */
+.loupe-detail[hidden] {
+  display: none;
+}
+
 .ld-head {
   flex: 0 0 auto;
   display: flex;
@@ -1940,6 +1960,47 @@ kbd {
   cursor: text;
 }
 
+/* 完整 EXIF 里的小节名（曝光 / 镜头 / 机身 …） */
+.ld-exif-group {
+  margin: 10px 0 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--accent-text);
+}
+
+.ld-exif-group:first-of-type {
+  margin-top: 4px;
+}
+
+/* 内部标识这类次要信息：默认收起，需要时点开 */
+.ld-fold > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.ld-fold > summary::before {
+  content: "▸";
+  font-size: 9px;
+  color: var(--text-mute);
+  transition: transform 0.14s;
+}
+
+.ld-fold[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.ld-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ld-fold[open] > summary {
+  margin-bottom: 4px;
+}
+
 /* 长路径 / 指纹：一行放不下就缩着显示，悬停看全文，点击复制 */
 .ld-val--clip {
   white-space: nowrap;
@@ -1960,6 +2021,32 @@ kbd {
 @media (max-width: 1100px) {
   .loupe-detail {
     width: 252px;
+  }
+}
+
+/* 面板一开，右上角那排缩放按钮和「下一张」都会落到面板底下，
+   得让开 308（面板宽）+ 14（面板右边距）+ 一点缝隙；
+   舞台也相应右缩，免得照片右侧被面板压掉一条。 */
+.loupe.has-detail .loupe-zoom {
+  right: 330px;
+}
+
+.loupe.has-detail .loupe-nav--next {
+  right: 330px;
+}
+
+.loupe.has-detail .loupe-stage {
+  padding-right: 326px;
+}
+
+@media (max-width: 1100px) {
+  .loupe.has-detail .loupe-zoom,
+  .loupe.has-detail .loupe-nav--next {
+    right: 274px;
+  }
+
+  .loupe.has-detail .loupe-stage {
+    padding-right: 270px;
   }
 }
 

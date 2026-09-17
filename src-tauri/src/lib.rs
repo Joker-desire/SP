@@ -6,6 +6,7 @@
 
 mod analyze;
 mod db;
+mod exif_detail;
 mod indexer;
 mod pairing;
 mod paths;
@@ -829,6 +830,27 @@ async fn photo_detail(state: tauri::State<'_, AppState>, id: i64) -> Result<Phot
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db.lock().map_err(|e| e.to_string())?;
         photo_detail_of(&conn, id).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 详情面板的「完整 EXIF」：只读打开一次原文件，把 EXIF 里能认出来的都摆出来。
+///
+/// 索引时为了吞吐只存了十来个字段，剩下的留到「用户真的在看这一张」时现读。
+/// 前端拿到的是现成的「小节 / 名称 / 值」三元组，按小节顺序渲染即可。
+#[tauri::command]
+async fn photo_exif(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<Vec<exif_detail::ExifItem>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let path: String = conn
+            .query_row("SELECT path FROM photos WHERE id = ?1", [id], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        exif_detail::read_full(Path::new(&path)).map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2456,6 +2478,7 @@ pub fn run() {
             library_facets,
             list_pairs,
             list_pair_ids,
+            photo_exif,
             photo_detail,
             apply_decision,
             similar_groups,
@@ -3792,7 +3815,7 @@ mod tests {
 
     #[test]
     fn photo_detail_returns_full_row_and_sibling_existence() {
-        let mut conn = db::open_in_memory().unwrap();
+        let conn = db::open_in_memory().unwrap();
         let dir = temp_dir("detail");
         std::fs::create_dir_all(&dir).unwrap();
         let jpg = dir.join("DSC_0001.JPG");

@@ -3505,6 +3505,13 @@ interface PhotoDetail {
   siblings: SiblingFile[];
 }
 
+/** 完整 EXIF 里的一行，分组与顺序都由后端给定（见 src-tauri/src/exif_detail.rs）。 */
+interface ExifItem {
+  group: string;
+  label: string;
+  value: string;
+}
+
 let detailOpen = false;
 /** 面板当前展示的是哪张：异步回来对不上号就整包丢弃。 */
 let detailForId: number | null = null;
@@ -3513,6 +3520,8 @@ function toggleDetail(force?: boolean) {
   detailOpen = force ?? !detailOpen;
   elLoupeDetailPanel.hidden = !detailOpen;
   elLoupeDetailBtn.classList.toggle("is-active", detailOpen);
+  // 面板占了右侧一条，右上角缩放按钮和「下一张」要让开（样式里 .has-detail）
+  elLoupe.classList.toggle("has-detail", detailOpen);
   if (detailOpen) {
     const c = items[loupeIndex];
     if (c) void loadPhotoDetail(c.id);
@@ -3581,6 +3590,59 @@ function detailSection(title: string, rows: Array<HTMLElement | null>): HTMLElem
   return sec;
 }
 
+/** 次要信息（内部标识之类）收进可折叠块，别把照片本身的信息挤下去。 */
+function collapsibleSection(title: string, rows: Array<HTMLElement | null>): HTMLElement {
+  const box = document.createElement("details");
+  box.className = "ld-section ld-fold";
+  const sum = document.createElement("summary");
+  sum.className = "ld-title";
+  sum.textContent = title;
+  box.appendChild(sum);
+  for (const r of rows) if (r) box.appendChild(r);
+  return box;
+}
+
+/** 把后端给的完整 EXIF 铺进小节，按 group 分成一撮一撮。 */
+function renderExifInto(sec: HTMLElement, items: ExifItem[], err = "") {
+  for (const el of Array.from(sec.querySelectorAll(".ld-row, .ld-exif-group"))) el.remove();
+
+  if (err) {
+    const row = detailRow("读取失败", err);
+    if (row) sec.appendChild(row);
+    return;
+  }
+  if (items.length === 0) {
+    const row = detailRow("说明", "这个文件里没有可读取的 EXIF");
+    if (row) sec.appendChild(row);
+    return;
+  }
+
+  let last = "";
+  for (const it of items) {
+    if (it.group !== last) {
+      last = it.group;
+      const h = document.createElement("div");
+      h.className = "ld-exif-group";
+      h.textContent = it.group;
+      sec.appendChild(h);
+    }
+    const row = detailRow(it.label, it.value);
+    if (row) sec.appendChild(row);
+  }
+}
+
+/** 完整 EXIF 单独取：读文件比查库慢，先让面板出来，内容随后补上。 */
+async function loadExif(id: number, sec: HTMLElement) {
+  try {
+    const items = await invoke<ExifItem[]>("photo_exif", { id });
+    if (!detailOpen || detailForId !== id) return; // 期间翻页 / 关面板了
+    renderExifInto(sec, items);
+  } catch (e) {
+    if (!detailOpen || detailForId !== id) return;
+    renderExifInto(sec, [], String(e));
+  }
+}
+
 function renderDetail(d: PhotoDetail) {
   elLoupeDetailBody.innerHTML = "";
 
@@ -3591,6 +3653,12 @@ function renderDetail(d: PhotoDetail) {
     d.orientation === null || d.orientation === undefined || d.orientation === 1
       ? ""
       : `（EXIF 方向 ${d.orientation}，已按此摆正）`;
+  const ratio = aspectRatio(d.width, d.height);
+  const wd = d.timeText ? weekdayOf(d.timeText) : "";
+
+  // 完整 EXIF 是单独一次读文件，先把占位小节摆上，回来再填
+  const exifSec = detailSection("完整 EXIF（从原文件读）", [detailRow("状态", "读取中…")]);
+  void loadExif(d.id, exifSec);
 
   // 同组文件每行带「还在不在」：挪走 / 删了的路径要点名，不能让人以为导出也会带上它
   const sibSec = detailSection("同组文件", [
@@ -3621,12 +3689,15 @@ function renderDetail(d: PhotoDetail) {
         "像素",
         d.width && d.height ? `${d.width} × ${d.height}${mp ? `（${mp.toFixed(1)} MP）` : ""}` : "",
       ),
+      detailRow("长宽比", ratio ?? ""),
       detailRow("方向", orientationLabel),
     ]),
     detailSection("拍摄", [
       detailRow(
         "拍摄时间",
-        d.timeText ? `${d.timeText}${d.timeSource === "exif" ? "（EXIF）" : "（文件时间）"}` : "",
+        d.timeText
+          ? `${d.timeText}${d.timeSource === "exif" ? "（EXIF）" : "（文件时间）"}${wd ? ` · ${wd}` : ""}`
+          : "",
       ),
       detailRow(
         "机身",
@@ -3655,18 +3726,38 @@ function renderDetail(d: PhotoDetail) {
             ),
           ],
     ),
+    exifSec,
     sibSec,
-    detailSection("库内", [
+    collapsibleSection("选片与库内标识", [
       detailRow("选片状态", DECISION_LABEL[(d.decision as Decision) ?? "none"] ?? d.decision),
       detailRow("星级", d.stars > 0 ? "★".repeat(d.stars) : "未评分"),
+      detailRow("入库时间", d.indexedText ?? ""),
+      copyableRow("缩略图来源", d.decodePath ?? ""),
       copyableRow("pair_key", d.pairKey),
       copyableRow("指纹", d.fingerprint),
       copyableRow("内容哈希", d.contentHash ?? ""),
       copyableRow("pHash", d.phash ?? ""),
-      copyableRow("缩略图来源", d.decodePath ?? ""),
-      detailRow("入库时间", d.indexedText ?? ""),
     ]),
   );
+}
+
+/** 3:2、4:3 这种长宽比。除不尽（比如裁过的图）就给一位小数。 */
+function aspectRatio(w: number | null, h: number | null): string | null {
+  if (!w || !h) return null;
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+  const g = gcd(w, h);
+  const rw = w / g;
+  const rh = h / g;
+  // 公约数算出来是 1 说明是质数尺寸，比值没有辨识度，直接给小数
+  if (g === 1 || rw > 40 || rh > 40) return `${(w / h).toFixed(2)} : 1`;
+  return `${rw} : ${rh}`;
+}
+
+/** "2026-09-16 10:12:44" → "周三"。挑片时「这是周末拍的」有信息量。 */
+function weekdayOf(t: string): string {
+  const d = new Date(t.replace(" ", "T"));
+  if (Number.isNaN(d.getTime())) return "";
+  return "周" + "日一二三四五六"[d.getDay()];
 }
 
 elLoupeDetailBtn.addEventListener("click", () => toggleDetail());
