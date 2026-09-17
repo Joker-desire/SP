@@ -3927,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "sp"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

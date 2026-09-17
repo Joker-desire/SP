@@ -6,9 +6,13 @@
 //   src-tauri/Cargo.toml    → 安装包
 //   src-tauri/tauri.conf.json → 窗口标题、关于窗口、更新器
 //
-// 用法：node scripts/bump.mjs 0.1.1
-// 之后：git commit -am "v0.1.1" && git tag v0.1.1 && git push --follow-tags
+// 用法：node scripts/bump.mjs 0.1.0
+// 之后：git commit -am "v0.1.0" && git tag -a v0.1.0 -m "v0.1.0"
+//       && git push && git push origin v0.1.0
 // （推上去之后 GitHub Actions 会自动出三平台的包并建 Release）
+//
+// 注意必须是 -a 附注 tag：轻量 tag 会被 git push --follow-tags 静默跳过，
+// 结果是 commit 上去了、Release 没触发。
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -18,7 +22,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const next = process.argv[2];
 
 if (!next) {
-  console.error("用法：node scripts/bump.mjs <版本号>   例如 node scripts/bump.mjs 0.1.1");
+  console.error("用法：node scripts/bump.mjs <版本号>   例如 node scripts/bump.mjs 0.1.0");
   process.exit(1);
 }
 if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(next)) {
@@ -46,4 +50,4 @@ replace("src-tauri/tauri.conf.json", /"version": "([^"]+)"/, (v) => `"version": 
 console.log(`
 下一步：
   git add -A && git commit -m "v${next}"
-  git tag v${next} && git push --follow-tags`);
+  git tag -a v${next} -m "v${next}" && git push && git push origin v${next}`);
