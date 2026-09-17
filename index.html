@@ -138,12 +138,19 @@
           <span class="btn-text">撤销</span>
         </button>
 
-        <button class="btn btn-ghost" id="btn-group" aria-pressed="false" title="按文件夹分组，可逐组折叠 / 展开">
-          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M1.8 3.8h12.4M1.8 8h12.4M1.8 12.2h12.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
-          </svg>
-          <span class="btn-text">分组</span>
-        </button>
+        <select class="select" id="group-mode" aria-label="分组方式" title="选择网格分组的依据，组可逐个折叠 / 展开">
+          <option value="none">不分组</option>
+          <option value="folder">按文件夹分组</option>
+          <option value="decision">按选片状态分组</option>
+          <option value="stars">按星级分组</option>
+          <option value="pairState">按文件类型分组</option>
+          <option value="day">按拍摄日期分组</option>
+          <option value="camera">按机身分组</option>
+          <option value="quality">按画面质量分组</option>
+          <option value="lens">按镜头分组</option>
+          <option value="focal">按焦段分组</option>
+          <option value="iso">按 ISO 分组</option>
+        </select>
       </div>
     </header>
 

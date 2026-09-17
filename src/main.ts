@@ -311,7 +311,6 @@ const elExportProgressText = $<HTMLElement>("#export-progress-text");
 
 // ── 文件夹范围选择与分组 ───────────────────────────────────────────────
 const elBtnClearLib = $<HTMLButtonElement>("#btn-clear-lib");
-const elBtnGroup = $<HTMLButtonElement>("#btn-group");
 const elBtnUndo = $<HTMLButtonElement>("#btn-undo");
 const elScopeModal = $<HTMLElement>("#scope-modal");
 const elScopeRoot = $<HTMLElement>("#scope-root");
@@ -370,9 +369,36 @@ let lastFacets: LibraryFacets | null = null;
 
 /** 上次扫描时勾选的文件夹范围；重新扫描沿用同一范围，不必每次重选。 */
 let lastScopeDirs: string[] | null = null;
-/** 按文件夹分组：同一目录的照片收进一组，可逐组折叠 / 展开。 */
-let groupByFolder = localStorage.getItem(GROUP_KEY) === "1";
-/** 分组模式下，目录路径 → 该组 DOM 与计数。 */
+/** 分组依据。左侧筛选栏的每一维都能当分组，再加上「所在文件夹」。
+ *  值与 index.html 里 #group-mode 的 option value 一一对应。 */
+type GroupMode =
+  | "none"
+  | "folder"
+  | "decision"
+  | "stars"
+  | "pairState"
+  | "day"
+  | "camera"
+  | "quality"
+  | "lens"
+  | "focal"
+  | "iso";
+
+/** 从 localStorage 读分组方式，兼容旧版只存 0/1 的开关值。 */
+function loadGroupMode(): GroupMode {
+  const v = localStorage.getItem(GROUP_KEY);
+  if (v === "1") return "folder";
+  if (v === "0" || v === null) return "none";
+  if (
+    ["folder", "decision", "stars", "pairState", "day", "camera", "quality", "lens", "focal", "iso"].includes(v)
+  ) {
+    return v as GroupMode;
+  }
+  return "none";
+}
+
+let groupMode: GroupMode = loadGroupMode();
+/** 分组模式下，组 key → 该组 DOM 与计数。 */
 let groupMap: Map<string, { el: HTMLElement; body: HTMLElement; count: number }> | null = null;
 
 let items: PairCard[] = [];
@@ -906,8 +932,8 @@ async function reload(opts?: { keepView?: boolean }) {
   nearObserver.disconnect();
   farObserver.disconnect();
   elGrid.innerHTML = "";
-  elGrid.classList.toggle("is-grouped", groupByFolder);
-  groupMap = groupByFolder ? new Map() : null;
+  elGrid.classList.toggle("is-grouped", groupMode !== "none");
+  groupMap = groupMode !== "none" ? new Map() : null;
   elGrid.scrollTop = 0;
   updateCount();
   updateCullInfo();
@@ -984,7 +1010,7 @@ async function loadMore(token: number) {
 }
 
 function appendCards(list: PairCard[]) {
-  if (groupByFolder) {
+  if (groupMode !== "none") {
     appendGrouped(list);
     return;
   }
@@ -1019,8 +1045,9 @@ function folderLabel(path: string): string {
   return baseOf(dir) || dir || "(根目录)";
 }
 
-/** 分组模式下，拿到或创建一个目录对应的分组容器（标题 + 卡片网格）。 */
-function ensureGroup(key: string): { el: HTMLElement; body: HTMLElement; count: number } {
+/** 分组模式下，拿到或创建一个分组容器（标题 + 卡片网格）。
+ *  key 是稳定标识（同组必同 key），label 是标题文字，title 是悬停提示（可省）。 */
+function ensureGroup(key: string, label: string, title?: string): { el: HTMLElement; body: HTMLElement; count: number } {
   let g = groupMap!.get(key);
   if (g) return g;
   const el = document.createElement("section");
@@ -1034,8 +1061,8 @@ function ensureGroup(key: string): { el: HTMLElement; body: HTMLElement; count: 
     '<path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>';
   const name = document.createElement("span");
   name.className = "group-name";
-  name.textContent = folderLabel(key);
-  name.title = key;
+  name.textContent = label;
+  name.title = title ?? label;
   const count = document.createElement("span");
   count.className = "group-count";
   count.textContent = "0";
@@ -1051,10 +1078,86 @@ function ensureGroup(key: string): { el: HTMLElement; body: HTMLElement; count: 
   return g;
 }
 
+// ── 分组依据：一张照片 → 哪一组 ──────────────────────────────────────────
+//
+// 档位划分要和侧栏筛选（后端 bucket_facets）保持一致：
+// 焦段 24/70/200、ISO 400/1600/6400，都是「下界含、上界不含」。
+// 两处分叉的话，用户会遇到「按这个分了组、按同一条件却筛不全」的怪事。
+
+const FOCAL_BUCKETS: Array<{ lo: number; hi: number; key: string; label: string }> = [
+  { lo: 0, hi: 24, key: "wide", label: "24 以下" },
+  { lo: 24, hi: 70, key: "normal", label: "24–70" },
+  { lo: 70, hi: 200, key: "tele", label: "70–200" },
+  { lo: 200, hi: Infinity, key: "super", label: "200 以上" },
+];
+
+const ISO_BUCKETS: Array<{ lo: number; hi: number; key: string; label: string }> = [
+  { lo: 0, hi: 400, key: "low", label: "400 以下" },
+  { lo: 400, hi: 1600, key: "mid", label: "400–1600" },
+  { lo: 1600, hi: 6400, key: "high", label: "1600–6400" },
+  { lo: 6400, hi: Infinity, key: "veryHigh", label: "6400 以上" },
+];
+
+function bucketOf(v: number | null, buckets: typeof FOCAL_BUCKETS): { key: string; label: string } | null {
+  if (v === null || !Number.isFinite(v)) return null;
+  return buckets.find((b) => v >= b.lo && v < b.hi) ?? null;
+}
+
+/** 画面质量归档：优先级 跑焦 > 过曝 > 欠曝 > 正常；还没分析过的归「未分析」。
+ *  三个阈值与 src-tauri/src/analyze.rs 保持一致（改动要两边同步）。 */
+function qualityOf(c: PairCard): { key: string; label: string } {
+  if (c.sharpness === null && c.overexposed === null && c.underexposed === null) {
+    return { key: "pending", label: "未分析" };
+  }
+  if (c.sharpness !== null && c.sharpness < 25) return { key: "blur", label: "疑似跑焦" };
+  if (c.overexposed !== null && c.overexposed >= 0.02) return { key: "over", label: "高光溢出" };
+  if (c.underexposed !== null && c.underexposed >= 0.25) return { key: "under", label: "暗部死黑" };
+  return { key: "ok", label: "正常" };
+}
+
+/** 按当前 groupMode 算出一张照片的组。返回 null 表示这种模式不该分组（none）。 */
+function groupKeyOf(c: PairCard, mode: GroupMode): { key: string; label: string; title?: string } | null {
+  switch (mode) {
+    case "none":
+      return null;
+    case "folder": {
+      const dir = dirOf(c.path);
+      return { key: dir || "(根目录)", label: folderLabel(dir), title: dir };
+    }
+    case "decision":
+      return { key: c.decision, label: DECISION_LABEL[c.decision] };
+    case "stars":
+      return c.stars > 0 ? { key: String(c.stars), label: `${c.stars} 星` } : { key: "0", label: "未评分" };
+    case "pairState":
+      return c.pairState === "both"
+        ? { key: "both", label: "NEF + JPG" }
+        : c.pairState === "rawOnly"
+          ? { key: "rawOnly", label: "仅 NEF" }
+          : { key: "jpgOnly", label: "仅 JPG" };
+    case "day":
+      return c.dayKey ? { key: c.dayKey, label: c.dayKey } : { key: "?", label: "未知日期" };
+    case "camera":
+      return c.cameraModel ? { key: c.cameraModel, label: c.cameraModel } : { key: "?", label: "未知机身" };
+    case "quality":
+      return qualityOf(c);
+    case "lens":
+      return c.lens ? { key: c.lens, label: c.lens } : { key: "?", label: "未知镜头" };
+    case "focal": {
+      const b = bucketOf(c.focalLen, FOCAL_BUCKETS);
+      return b ? { key: b.key, label: b.label } : { key: "?", label: "未知焦段" };
+    }
+    case "iso": {
+      const b = bucketOf(c.iso, ISO_BUCKETS);
+      return b ? { key: b.key, label: b.label } : { key: "?", label: "未知 ISO" };
+    }
+  }
+}
+
 function appendGrouped(list: PairCard[]) {
   for (const c of list) {
     itemById.set(c.id, c);
-    const g = ensureGroup(dirOf(c.path));
+    const g0 = groupKeyOf(c, groupMode) ?? { key: "?", label: "未分组" };
+    const g = ensureGroup(g0.key, g0.label, g0.title);
     const card = cardEl(c);
     g.body.appendChild(card);
     g.count += 1;
@@ -2894,18 +2997,18 @@ elScopeModal.addEventListener("click", (e) => {
   }
 });
 
-// ── 按文件夹分组开关 ─────────────────────────────────────────────────────
+// ── 分组方式选择 ─────────────────────────────────────────────────────────
 
-function setGrouping(on: boolean) {
-  groupByFolder = on;
-  localStorage.setItem(GROUP_KEY, on ? "1" : "0");
-  elBtnGroup.setAttribute("aria-pressed", on ? "true" : "false");
-  elBtnGroup.classList.toggle("is-active", on);
+const elGroupMode = $<HTMLSelectElement>("#group-mode");
+
+function setGroupMode(mode: GroupMode) {
+  groupMode = mode;
+  localStorage.setItem(GROUP_KEY, mode);
   // 重新铺一遍当前图库，分组视图立刻生效
   if (rootPath) void reload();
 }
 
-elBtnGroup.addEventListener("click", () => setGrouping(!groupByFolder));
+elGroupMode.addEventListener("change", () => setGroupMode(elGroupMode.value as GroupMode));
 elBtnClearLib.addEventListener("click", () => clearLibrary());
 
 elPick.addEventListener("click", () => void pickFolder());
@@ -3585,9 +3688,8 @@ async function boot() {
     }
   }
 
-  // 同步「按文件夹分组」开关的初始状态
-  elBtnGroup.setAttribute("aria-pressed", groupByFolder ? "true" : "false");
-  elBtnGroup.classList.toggle("is-active", groupByFolder);
+  // 同步分组方式的初始状态
+  elGroupMode.value = groupMode;
   updateUndoBtn();
 
   await listen<ScanProgress>("scan://progress", (e) => showProgress(e.payload));
