@@ -60,6 +60,17 @@ interface PairCard {
   decision: Decision;
   /** 0–5 */
   stars: number;
+  /** 画面分析。null＝还没分析过（后台分析是扫描之后才跑的） */
+  sharpness: number | null;
+  overexposed: number | null;
+  underexposed: number | null;
+}
+
+interface AnalyzeSummary {
+  analyzed: number;
+  failed: number;
+  remaining: number;
+  elapsedMs: number;
 }
 
 type Decision = "none" | "keep" | "reject";
@@ -91,6 +102,8 @@ interface LibraryFacets {
   daysTruncated: boolean;
   decisions: Facet[];
   stars: Facet[];
+  /** 画面质量：blur / over / under。后端还没分析过时三项计数都是 0。 */
+  quality: Facet[];
 }
 
 interface ThumbPayload {
@@ -159,6 +172,8 @@ interface FilterState {
   decision: string;
   /** null＝不筛。注意和 0（只要没打星的）是两码事。 */
   stars: number | null;
+  /** 画面质量：null / blur / over / under */
+  quality: string | null;
   search: string;
   sort: string;
 }
@@ -203,6 +218,9 @@ const elCache = $<HTMLButtonElement>("#btn-cache");
 const elFacetsDecision = $<HTMLElement>("#facets-decision");
 const elFacetsStars = $<HTMLElement>("#facets-stars");
 const elFacetsPair = $<HTMLElement>("#facets-pair");
+const elFacetsQuality = $<HTMLElement>("#facets-quality");
+const elGroupQuality = $<HTMLElement>("#group-quality");
+const elQualityNote = $<HTMLElement>("#quality-note");
 const elFacetsDays = $<HTMLElement>("#facets-days");
 const elFacetsCameras = $<HTMLElement>("#facets-cameras");
 const elDaysNote = $<HTMLElement>("#days-note");
@@ -317,6 +335,10 @@ const PAGE_SIZE = 120;
 
 let rootPath: string | null = null;
 let scanning = false;
+/** 画面分析（清晰度 / 曝光）的后台任务，同一时刻只跑一个。 */
+let analyzing = false;
+/** 最近一次拉到的分面数据。分析完要报「多少张糊了」，从这里读现成的，不再多问一次。 */
+let lastFacets: LibraryFacets | null = null;
 
 /** 上次扫描时勾选的文件夹范围；重新扫描沿用同一范围，不必每次重选。 */
 let lastScopeDirs: string[] | null = null;
@@ -357,6 +379,7 @@ const filter: FilterState = {
   day: null,
   decision: "all",
   stars: null,
+  quality: null,
   search: "",
   sort: "takenDesc",
 };
@@ -561,6 +584,36 @@ function loadThumb(id: number, size: ThumbSize): Promise<ThumbPayload> {
 // 卡片
 // ---------------------------------------------------------------------------
 
+// ---- 画面质量 ----
+//
+// 阈值和后端 analyze.rs 里的是一对，改一边就要改另一边，
+// 否则会出现「侧栏说 15 张、筛出来 12 张」这种对不上的情况。
+const BLUR_THRESHOLD = 30;
+const OVEREXPOSED_THRESHOLD = 0.02;
+const UNDEREXPOSED_THRESHOLD = 0.25;
+
+/** 这张照片有没有机器能看出来的硬伤。没有就返回 null——不给人添标签。 */
+function qualityIssue(c: PairCard): string | null {
+  if (is(c.sharpness) && (c.sharpness as number) < BLUR_THRESHOLD) return "糊";
+  if (is(c.overexposed) && (c.overexposed as number) >= OVEREXPOSED_THRESHOLD) return "过曝";
+  if (is(c.underexposed) && (c.underexposed as number) >= UNDEREXPOSED_THRESHOLD) return "欠曝";
+  return null;
+}
+
+/** 徽标的悬停说明：把具体数值摆出来，阈值准不准一眼能判断。 */
+function qualityDetail(c: PairCard): string {
+  const bits: string[] = [];
+  if (is(c.sharpness)) bits.push(`清晰度 ${Math.round(c.sharpness as number)}（低于 ${BLUR_THRESHOLD} 判为糊）`);
+  if (is(c.overexposed)) bits.push(`高光溢出 ${((c.overexposed as number) * 100).toFixed(1)}%`);
+  if (is(c.underexposed)) bits.push(`暗部死黑 ${((c.underexposed as number) * 100).toFixed(1)}%`);
+  return bits.join(" · ");
+}
+
+/** 分析值可能是 null（还没分析过），收窄一下类型让后面好写。 */
+function is(v: number | null | undefined): boolean {
+  return v !== null && v !== undefined;
+}
+
 function cardEl(c: PairCard): HTMLElement {
   const card = document.createElement("article");
   card.className = "card";
@@ -623,6 +676,16 @@ function cardEl(c: PairCard): HTMLElement {
     const badge = document.createElement("span");
     badge.className = "card-badge";
     badge.textContent = broken;
+    card.appendChild(badge);
+  }
+
+  // 分析出问题才标。阈值与后端 analyze.rs 保持一致，别各改各的。
+  const issue = qualityIssue(c);
+  if (issue) {
+    const badge = document.createElement("span");
+    badge.className = "card-badge card-badge--quality";
+    badge.textContent = issue;
+    badge.title = qualityDetail(c);
     card.appendChild(badge);
   }
 
@@ -753,6 +816,7 @@ function currentFilterPayload() {
     // 「全部」在后端是不筛，用一个空值表达最清楚
     decision: filter.decision === "all" ? null : filter.decision,
     stars: filter.stars,
+    quality: filter.quality,
     search: filter.search,
     sort: filter.sort,
     roots: currentRoots(),
@@ -767,6 +831,7 @@ function isFiltered(): boolean {
     filter.day !== null ||
     filter.decision !== "all" ||
     filter.stars !== null ||
+    filter.quality !== null ||
     filter.search.trim() !== ""
   );
 }
@@ -1090,6 +1155,32 @@ function renderPairFacets(f: LibraryFacets) {
   }
 }
 
+/**
+ * 画面质量。三档都是「可能有问题」，所以只在这三档里有一档非零时才整组出现——
+ * 一张问题都没有的时候摆一排 0 纯属噪音。
+ */
+function renderQualityFacets(f: LibraryFacets) {
+  elFacetsQuality.innerHTML = "";
+  const any = f.quality.some((it) => it.count > 0);
+  elGroupQuality.hidden = !any;
+  if (!any) {
+    elQualityNote.textContent = "";
+    return;
+  }
+  for (const it of f.quality) {
+    elFacetsQuality.appendChild(
+      facetButton({
+        facet: "quality",
+        key: it.key,
+        label: it.label,
+        count: it.count,
+        active: filter.quality === it.key,
+      })
+    );
+  }
+  elQualityNote.textContent = "自动判断";
+}
+
 function renderDecisionFacets(f: LibraryFacets) {
   elFacetsDecision.innerHTML = "";
   for (const it of f.decisions) {
@@ -1256,6 +1347,7 @@ elFacetsDays.addEventListener("click", (e) => {
 
 async function loadFacets() {
   const f = await invoke<LibraryFacets>("library_facets", { roots: currentRoots() });
+  lastFacets = f;
 
   if (f.total === 0) {
     // 图库空的时候别摆一排 0，一句话说清就够了
@@ -1265,9 +1357,11 @@ async function loadFacets() {
       elFacetsPair,
       elFacetsCameras,
       elFacetsDays,
+      elFacetsQuality,
     ]) {
       host.innerHTML = "";
     }
+    elGroupQuality.hidden = true;
     const none = document.createElement("div");
     none.className = "facet facet--none";
     none.textContent = "图库还没有照片";
@@ -1281,6 +1375,7 @@ async function loadFacets() {
   renderPairFacets(f);
   renderCameraFacets(f);
   renderDayFacets(f);
+  renderQualityFacets(f);
 }
 
 /**
@@ -1325,6 +1420,8 @@ document.querySelector(".sidebar")?.addEventListener("click", (e) => {
   } else if (facet === "stars") {
     const n = Number(key);
     filter.stars = filter.stars === n ? null : n;
+  } else if (facet === "quality") {
+    filter.quality = key === filter.quality ? null : key;
   }
 
   void applyFilterChange();
@@ -1341,6 +1438,7 @@ elClear.addEventListener("click", () => {
   filter.day = null;
   filter.decision = "all";
   filter.stars = null;
+  filter.quality = null;
   filter.search = "";
   elSearch.value = "";
   elSearchClear.hidden = true;
@@ -2423,6 +2521,8 @@ async function startScan(
         setHint(summaryText(r), r.failed || r.exifFailed ? "warn" : "ok");
       }
       await refreshLibrary();
+      // 图库铺完再补画面分析：算过的不再算，中断了下次接着来
+      void runAnalysis();
     }
   } catch (e) {
     stopProgressiveRefresh();
@@ -2438,6 +2538,39 @@ async function startScan(
     elRescan.disabled = !rootPath;
     hideProgress();
     void refreshCacheInfo();
+  }
+}
+
+/**
+ * 扫描之后跑一遍画面分析（清晰度 / 曝光）。
+ *
+ * 不挂在扫描里：扫描的KPI是快点出图，分析要解码，混在一起就是干等。
+ * 这里只算「还没算过的」，所以中断了下次接着来，不用从头开始。
+ */
+async function runAnalysis() {
+  if (analyzing || !rootPath) return;
+  analyzing = true;
+  try {
+    const r = await invoke<AnalyzeSummary>("analyze_library", { roots: currentRoots() });
+    if (r.analyzed === 0) return;
+
+    await loadFacets();
+    const blur = lastFacets?.quality.find((q) => q.key === "blur")?.count ?? 0;
+    const over = lastFacets?.quality.find((q) => q.key === "over")?.count ?? 0;
+    const under = lastFacets?.quality.find((q) => q.key === "under")?.count ?? 0;
+    const bits: string[] = [];
+    if (blur > 0) bits.push(`${blur.toLocaleString()} 张可能糊了`);
+    if (over > 0) bits.push(`${over.toLocaleString()} 张高光溢出`);
+    if (under > 0) bits.push(`${under.toLocaleString()} 张暗部死黑`);
+    setHint(
+      bits.length > 0
+        ? `画面分析完成（${r.analyzed.toLocaleString()} 张）：${bits.join(" · ")}，左侧「画面质量」可单独筛`
+        : `画面分析完成（${r.analyzed.toLocaleString()} 张），没发现明显问题`,
+    );
+  } catch {
+    /* 分析失败不影响选片本身，静默跳过 */
+  } finally {
+    analyzing = false;
   }
 }
 

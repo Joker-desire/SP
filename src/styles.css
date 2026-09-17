@@ -878,6 +878,23 @@ select {
   background: rgba(255, 247, 235, 0.94);
 }
 
+/* 画面质量的徽标放在左下角：右上角是「配对缺失」的位置，
+   两张都有的话挤在一起就分不清了。 */
+.card-badge--quality {
+  top: auto;
+  bottom: 7px;
+  right: auto;
+  left: 7px;
+  background: rgba(20, 22, 26, 0.72);
+  color: #ffd7a8;
+  border-color: rgba(255, 215, 168, 0.35);
+}
+
+:root[data-theme="light"] .card-badge--quality {
+  background: rgba(255, 255, 255, 0.92);
+  color: #8a5a12;
+}
+
 /* 拍摄时刻。原来浮在右上角、只在悬停时出现；现在挪进底部那一行常驻——
    选连拍时「这两张差几秒」是判断依据，藏在悬停后面等于没有。 */
 .card-time {

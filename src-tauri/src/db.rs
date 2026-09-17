@@ -132,8 +132,35 @@ fn open_inner(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(SCHEMA)?;
+    add_missing_columns(&conn);
     drop_empty_legacy_table(&conn);
     Ok(conn)
+}
+
+/// 给老库补新列。`CREATE TABLE IF NOT EXISTS` 对已经存在的表毫无作用，
+/// 所以后来加的每一列都得在这里显式补一次——否则升级上来的库会一直缺列，
+/// 表现为「功能明明写了，就是没数据」，而且只在老用户机器上出现。
+fn add_missing_columns(conn: &Connection) {
+    let wanted: &[(&str, &str)] = &[
+        ("sharpness", "REAL"),
+        ("overexposed", "REAL"),
+        ("underexposed", "REAL"),
+    ];
+    for (col, ty) in wanted {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('photos') WHERE name = ?1",
+                [col],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if exists == 0 {
+            // 补列失败不该让整个库打不开：分析结果只是加分项
+            if let Err(e) = conn.execute(&format!("ALTER TABLE photos ADD COLUMN {col} {ty}"), []) {
+                eprintln!("提示：未能给 photos 补上 {col} 列（{e}）");
+            }
+        }
+    }
 }
 
 /// 一次性清理：早期 schema 里有一张 `ratings` 占位表，但从来没有代码往里写过。
@@ -208,7 +235,11 @@ CREATE TABLE IF NOT EXISTS photos (
   iso                INTEGER,
   orientation        INTEGER,
   exif_ok            INTEGER NOT NULL DEFAULT 0,
-  indexed_at         INTEGER NOT NULL DEFAULT 0
+  indexed_at         INTEGER NOT NULL DEFAULT 0,
+  -- 画面分析（后台算，见 analyze.rs）。NULL = 还没轮到它 / 这张算不出来。
+  sharpness          REAL,
+  overexposed        REAL,
+  underexposed       REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_photos_pair  ON photos(pair_key);

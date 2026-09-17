@@ -4,6 +4,7 @@
 //! 所有磁盘操作必须经过这里显式暴露的命令。这正是「原片只读」原则的机制保障
 //! —— 前端就算有 bug 也碰不到你的照片。
 
+mod analyze;
 mod db;
 mod indexer;
 mod pairing;
@@ -69,6 +70,32 @@ async fn scan_folder(
             },
             max_depth,
         )
+        .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 把「还没分析过」的照片算一遍清晰度和曝光。
+///
+/// 扫描结束之后由前端自行触发，不挂在扫描里——扫描的KPI是快点出图，
+/// 分析要解码，混在一起会把首次导入拖成干等。
+#[tauri::command]
+async fn analyze_library(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    roots: Option<Vec<String>>,
+) -> Result<analyze::AnalyzeSummary, String> {
+    let db = state.db.clone();
+    let roots: Vec<PathBuf> = roots
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        analyze::analyze_pending(&roots, &db, |p| {
+            let _ = app.emit("analyze://progress", &p);
+        })
         .map_err(|e| format!("{e:#}"))
     })
     .await
@@ -225,6 +252,10 @@ struct PairFilter {
     /// 不靠筛选条件兜圈子，勾了什么就导出什么。
     #[serde(default)]
     ids: Option<Vec<i64>>,
+    /// 画面质量：blur（可能糊了）/ over（高光溢出）/ under（暗部死黑）。
+    /// 门槛在 analyze.rs 里，前后端共用同一套常量。
+    #[serde(default)]
+    quality: Option<String>,
 }
 
 /// 网格用的照片卡片。以「一次快门」为单位，而不是以文件为单位。
@@ -256,6 +287,13 @@ struct PairCard {
     decision: String,
     /// 0–5
     stars: i64,
+    /// 画面分析。NULL = 还没分析过——后台分析是扫描之后才跑的，
+    /// 刚扫完的库里大部分都是 NULL，前端要能正常显示而不是当成 0。
+    sharpness: Option<f64>,
+    /// 高光溢出像素占比 0–1
+    overexposed: Option<f64>,
+    /// 暗部死黑像素占比 0–1
+    underexposed: Option<f64>,
 }
 
 /// 一页照片 + 满足条件的总数（前端据此显示「共 N 张」和决定还要不要继续加载）。
@@ -288,6 +326,9 @@ struct LibraryFacets {
     decisions: Vec<Facet>,
     /// 星级：未打星 / 1★…5★
     stars: Vec<Facet>,
+    /// 画面质量：可能糊了 / 高光溢出 / 暗部死黑。分析还没跑完时计数偏小，
+    /// 这是正常的——跑完一趟再打开侧栏就补齐了。
+    quality: Vec<Facet>,
 }
 
 /// 搜索关键词里的 LIKE 通配符要转义，否则输入一个 `%` 会把整个库匹配出来。
@@ -417,6 +458,24 @@ fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
         args.push(Value::Integer(s.clamp(0, 5)));
     }
 
+    // 画面质量。没分析过的照片（sharpness IS NULL）一律不算「有问题」——
+    // 分析是后台跑的，刚扫完就筛会把还没轮到的照片全列进「糊了」，那是误报。
+    match f.quality.as_deref() {
+        Some("blur") => conds.push(format!(
+            "p.sharpness IS NOT NULL AND p.sharpness < {}",
+            analyze::BLUR_THRESHOLD
+        )),
+        Some("over") => conds.push(format!(
+            "p.overexposed IS NOT NULL AND p.overexposed >= {}",
+            analyze::OVEREXPOSED_THRESHOLD
+        )),
+        Some("under") => conds.push(format!(
+            "p.underexposed IS NOT NULL AND p.underexposed >= {}",
+            analyze::UNDEREXPOSED_THRESHOLD
+        )),
+        _ => {}
+    }
+
     (conds.join(" AND "), args)
 }
 
@@ -427,6 +486,9 @@ fn order_by(sort: Option<&str>) -> &'static str {
         "nameDesc" => "ORDER BY p.path DESC",
         "sizeDesc" => "ORDER BY p.file_size DESC, p.path",
         "starsDesc" => "ORDER BY COALESCE(d.stars, 0) DESC, p.path",
+        // 清晰度：低→高排在最前，拍糊的自然浮到前面来
+        "sharpAsc" => "ORDER BY (p.sharpness IS NULL), p.sharpness ASC, p.path",
+        "sharpDesc" => "ORDER BY (p.sharpness IS NULL), p.sharpness DESC, p.path",
         _ => "ORDER BY COALESCE(p.taken_at_corrected, p.mtime) DESC, p.path",
     }
 }
@@ -476,7 +538,8 @@ fn query_pairs(
                 p.camera_model, p.camera_serial,
                 p.lens, p.focal_len, p.aperture, p.shutter, p.iso,
                 p.file_size, p.decode_path,
-                {DECISION}, {STARS}
+                {DECISION}, {STARS},
+                p.sharpness, p.overexposed, p.underexposed
          {FROM_PHOTOS}
          WHERE {where_sql}
          {}
@@ -515,6 +578,9 @@ fn query_pairs(
             decode_path: r.get(16)?,
             decision: r.get(17)?,
             stars: r.get(18)?,
+            sharpness: r.get(19)?,
+            overexposed: r.get(20)?,
+            underexposed: r.get(21)?,
         })
     })?;
 
@@ -747,6 +813,45 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         }
     }
 
+    // 画面质量：三档一次数完。没分析过的（NULL）不算进来，
+    // 否则刚扫完就显示「几千张糊了」——那是还没算，不是糊。
+    let quality = {
+        let sql = format!(
+            "SELECT
+                COALESCE(SUM(CASE WHEN p.sharpness    IS NOT NULL AND p.sharpness    <  {} THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN p.overexposed  IS NOT NULL AND p.overexposed  >= {} THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN p.underexposed IS NOT NULL AND p.underexposed >= {} THEN 1 ELSE 0 END), 0)
+             {FROM_PHOTOS} WHERE p.is_primary = 1{scope}",
+            analyze::BLUR_THRESHOLD,
+            analyze::OVEREXPOSED_THRESHOLD,
+            analyze::UNDEREXPOSED_THRESHOLD,
+        );
+        let (blur, over, under) = conn.query_row(&sql, sp(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
+        vec![
+            Facet {
+                key: "blur".into(),
+                label: "可能糊了".into(),
+                count: blur,
+            },
+            Facet {
+                key: "over".into(),
+                label: "高光溢出".into(),
+                count: over,
+            },
+            Facet {
+                key: "under".into(),
+                label: "暗部死黑".into(),
+                count: under,
+            },
+        ]
+    };
+
     Ok(LibraryFacets {
         total,
         pair_states,
@@ -755,6 +860,7 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         days,
         decisions,
         stars,
+        quality,
     })
 }
 
@@ -1977,6 +2083,7 @@ pub fn run() {
             startup_status,
             scan_folder,
             list_subdirs,
+            analyze_library,
             library_stats,
             library_facets,
             list_pairs,
@@ -2783,6 +2890,120 @@ mod tests {
     }
 
     /// 导出绝不能碰原片。这条是硬底线，所以用一个明确的断言守着。
+    /// 画面分析：清晰度与曝光。
+    ///
+    /// 直接测到「造一张糊图 → 能被筛出来」这一层，因为这个功能最容易写反的地方
+    /// 不是公式，而是「算完没写库」或「写了但筛选用的是另一套阈值」。
+    #[test]
+    fn analysis_fills_metrics_and_quality_filter_picks_them_up() {
+        let dir = std::env::temp_dir().join(format!("sp-analyze-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 造两张「NEF」：前面塞一段假头部，后面接一张真 JPEG 当内嵌预览。
+        // 一张高频噪点（清晰），一张纯灰（糊）。
+        let sharp = {
+            // 棋盘格：缩到 256 之后边缘还在，才是真的「清晰」。
+            // 高频噪点会被缩放平均成一片灰，用来当样本会得出相反结论。
+            let mut img = image::GrayImage::new(800, 600);
+            for (x, y, p) in img.enumerate_pixels_mut() {
+                let on = (x / 16 + y / 16) % 2 == 0;
+                *p = image::Luma([if on { 220 } else { 30 }]);
+            }
+            img
+        };
+        let blurry = image::GrayImage::from_pixel(800, 600, image::Luma([128u8]));
+
+        std::fs::write(
+            dir.join("DSC_0001.NEF"),
+            fake_nef(&image::DynamicImage::ImageLuma8(sharp)),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("DSC_0002.NEF"),
+            fake_nef(&image::DynamicImage::ImageLuma8(blurry)),
+        )
+        .unwrap();
+
+        let db = Arc::new(Mutex::new(db::open_in_memory().unwrap()));
+        indexer::scan(&dir, &db).unwrap();
+        assert_eq!(count(&db, PairFilter::default()), 2);
+
+        // 分析之前：三档都是 0，不能被当成「没问题」之外的任何结论
+        assert_eq!(count(&db, by_quality("blur")), 0, "没分析过就不该被判成糊");
+
+        let roots = vec![dir.to_string_lossy().to_string()];
+        let s = analyze::analyze_pending(
+            &roots
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>(),
+            &db,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(s.analyzed, 2, "两张都该算出来：{s:?}");
+        assert_eq!(s.remaining, 0);
+
+        // 糊的那张要能被筛出来，清晰的那张不能
+        assert_eq!(count(&db, by_quality("blur")), 1, "只有一张是糊的");
+
+        // 再跑一趟：已经算过的不该重复算
+        let again = analyze::analyze_pending(
+            &roots
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>(),
+            &db,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(again.analyzed, 0, "算过的就不该再算");
+
+        // 排序也要跟着走：清晰度低→高时，糊的那张排第一
+        let first = query_pairs(
+            &db.lock().unwrap(),
+            &PairFilter {
+                sort: Some("sharpAsc".into()),
+                ..Default::default()
+            },
+            10,
+            0,
+        )
+        .unwrap()
+        .items;
+        assert_eq!(first.len(), 2);
+        assert!(
+            first[0].sharpness.unwrap_or(0.0) <= first[1].sharpness.unwrap_or(0.0),
+            "低→高排序：{:?} 该排在 {:?} 前",
+            first[0].sharpness,
+            first[1].sharpness
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn by_quality(q: &str) -> PairFilter {
+        PairFilter {
+            quality: Some(q.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// 把一张图包成「NEF」：假头部 + 真 JPEG。preview 抠取看的是 JPEG 标记，
+    /// 这么造出来的文件足以走通整条分析链路。
+    fn fake_nef(img: &image::DynamicImage) -> Vec<u8> {
+        let mut jpeg: Vec<u8> = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut jpeg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+        let mut out = b"NIKON CORPORATION FAKE NEF HEADER \0\0\0".to_vec();
+        out.extend_from_slice(&jpeg);
+        out
+    }
+
     #[test]
     fn export_can_be_limited_to_an_explicit_set_of_photos() {
         let (src_dir, conn) = seeded("export-ids");
