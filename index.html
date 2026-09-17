@@ -376,6 +376,11 @@
           <div class="field">
             <span class="field-label">导出哪些</span>
             <div class="choices" id="export-scope">
+              <label class="choice" id="choice-selected" hidden>
+                <input type="radio" name="scope" value="selected" />
+                <span class="choice-main">当前选中的</span>
+                <span class="choice-note" id="note-selected"></span>
+              </label>
               <label class="choice">
                 <input type="radio" name="scope" value="keep" checked />
                 <span class="choice-main">保留的</span>

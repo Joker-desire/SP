@@ -221,6 +221,10 @@ struct PairFilter {
     /// 条件限定在「当前选中的文件夹」上，否则换完文件夹会看到上次的照片还在。
     #[serde(default)]
     roots: Option<Vec<String>>,
+    /// 只要这几张（主文件的 photo id）。用来导出「当前选中的那几张」——
+    /// 不靠筛选条件兜圈子，勾了什么就导出什么。
+    #[serde(default)]
+    ids: Option<Vec<i64>>,
 }
 
 /// 网格用的照片卡片。以「一次快门」为单位，而不是以文件为单位。
@@ -350,7 +354,17 @@ fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
     let mut conds: Vec<String> = vec!["p.is_primary = 1".to_string()];
     let mut args: Vec<Value> = Vec::new();
 
-    // 目录范围必须放在最前面，后面的参数占位符顺序才对得上
+    // 显式指定的一组照片，优先级最高：勾了什么就是什么，不再叠加目录范围之外的判断
+    if let Some(ids) = f.ids.as_deref().filter(|v| !v.is_empty()) {
+        // SQLite 的变量数上限远大于一次选片的张数，这里不切块
+        let holders = vec!["?"; ids.len()].join(",");
+        conds.push(format!("p.id IN ({holders})"));
+        for id in ids {
+            args.push(Value::Integer(*id));
+        }
+    }
+
+    // 目录范围。参数按 conds 的先后依次 push，顺序对得上就行。
     let (scope, scope_args) = scope_group(f.roots.as_deref());
     if !scope.is_empty() {
         conds.push(scope);
@@ -2769,6 +2783,52 @@ mod tests {
     }
 
     /// 导出绝不能碰原片。这条是硬底线，所以用一个明确的断言守着。
+    #[test]
+    fn export_can_be_limited_to_an_explicit_set_of_photos() {
+        let (src_dir, conn) = seeded("export-ids");
+        let all = query_pairs(&conn.lock().unwrap(), &PairFilter::default(), 100, 0)
+            .unwrap()
+            .items;
+        assert!(all.len() >= 3, "样本里至少要有三张才能看出筛没筛");
+
+        // 只导出中间那一张：勾了什么就是什么，不看选片状态、也不看别的条件
+        let wanted = all[1].id;
+        let dest = temp_dir("export-ids-dest");
+        let s = export_rows(
+            &conn.lock().unwrap(),
+            &PairFilter {
+                ids: Some(vec![wanted]),
+                ..Default::default()
+            },
+            &dest,
+            true,
+            FileScope::Both,
+            DEFAULT_NAME_TEMPLATE,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(s.photos, 1, "只该导出指定的那一组");
+        assert!(!s.manifest.is_empty());
+
+        // 顺带确认 ids 与选片状态无关：这张没标过记，导出照样成立
+        let by_mark_count = query_pairs(
+            &conn.lock().unwrap(),
+            &PairFilter {
+                ids: Some(vec![wanted]),
+                decision: Some("keep".into()),
+                ..Default::default()
+            },
+            100,
+            0,
+        )
+        .unwrap()
+        .total;
+        assert_eq!(by_mark_count, 0, "叠加条件时该取交集，不是只看 ids");
+
+        let _ = std::fs::remove_dir_all(&dest);
+        let _ = std::fs::remove_dir_all(&src_dir);
+    }
+
     #[test]
     fn export_never_modifies_the_originals() {
         let (src_dir, conn) = seeded("export-readonly");

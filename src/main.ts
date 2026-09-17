@@ -279,6 +279,8 @@ const elNoteKeep = $<HTMLElement>("#note-keep");
 const elNoteReject = $<HTMLElement>("#note-reject");
 const elNoteMarked = $<HTMLElement>("#note-marked");
 const elNoteAll = $<HTMLElement>("#note-all");
+const elNoteSelected = $<HTMLElement>("#note-selected");
+const elChoiceSelected = $<HTMLElement>("#choice-selected");
 const elNoteThumbs = $<HTMLElement>("#note-thumbs");
 
 const elCacheModal = $<HTMLElement>("#cache-modal");
@@ -1949,12 +1951,23 @@ async function openExportDialog() {
   // 「全部」跟着当前筛选走，所以这里给的是筛选后的总数
   elNoteAll.textContent = total > 0 ? fmt(total) : "";
 
+  // 勾了照片就把「当前选中的」摆在第一项并默认选中——这是最常用的那一条路
+  const picked = Array.from(selection).filter((id) => itemById.has(id));
+  elChoiceSelected.hidden = picked.length === 0;
+  elNoteSelected.textContent = picked.length > 0 ? fmt(picked.length) : "";
+  const scopeInputs = elExportScope.querySelectorAll<HTMLInputElement>('input[name="scope"]');
+  for (const input of scopeInputs) {
+    input.checked =
+      picked.length > 0 ? input.value === "selected" : input.value === "keep";
+  }
+
   elExportProgress.hidden = true;
   elExportResult.hidden = true;
   elExportReveal.hidden = true;
   elExportConfirm.textContent = "选择文件夹并导出";
-  // 只有图库真的是空的才没得导——「全部」这一项任何时候都能用
-  elExportConfirm.disabled = total === 0;
+  // 只有图库真的是空的才没得导——「全部」这一项任何时候都能用；
+  // 图库空但网格里有选中项（极端情况）也允许导出
+  elExportConfirm.disabled = total === 0 && picked.length === 0;
   elExportModal.hidden = false;
 }
 
@@ -1998,12 +2011,19 @@ async function runExport() {
   elExportFill.style.width = "0%";
   elExportProgressText.textContent = "正在整理…";
 
+  // 「当前选中的」是显式的一串 id，不掺筛选条件——勾了什么就导出什么。
+  // 其余范围沿用原来的口径：日期、机身、搜索这些条件继续生效，
+  // 「把这一天的保留都导出」是最常用的组合。scope 为 "all" 时后端认不出这个
+  // 取值，于是不按选片状态筛，正好是我们要的意思。
+  const onlyIds = scope === "selected" ? Array.from(selection).filter((id) => itemById.has(id)) : null;
+  const filter =
+    onlyIds && onlyIds.length > 0
+      ? { ...currentFilterPayload(), decision: null, ids: onlyIds }
+      : { ...currentFilterPayload(), decision: scope };
+
   try {
     const summary = await invoke<ExportSummary>("export_selection", {
-      // 范围只由这个对话框决定（keep / reject / marked / all），
-      // 日期、机身、搜索这些条件继续生效——「把这一天的保留都导出」是最常用的组合。
-      // scope 为 "all" 时后端认不出这个取值，于是不按选片状态筛，正好是我们要的意思。
-      filter: { ...currentFilterPayload(), decision: scope },
+      filter,
       dest,
       mode,
       scope: files,
