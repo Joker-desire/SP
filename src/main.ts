@@ -266,6 +266,7 @@ const elExportProgressText = $<HTMLElement>("#export-progress-text");
 // ── 文件夹范围选择与分组 ───────────────────────────────────────────────
 const elBtnClearLib = $<HTMLButtonElement>("#btn-clear-lib");
 const elBtnGroup = $<HTMLButtonElement>("#btn-group");
+const elBtnUndo = $<HTMLButtonElement>("#btn-undo");
 const elScopeModal = $<HTMLElement>("#scope-modal");
 const elScopeRoot = $<HTMLElement>("#scope-root");
 const elScopeList = $<HTMLElement>("#scope-list");
@@ -326,6 +327,25 @@ let items: PairCard[] = [];
 let total = 0;
 let noMore = false;
 let loadingPage = false;
+
+// ---- 撤销栈 ----
+//
+// 记的是「改动之前是什么样」，不是「做了什么操作」——回退就是把旧值写回去，
+// 这样批量标记、连拍一次性淘汰这种改了一堆的也能一步退回来。
+// decision / stars 为 null 表示这一项当时没动过，撤销时也别碰它。
+interface UndoItem {
+  id: number;
+  decision: Decision | null;
+  stars: number | null;
+}
+interface UndoEntry {
+  label: string;
+  before: UndoItem[];
+}
+/** 最多记这么多步。再早的操作用户也不会想退回去，留着只是占内存。 */
+const UNDO_LIMIT = 50;
+const undoStack: UndoEntry[] = [];
+
 /** 每次筛选条件变化就自增，用来丢弃过期请求的结果（防止旧页码插到新列表里）。 */
 let renderToken = 0;
 
@@ -1619,7 +1639,8 @@ async function applyPatch(patch: { decision?: Decision; stars?: number }) {
     await invoke<number>("apply_decision", {
       ids,
       decision: patch.decision ?? null,
-      stars: patch.stars ?? null,
+      // 「清除标记」连星级一起清（界面上就是这么显示的），不写库的话重载后星级会冒回来
+      stars: patch.stars ?? (patch.decision === "none" ? 0 : null),
     });
   } catch (e) {
     for (const b of backup) {
@@ -1630,6 +1651,12 @@ async function applyPatch(patch: { decision?: Decision; stars?: number }) {
     setHint(`标记没能保存：${String(e)}`, "error");
     return;
   }
+
+  // 落库成功才进撤销栈：没写进去的操作撤销了也没意义
+  pushUndo(
+    labelForPatch(patch, ids.length),
+    backup.map((b) => ({ id: b.c.id, decision: b.decision, stars: b.stars })),
+  );
 
   // 侧栏计数要立刻跟着动——「未标记」少一张是最直接的进度反馈
   void refreshFacetCounts();
@@ -1706,6 +1733,116 @@ function applyDecision(d: Decision) {
 
 function applyStars(n: number) {
   void applyPatch({ stars: n });
+}
+
+// ---- 撤销 ----
+
+function labelForPatch(patch: { decision?: Decision; stars?: number }, n: number): string {
+  const many = n > 1 ? ` ${n} 张` : "";
+  if (patch.decision === "keep") return `保留${many}`;
+  if (patch.decision === "reject") return `淘汰${many}`;
+  if (patch.decision === "none") return `清除标记${many}`;
+  if (patch.stars !== undefined) {
+    return patch.stars > 0 ? `${patch.stars} 星${many}` : `清除星级${many}`;
+  }
+  return `标记${many}`;
+}
+
+function pushUndo(label: string, before: UndoItem[]) {
+  if (before.length === 0) return;
+  undoStack.push({ label, before });
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  updateUndoBtn();
+}
+
+function clearUndo() {
+  undoStack.length = 0;
+  updateUndoBtn();
+}
+
+function updateUndoBtn() {
+  const top = undoStack[undoStack.length - 1];
+  elBtnUndo.disabled = !top;
+  elBtnUndo.title = top
+    ? `撤销：${top.label}（⌘Z / Ctrl+Z）`
+    : "没有可撤销的标记操作（⌘Z / Ctrl+Z）";
+}
+
+/**
+ * 把上一次标记改回原样。
+ *
+ * 走的是和正向标记同一个 apply_decision，所以侧栏计数、筛选、导出全都跟着回退，
+ * 不会出现「界面退了、库里没退」这种对不上的情况。
+ */
+async function undoLast() {
+  const entry = undoStack.pop();
+  updateUndoBtn();
+  if (!entry) {
+    setHint("没有可撤销的标记操作。", "warn");
+    return;
+  }
+
+  // 旧值相同的归成一批，一次调用写完——批量标记时不至于一张一个来回
+  const groups = new Map<string, { ids: number[]; decision: Decision | null; stars: number | null }>();
+  for (const it of entry.before) {
+    const key = `${it.decision}|${it.stars}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = { ids: [], decision: it.decision, stars: it.stars };
+      groups.set(key, g);
+    }
+    g.ids.push(it.id);
+  }
+
+  try {
+    for (const g of groups.values()) {
+      await invoke<number>("apply_decision", {
+        ids: g.ids,
+        decision: g.decision,
+        stars: g.stars,
+      });
+    }
+  } catch (e) {
+    // 没退成就塞回去，别把这一步弄丢
+    undoStack.push(entry);
+    updateUndoBtn();
+    setHint(`撤销失败：${String(e)}`, "error");
+    return;
+  }
+
+  // 库已经改回去了，但内存里的卡片要跟着退，否则界面还是旧的
+  let missing = false;
+  for (const it of entry.before) {
+    const c = itemById.get(it.id);
+    if (!c) {
+      missing = true;
+      continue;
+    }
+    if (it.decision !== null) c.decision = it.decision;
+    if (it.stars !== null) c.stars = it.stars;
+  }
+  repaint(entry.before.map((it) => it.id));
+  void refreshFacetCounts();
+
+  // 有卡片已经不在当前视图里（被筛选挪走了），重新按库里的状态铺一遍最省事
+  if (missing) await reload({ keepView: true });
+
+  if (!elLoupe.hidden) {
+    const c = items[loupeIndex];
+    if (c) paintLoupeMark(c);
+  } else {
+    // 网格里把光标放回被撤销的那张：退回来了什么，一眼能看到
+    const first = entry.before.find((it) => itemById.has(it.id));
+    if (first) {
+      selection.clear();
+      selection.add(first.id);
+      selAnchor = first.id;
+      syncSelection();
+      revealCard(first.id);
+    }
+  }
+
+  setHint(`已撤销：${entry.label}`);
 }
 
 // ---- 操作栏与网格的事件绑定 ----
@@ -2059,6 +2196,13 @@ async function pickInGroup(group: SimilarGroup, pickId: number) {
     decision: already ? "none" : m.id === pickId ? "keep" : "reject",
   }));
 
+  // 星级没动过，撤销时也不该去碰它，所以记 null
+  const before: UndoItem[] = group.members.map((m) => ({
+    id: m.id,
+    decision: m.decision as Decision,
+    stars: null,
+  }));
+
   // 先本地乐观更新，避免一张张闪
   for (const p of patch) {
     const cell = elCompareGrid.querySelector<HTMLElement>(`[data-id="${p.id}"]`);
@@ -2084,6 +2228,7 @@ async function pickInGroup(group: SimilarGroup, pickId: number) {
       const m = group.members.find((x) => x.id === p.id);
       if (m) m.decision = p.decision;
     }
+    pushUndo(already ? "取消连拍选择" : `连拍选优 ${group.size} 张`, before);
     void refreshFacetCounts();
   } catch (e) {
     setHint(`标记没能保存：${String(e)}`, "error");
@@ -2103,6 +2248,7 @@ function closeCompareDialog() {
 }
 
 elBtnSimilar.addEventListener("click", () => void openSimilarDialog());
+elBtnUndo.addEventListener("click", () => void undoLast());
 elSimilarClose.addEventListener("click", closeSimilarDialog);
 elSimilarModal.addEventListener("click", (e) => {
   if (e.target === elSimilarModal) closeSimilarDialog();
@@ -2320,6 +2466,7 @@ function clearLibrary() {
   elGrid.innerHTML = "";
   elGrid.classList.remove("is-grouped");
   groupMap = null;
+  clearUndo();
   renderRoot();
   elRescan.disabled = true;
   elCullbar.hidden = true;
@@ -2561,9 +2708,11 @@ async function runClearCache() {
         (scope === "thumbs" ? "" : rootPath ? " 点「重新扫描」可重建索引。" : " 选一个文件夹即可重建索引。")
     );
 
-    // 索引没了，界面上还挂着已经不存在的照片——必须重新拉一次
+    // 索引没了，界面上还挂着已经不存在的照片——必须重新拉一次。
+    // 顺带丢掉撤销栈：重建索引后 photo id 会重新分配，留着旧 id 撤销会落到别的照片上。
     if (scope !== "thumbs") {
       selection.clear();
+      clearUndo();
       await refreshLibrary();
     }
   } catch (e) {
@@ -2957,6 +3106,14 @@ window.addEventListener("keydown", (e) => {
 
   if (typingInField(e)) return;
 
+  // ---- 撤销：⌘Z / Ctrl+Z ----
+  // 放在输入框判断之后，输入文字时把 ⌘Z 还给浏览器自己的撤销
+  if (meta && !e.shiftKey && key.toLowerCase() === "z") {
+    e.preventDefault();
+    void undoLast();
+    return;
+  }
+
   // ---- 大图 ----
   if (!elLoupe.hidden) {
     if (key === "Escape") {
@@ -3092,6 +3249,7 @@ async function boot() {
   // 同步「按文件夹分组」开关的初始状态
   elBtnGroup.setAttribute("aria-pressed", groupByFolder ? "true" : "false");
   elBtnGroup.classList.toggle("is-active", groupByFolder);
+  updateUndoBtn();
 
   await listen<ScanProgress>("scan://progress", (e) => showProgress(e.payload));
   await listen<ExportProgress>("export://progress", (e) => showExportProgress(e.payload));
