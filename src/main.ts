@@ -992,6 +992,9 @@ async function reload(opts?: { keepView?: boolean }) {
 async function loadMore(token: number) {
   if (loadingPage || noMore || token !== renderToken) return;
   loadingPage = true;
+  // 下面的「首屏没填满继续取」是递归的：那一跳自己还会置 loadingPage 并更新计数，
+  // 外层不能在它还没跑完时就把标志清掉，否则会放进第二个并发请求。
+  let recursing = false;
 
   // 没选文件夹时视图就是空的：库里可能还留着上次文件夹的照片（标记要留着复用），
   // 不带范围去查会把它们全捞出来，看起来就像「清空」没生效。
@@ -1027,6 +1030,7 @@ async function loadMore(token: number) {
 
     // 首屏没填满时继续取，直到出现滚动条或取完
     if (!noMore && elGrid.scrollHeight <= elGrid.clientHeight + 200) {
+      recursing = true;
       loadingPage = false;
       return loadMore(token);
     }
@@ -1035,6 +1039,9 @@ async function loadMore(token: number) {
     noMore = true;
   } finally {
     loadingPage = false;
+    // 上面有几条提前 return 的路（换视图 / 读失败）没走到 updateCount，
+    // 不在这里补一次，计数那条就会一直挂着「读取中…」
+    if (!recursing) updateCount();
   }
 }
 
@@ -3146,7 +3153,11 @@ async function openCacheDialog() {
     paintCacheStats(c);
     elCacheClear.disabled = c.thumbsBytes + c.dbBytes === 0;
   } catch (e) {
-    elCacheThumbs.textContent = "读取失败";
+    // 三个都写了才算收尾：只改一个，另外两个会一直停在「读取中…」
+    for (const el of [elCacheThumbs, elCacheDb, elCacheDecisions]) {
+      el.textContent = "读取失败";
+    }
+    elCacheDir.textContent = "";
     elCacheClear.disabled = true;
     setHint(`读取缓存占用失败：${String(e)}`, "error");
   }
@@ -3380,7 +3391,7 @@ elLoupe.addEventListener(
     if (elLoupe.hidden) return;
     // 光标在详细信息面板上滚，滚的是面板内容，不是图片——
     // 面板自己有滚动条，这里抢走事件就会变成「想看下面的参数，图却跟着放大」。
-    if (overDetailBody(e.target, e.deltaY)) return;
+    if (overDetailPanel(e.target)) return;
     e.preventDefault();
     // 触控板会连发几十个小 delta，用指数映射，手感才是连续的而不是一格一跳
     zoomAt(e.clientX, e.clientY, zoom * Math.exp(-e.deltaY * 0.0022));
@@ -3389,24 +3400,15 @@ elLoupe.addEventListener(
 );
 
 /**
- * 这次滚轮是不是落在详情面板里、且面板还有得滚。
+ * 光标是不是落在详情面板上。
  *
- * 面板内容没超出高度时也算「归面板」：那种情况下滚了本来也不动，
- * 反手去缩放图片只会让人莫名其妙。
+ * 只要在上面就一律不碰图片：早先还留了「面板滚到头就把手势交还图片」的分支，
+ * 结果触控板的惯性滚动会在到底之后继续发事件，剩下的那串全变成缩放——
+ * 「滑动面板时图片忽大忽小」就是这么来的。宁可滚到底没反应，也别动图。
  */
-function overDetailBody(target: EventTarget | null, deltaY: number): boolean {
+function overDetailPanel(target: EventTarget | null): boolean {
   if (!detailOpen || !(target instanceof Element)) return false;
-  const panel = target.closest(".loupe-detail");
-  if (!panel) return false;
-  const body = panel.querySelector<HTMLElement>(".ld-body");
-  if (!body || body.scrollHeight <= body.clientHeight + 1) return true;
-
-  // 已经滚到头了还继续同方向滚，就把手势交还给图片，别让人以为卡住
-  const atTop = body.scrollTop <= 0;
-  const atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 1;
-  if (deltaY < 0 && atTop) return false;
-  if (deltaY > 0 && atBottom) return false;
-  return true;
+  return target.closest(".loupe-detail") !== null;
 }
 
 elLoupeImg.addEventListener("dblclick", (e) => {
@@ -3539,6 +3541,12 @@ interface ExifItem {
 let detailOpen = false;
 /** 面板当前展示的是哪张：异步回来对不上号就整包丢弃。 */
 let detailForId: number | null = null;
+/** 当前面板里「完整 EXIF」那一个小节；EXIF 是异步回填的，得认得出该往哪写。 */
+let exifSec: HTMLElement | null = null;
+let exifForId: number | null = null;
+/** id → 读过的完整 EXIF。来回滚同一张时不必再读一次文件。 */
+const exifCache = new Map<number, ExifItem[]>();
+const EXIF_CACHE_MAX = 60;
 
 function toggleDetail(force?: boolean) {
   detailOpen = force ?? !detailOpen;
@@ -3546,6 +3554,7 @@ function toggleDetail(force?: boolean) {
   elLoupeDetailBtn.classList.toggle("is-active", detailOpen);
   // 面板占了右侧一条，右上角缩放按钮和「下一张」要让开（样式里 .has-detail）
   elLoupe.classList.toggle("has-detail", detailOpen);
+  if (!detailOpen) exifSec = null;
   if (detailOpen) {
     const c = items[loupeIndex];
     if (c) void loadPhotoDetail(c.id);
@@ -3655,15 +3664,33 @@ function renderExifInto(sec: HTMLElement, items: ExifItem[], err = "") {
   }
 }
 
-/** 完整 EXIF 单独取：读文件比查库慢，先让面板出来，内容随后补上。 */
-async function loadExif(id: number, sec: HTMLElement) {
+/**
+ * 完整 EXIF 单独取：读文件比查库慢，先让面板出来，内容随后补上。
+ *
+ * 结果只写「当前面板里的那个小节」（exifSec），不写调用时传进来的节点——
+ * 否则一旦这期间面板被重画（关了又开、翻页又翻回来），内容会填进一个
+ * 已经被换掉的旧节点，新面板上的「读取中…」就再也没人来清了。
+ */
+async function loadExif(id: number) {
+  const cached = exifCache.get(id);
+  if (cached) {
+    if (exifForId === id && exifSec) renderExifInto(exifSec, cached);
+    return;
+  }
+
   try {
     const items = await invoke<ExifItem[]>("photo_exif", { id });
-    if (!detailOpen || detailForId !== id) return; // 期间翻页 / 关面板了
-    renderExifInto(sec, items);
+    // 缓存下来：来回滚这一张时不必再读一次文件
+    exifCache.set(id, items);
+    if (exifCache.size > EXIF_CACHE_MAX) {
+      const oldest = exifCache.keys().next().value;
+      if (oldest !== undefined) exifCache.delete(oldest);
+    }
+    if (!detailOpen || exifForId !== id || !exifSec) return;
+    renderExifInto(exifSec, items);
   } catch (e) {
-    if (!detailOpen || detailForId !== id) return;
-    renderExifInto(sec, [], String(e));
+    if (!detailOpen || exifForId !== id || !exifSec) return;
+    renderExifInto(exifSec, [], String(e));
   }
 }
 
@@ -3681,8 +3708,9 @@ function renderDetail(d: PhotoDetail) {
   const wd = d.timeText ? weekdayOf(d.timeText) : "";
 
   // 完整 EXIF 是单独一次读文件，先把占位小节摆上，回来再填
-  const exifSec = detailSection("完整 EXIF（从原文件读）", [detailRow("状态", "读取中…")]);
-  void loadExif(d.id, exifSec);
+  exifForId = d.id;
+  exifSec = detailSection("完整 EXIF（从原文件读）", [detailRow("状态", "读取中…")]);
+  void loadExif(d.id);
 
   // 同组文件每行带「还在不在」：挪走 / 删了的路径要点名，不能让人以为导出也会带上它
   const sibSec = detailSection("同组文件", [
@@ -3737,7 +3765,7 @@ function renderDetail(d: PhotoDetail) {
     detailSection(
       "画面分析",
       d.sharpness === null && d.overexposed === null && d.underexposed === null
-        ? [detailRow("状态", "还没分析（后台分析排队中或不支持）")]
+        ? [detailRow("状态", "还没分析（后台分析还没轮到它，或这个格式算不出来）")]
         : [
             detailRow("清晰度", d.sharpness === null ? "" : `${Math.round(d.sharpness)} 分（< 25 判跑焦）`),
             detailRow(
