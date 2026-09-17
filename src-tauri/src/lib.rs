@@ -38,16 +38,23 @@ fn startup_status(state: tauri::State<'_, AppState>) -> Option<String> {
 ///
 /// 进度是**边扫边推**的：首次扫几千张要跑几分钟，没有反馈就是在让用户
 /// 对着一个不知道死没死的窗口发呆。
+///
+/// `include_dirs` 是「只扫这些子目录」时的勾选结果（绝对路径）。为空或不传，
+/// 就扫描整个 `path`（递归）。分批写库让前端能在扫描进行中就开始显示已索引的部分。
 #[tauri::command]
 async fn scan_folder(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     path: String,
+    include_dirs: Option<Vec<String>>,
 ) -> Result<indexer::ScanSummary, String> {
     let db = state.db.clone();
+    let roots: Vec<PathBuf> = match include_dirs {
+        Some(d) if !d.is_empty() => d.into_iter().map(PathBuf::from).collect(),
+        _ => vec![PathBuf::from(&path)],
+    };
     tauri::async_runtime::spawn_blocking(move || {
-        let mut conn = db.lock().map_err(|e| e.to_string())?;
-        indexer::scan_with_progress(Path::new(&path), &mut conn, |p| {
+        indexer::scan_with_progress(&roots, &db, |p| {
             // 推送失败不是错误：窗口已经关了而已，扫描本身该继续跑完
             let _ = app.emit("scan://progress", &p);
         })
@@ -55,6 +62,12 @@ async fn scan_folder(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 列出某个目录下的子目录（含自身），供「文件夹范围选择」弹窗做一棵可勾选的树。
+#[tauri::command]
+async fn list_subdirs(path: String) -> Result<Vec<indexer::DirNode>, String> {
+    Ok(indexer::list_subdirs(Path::new(&path), 4, 3000))
 }
 
 #[derive(serde::Serialize)]
@@ -1864,6 +1877,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             startup_status,
             scan_folder,
+            list_subdirs,
             library_stats,
             library_facets,
             list_pairs,
@@ -1948,7 +1962,7 @@ mod tests {
     use super::*;
 
     /// 造三次快门：两张 NEF + JPG 配对完整，一张只有 NEF。
-    fn seeded(name: &str) -> (std::path::PathBuf, Connection) {
+    fn seeded(name: &str) -> (std::path::PathBuf, Arc<Mutex<Connection>>) {
         let dir = std::env::temp_dir().join(format!("sp-lib-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1959,13 +1973,15 @@ mod tests {
         }
         std::fs::write(dir.join("DSC_0003.NEF"), "nef-3").unwrap();
 
-        let mut conn = db::open_in_memory().unwrap();
-        indexer::scan(&dir, &mut conn).unwrap();
-        (dir, conn)
+        let db = Arc::new(Mutex::new(db::open_in_memory().unwrap()));
+        indexer::scan(&dir, &db).unwrap();
+        (dir, db)
     }
 
-    fn count(conn: &Connection, filter: PairFilter) -> i64 {
-        query_pairs(conn, &filter, 100, 0).unwrap().total
+    fn count(conn: &Arc<Mutex<Connection>>, filter: PairFilter) -> i64 {
+        query_pairs(&conn.lock().unwrap(), &filter, 100, 0)
+            .unwrap()
+            .total
     }
 
     #[test]
@@ -2020,7 +2036,7 @@ mod tests {
     fn paging_keeps_total_independent_of_page_size() {
         let (dir, conn) = seeded("paging");
         // 前端靠 total 决定「还要不要继续往下加载」，所以它必须是完整计数
-        let page = query_pairs(&conn, &PairFilter::default(), 1, 0).unwrap();
+        let page = query_pairs(&conn.lock().unwrap(), &PairFilter::default(), 1, 0).unwrap();
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.total, 3);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2030,7 +2046,7 @@ mod tests {
     fn searches_by_file_name() {
         let (dir, conn) = seeded("search");
         let page = query_pairs(
-            &conn,
+            &conn.lock().unwrap(),
             &PairFilter {
                 search: Some("DSC_0002".into()),
                 ..Default::default()
@@ -2065,12 +2081,12 @@ mod tests {
         std::fs::write(dir.join("A_B.NEF"), "x").unwrap();
         std::fs::write(dir.join("AXB.NEF"), "y").unwrap();
 
-        let mut conn = db::open_in_memory().unwrap();
-        indexer::scan(&dir, &mut conn).unwrap();
+        let db = Arc::new(Mutex::new(db::open_in_memory().unwrap()));
+        indexer::scan(&dir, &db).unwrap();
 
         let q = |s: &str| {
             count(
-                &conn,
+                &db,
                 PairFilter {
                     search: Some(s.into()),
                     ..Default::default()
@@ -2089,7 +2105,7 @@ mod tests {
     fn sorts_take_effect() {
         let (dir, conn) = seeded("sort");
         let asc = query_pairs(
-            &conn,
+            &conn.lock().unwrap(),
             &PairFilter {
                 sort: Some("nameAsc".into()),
                 ..Default::default()
@@ -2099,7 +2115,7 @@ mod tests {
         )
         .unwrap();
         let desc = query_pairs(
-            &conn,
+            &conn.lock().unwrap(),
             &PairFilter {
                 sort: Some("nameDesc".into()),
                 ..Default::default()
@@ -2116,7 +2132,7 @@ mod tests {
     #[test]
     fn facets_cover_every_dimension() {
         let (dir, conn) = seeded("facets");
-        let f = facets_of(&conn).unwrap();
+        let f = facets_of(&conn.lock().unwrap()).unwrap();
 
         assert_eq!(f.total, 3);
         let pick = |key: &str| {
@@ -2149,12 +2165,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// 取默认顺序下的一页卡片。
-    fn cards(conn: &Connection, filter: PairFilter) -> Vec<PairCard> {
-        query_pairs(conn, &filter, 100, 0).unwrap().items
+    fn cards(conn: &Arc<Mutex<Connection>>, filter: PairFilter) -> Vec<PairCard> {
+        query_pairs(&conn.lock().unwrap(), &filter, 100, 0)
+            .unwrap()
+            .items
     }
 
     /// 默认顺序下的第一张。
-    fn first_card(conn: &Connection) -> PairCard {
+    fn first_card(conn: &Arc<Mutex<Connection>>) -> PairCard {
         cards(conn, PairFilter::default()).remove(0)
     }
 
@@ -2167,13 +2185,15 @@ mod tests {
         }
     }
 
-    fn stored(conn: &Connection, pair_key: &str) -> (String, i64) {
-        conn.query_row(
-            "SELECT decision, stars FROM decisions WHERE pair_key = ?1",
-            [pair_key],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap()
+    fn stored(conn: &Arc<Mutex<Connection>>, pair_key: &str) -> (String, i64) {
+        conn.lock()
+            .unwrap()
+            .query_row(
+                "SELECT decision, stars FROM decisions WHERE pair_key = ?1",
+                [pair_key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
     }
 
     /// 标记必须盖住整次快门。
@@ -2182,14 +2202,15 @@ mod tests {
     /// 按状态筛的时候同一张照片出现两次、还给出矛盾的答案。
     #[test]
     fn marking_covers_the_whole_pair() {
-        let (dir, mut conn) = seeded("pairmark");
+        let (dir, conn) = seeded("pairmark");
         let card = first_card(&conn);
         let key = card.pair_key.clone();
 
-        apply_decision_rows(&mut conn, &[card.id], Some("keep"), Some(3)).unwrap();
+        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("keep"), Some(3)).unwrap();
 
         // 直接看这个 pair 底下**每一个文件**拿到的状态
-        let mut stmt = conn
+        let guard = conn.lock().unwrap();
+        let mut stmt = guard
             .prepare(
                 "SELECT p.file_kind, COALESCE(d.decision, 'none'), COALESCE(d.stars, 0)
                    FROM photos p LEFT JOIN decisions d ON d.pair_key = p.pair_key
@@ -2215,11 +2236,12 @@ mod tests {
     /// 一次标记里同时点到 NEF 和 JPG，只能算一张。
     #[test]
     fn marking_counts_pairs_not_files() {
-        let (dir, mut conn) = seeded("dedupe");
+        let (dir, conn) = seeded("dedupe");
         let key = first_card(&conn).pair_key.clone();
 
         let ids: Vec<i64> = {
-            let mut stmt = conn
+            let guard = conn.lock().unwrap();
+            let mut stmt = guard
                 .prepare("SELECT id FROM photos WHERE pair_key = ?1")
                 .unwrap();
             stmt.query_map([&key], |r| r.get::<_, i64>(0))
@@ -2230,7 +2252,7 @@ mod tests {
         assert_eq!(ids.len(), 2);
 
         assert_eq!(
-            apply_decision_rows(&mut conn, &ids, Some("keep"), None).unwrap(),
+            apply_decision_rows(&mut conn.lock().unwrap(), &ids, Some("keep"), None).unwrap(),
             1,
             "同一张照片的两个文件应当合并成一次决定"
         );
@@ -2244,15 +2266,24 @@ mod tests {
     /// 所有自增 id 都变了，任何挂在 photo_id 上的东西都会跟着消失。
     #[test]
     fn marks_survive_a_full_reindex() {
-        let (dir, mut conn) = seeded("survive");
+        let (dir, conn) = seeded("survive");
         let card = first_card(&conn);
         let key = card.pair_key.clone();
 
-        apply_decision_rows(&mut conn, &[card.id], Some("reject"), Some(2)).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            Some("reject"),
+            Some(2),
+        )
+        .unwrap();
         assert_eq!(stored(&conn, &key), ("reject".to_string(), 2));
 
-        conn.execute("DELETE FROM photos", []).unwrap();
-        indexer::scan(&dir, &mut conn).unwrap();
+        conn.lock()
+            .unwrap()
+            .execute("DELETE FROM photos", [])
+            .unwrap();
+        indexer::scan(&dir, &conn).unwrap();
 
         assert_eq!(
             stored(&conn, &key),
@@ -2266,12 +2297,12 @@ mod tests {
     /// 只改星级不能把已经做好的保留/淘汰决定冲掉。
     #[test]
     fn changing_stars_keeps_the_decision() {
-        let (dir, mut conn) = seeded("starspatch");
+        let (dir, conn) = seeded("starspatch");
         let card = first_card(&conn);
 
-        apply_decision_rows(&mut conn, &[card.id], Some("keep"), None).unwrap();
+        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("keep"), None).unwrap();
         // decision 传 None ＝ 这一项不改
-        apply_decision_rows(&mut conn, &[card.id], None, Some(5)).unwrap();
+        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], None, Some(5)).unwrap();
 
         assert_eq!(
             stored(&conn, &card.pair_key),
@@ -2285,11 +2316,11 @@ mod tests {
     /// 「清除」要把决定和星级一起清掉，不能留下「未标记但有三颗星」。
     #[test]
     fn clearing_resets_both_decision_and_stars() {
-        let (dir, mut conn) = seeded("clearpatch");
+        let (dir, conn) = seeded("clearpatch");
         let card = first_card(&conn);
 
-        apply_decision_rows(&mut conn, &[card.id], Some("keep"), Some(4)).unwrap();
-        apply_decision_rows(&mut conn, &[card.id], Some("none"), Some(0)).unwrap();
+        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("keep"), Some(4)).unwrap();
+        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("none"), Some(0)).unwrap();
 
         assert_eq!(stored(&conn, &card.pair_key), ("none".to_string(), 0));
 
@@ -2298,12 +2329,18 @@ mod tests {
 
     #[test]
     fn filters_by_decision_and_stars() {
-        let (dir, mut conn) = seeded("decfilter");
+        let (dir, conn) = seeded("decfilter");
         let page = cards(&conn, PairFilter::default());
         assert_eq!(page.len(), 3);
 
-        apply_decision_rows(&mut conn, &[page[0].id], Some("keep"), None).unwrap();
-        apply_decision_rows(&mut conn, &[page[1].id], Some("reject"), Some(4)).unwrap();
+        apply_decision_rows(&mut conn.lock().unwrap(), &[page[0].id], Some("keep"), None).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[page[1].id],
+            Some("reject"),
+            Some(4),
+        )
+        .unwrap();
 
         let c = |f: PairFilter| count(&conn, f);
         assert_eq!(c(by_mark(None, None)), 3, "不筛时是全部");
@@ -2333,7 +2370,7 @@ mod tests {
     /// 批量标记（「全选之后按 P」）要一次写完，且数量对得上。
     #[test]
     fn marking_a_whole_page_at_once() {
-        let (dir, mut conn) = seeded("bulkmark");
+        let (dir, conn) = seeded("bulkmark");
         let ids: Vec<i64> = cards(&conn, PairFilter::default())
             .iter()
             .map(|c| c.id)
@@ -2341,7 +2378,7 @@ mod tests {
         assert_eq!(ids.len(), 3);
 
         assert_eq!(
-            apply_decision_rows(&mut conn, &ids, Some("keep"), None).unwrap(),
+            apply_decision_rows(&mut conn.lock().unwrap(), &ids, Some("keep"), None).unwrap(),
             3
         );
         assert_eq!(count(&conn, by_mark(Some("keep"), None)), 3);
@@ -2349,7 +2386,7 @@ mod tests {
 
         // 空列表不该报错，也不该把谁标上
         assert_eq!(
-            apply_decision_rows(&mut conn, &[], Some("reject"), None).unwrap(),
+            apply_decision_rows(&mut conn.lock().unwrap(), &[], Some("reject"), None).unwrap(),
             0
         );
         assert_eq!(count(&conn, by_mark(Some("reject"), None)), 0);
@@ -2359,11 +2396,17 @@ mod tests {
 
     #[test]
     fn facets_report_decision_and_star_counts() {
-        let (dir, mut conn) = seeded("decfacets");
+        let (dir, conn) = seeded("decfacets");
         let page = cards(&conn, PairFilter::default());
-        apply_decision_rows(&mut conn, &[page[0].id], Some("keep"), Some(4)).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[page[0].id],
+            Some("keep"),
+            Some(4),
+        )
+        .unwrap();
 
-        let f = facets_of(&conn).unwrap();
+        let f = facets_of(&conn.lock().unwrap()).unwrap();
         let pick = |list: &[Facet], key: &str| {
             list.iter()
                 .find(|x| x.key == key)
@@ -2487,10 +2530,10 @@ mod tests {
 
     #[test]
     fn export_copies_files_and_writes_a_manifest() {
-        let (src_dir, mut conn) = seeded("export");
+        let (src_dir, conn) = seeded("export");
         // 挑一张配对完整的，才能验证「NEF 和 JPG 都被复制」
         let card = query_pairs(
-            &conn,
+            &conn.lock().unwrap(),
             &PairFilter {
                 pair_state: Some("both".into()),
                 ..Default::default()
@@ -2501,13 +2544,13 @@ mod tests {
         .unwrap()
         .items
         .remove(0);
-        apply_decision_rows(&mut conn, &[card.id], Some("keep"), Some(5)).unwrap();
+        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("keep"), Some(5)).unwrap();
 
         let dest = temp_dir("export-dest");
         let filter = by_mark(Some("keep"), None);
 
         let s = export_rows(
-            &conn,
+            &conn.lock().unwrap(),
             &filter,
             &dest,
             true,
@@ -2531,7 +2574,7 @@ mod tests {
 
         // 再导一遍：不该滚出一堆 -1 -2 的副本
         let again = export_rows(
-            &conn,
+            &conn.lock().unwrap(),
             &filter,
             &dest,
             true,
@@ -2550,13 +2593,13 @@ mod tests {
     /// 「只出清单」模式一个文件都不该复制。
     #[test]
     fn list_only_mode_touches_no_files() {
-        let (src_dir, mut conn) = seeded("export-list");
+        let (src_dir, conn) = seeded("export-list");
         let card = first_card(&conn);
-        apply_decision_rows(&mut conn, &[card.id], Some("keep"), None).unwrap();
+        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("keep"), None).unwrap();
 
         let dest = temp_dir("export-list-dest");
         let s = export_rows(
-            &conn,
+            &conn.lock().unwrap(),
             &by_mark(Some("keep"), None),
             &dest,
             false,
@@ -2585,13 +2628,19 @@ mod tests {
     /// 导出绝不能碰原片。这条是硬底线，所以用一个明确的断言守着。
     #[test]
     fn export_never_modifies_the_originals() {
-        let (src_dir, mut conn) = seeded("export-readonly");
+        let (src_dir, conn) = seeded("export-readonly");
 
         // 两种状态都标上，好把「保留」和「淘汰」两条导出路径都跑一遍——
         // 淘汰恰恰是最容易被谁写成删除的那个分支
         let page = cards(&conn, PairFilter::default());
-        apply_decision_rows(&mut conn, &[page[0].id], Some("reject"), None).unwrap();
-        apply_decision_rows(&mut conn, &[page[1].id], Some("keep"), None).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[page[0].id],
+            Some("reject"),
+            None,
+        )
+        .unwrap();
+        apply_decision_rows(&mut conn.lock().unwrap(), &[page[1].id], Some("keep"), None).unwrap();
 
         let snapshot = |dir: &std::path::Path| -> Vec<(String, u64)> {
             let mut v: Vec<(String, u64)> = std::fs::read_dir(dir)
@@ -2613,7 +2662,7 @@ mod tests {
 
         let dest = temp_dir("export-ro-dest");
         export_rows(
-            &conn,
+            &conn.lock().unwrap(),
             &by_mark(None, None),
             &dest,
             true,
@@ -2623,7 +2672,7 @@ mod tests {
         )
         .unwrap();
         export_rows(
-            &conn,
+            &conn.lock().unwrap(),
             &by_mark(Some("reject"), None),
             &dest,
             true,

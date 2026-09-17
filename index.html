@@ -123,6 +123,20 @@
           </svg>
           <span class="btn-text">选择文件夹</span>
         </button>
+
+        <button class="btn btn-ghost" id="btn-clear-lib" hidden title="清空当前文件夹（不删原片、不丢标记），回到「选择文件夹」状态">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M2.7 4.3h10.6M6.3 4.3V2.9h3.4v1.4M4.3 4.3l.7 8.2c0 .6.5 1.1 1.1 1.1h4c.6 0 1.1-.5 1.1-1.1l.7-8.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="btn-text">清空</span>
+        </button>
+
+        <button class="btn btn-ghost" id="btn-group" aria-pressed="false" title="按文件夹分组，可逐组折叠 / 展开">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M1.8 3.8h12.4M1.8 8h12.4M1.8 12.2h12.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+          <span class="btn-text">分组</span>
+        </button>
       </div>
     </header>
 
@@ -557,6 +571,27 @@
         <div class="modal-foot">
           <button class="btn" id="cache-cancel">关闭</button>
           <button class="btn btn-primary" id="cache-clear">开始清理</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 文件夹范围选择 ───────────────────────────────────────────
+         选了带子文件夹的目录后，先在这里勾选要纳入本次扫描的子目录，
+         再开始扫描。默认全部勾选（=和从前一样整目录递归）。 -->
+    <div class="modal" id="scope-modal" hidden>
+      <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="scope-title">
+        <h2 class="modal-title" id="scope-title">选择要扫描的文件夹范围</h2>
+        <p class="modal-note" id="scope-root"></p>
+        <div class="modal-body">
+          <div class="scope-actions">
+            <button class="btn btn-ghost" id="scope-all">全选</button>
+            <button class="btn btn-ghost" id="scope-none">全不选</button>
+          </div>
+          <ul class="scope-list" id="scope-list"></ul>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" id="scope-cancel">取消</button>
+          <button class="btn btn-primary" id="scope-ok">开始扫描</button>
         </div>
       </div>
     </div>

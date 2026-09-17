@@ -7,11 +7,12 @@
 
 use anyhow::{anyhow, Context, Result};
 use rayon::prelude::*;
-use rusqlite::{params, Connection};
-use std::collections::{HashMap, HashSet};
+use rusqlite::{params, Connection, Transaction};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use walkdir::WalkDir;
 
 use crate::pairing::{self, FileKind};
@@ -107,17 +108,24 @@ pub struct ScanSummary {
 /// 真正的调用方（`scan_folder` 命令）一律走 `scan_with_progress`；
 /// 这个包装只剩测试在用——测试关心的是「扫出什么结果」，不是进度条。
 #[cfg(test)]
-pub fn scan(root: &Path, conn: &mut Connection) -> Result<ScanSummary> {
-    scan_with_progress(root, conn, |_| {})
+pub fn scan(root: &Path, db: &Arc<Mutex<Connection>>) -> Result<ScanSummary> {
+    scan_with_progress(&[root.to_path_buf()], db, |_| {})
 }
 
 /// 扫描并流式上报进度。
 ///
-/// 阶段划分是有意的：遍历目录 → 并行读元数据 → 写库 → 统计。
-/// 前端拿到的进度是按阶段推进的，所以进度条不会「先停顿再猛冲」。
+/// 阶段划分是有意的：遍历目录 → 并行读元数据 → 分批写库 → 统计。
+///
+/// **分批提交**是关键改动：每解析出一批（默认 200 张）就开一个事务写进去并提交，
+/// 而不是等全部解析完再开一个巨型事务。这样前端在扫描进行中就能反复来
+/// `list_pairs` 查到「已经入库的那部分」，做到「先展示前 N 张、边看边等」。
+/// 事务之间会释放数据库连接锁，前端的查询不会被饿死。
+///
+/// `roots` 是「要扫描哪些目录」——可以是用户勾选的若干子文件夹，而不是
+/// 永远递归整个根目录（见文件夹范围选择）。
 pub fn scan_with_progress<F>(
-    root: &Path,
-    conn: &mut Connection,
+    roots: &[PathBuf],
+    db: &Arc<Mutex<Connection>>,
     on_progress: F,
 ) -> Result<ScanSummary>
 where
@@ -126,32 +134,50 @@ where
     let t0 = std::time::Instant::now();
     let mut summary = ScanSummary::default();
 
-    if !root.is_dir() {
-        return Err(anyhow!("目录不存在或不是文件夹：{}", root.display()));
+    if roots.is_empty() || roots.iter().all(|r| !r.is_dir()) {
+        return Err(anyhow!(
+            "目录不存在或不是文件夹：{}",
+            roots
+                .first()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        ));
     }
 
-    // ---- 1) 收集候选文件 ----
+    // ---- 1) 收集候选文件（遍历用户勾选的每个目录）----
     on_progress(ScanProgress::new("walking", 0, 0));
     let mut files: Vec<PathBuf> = Vec::new();
-    for entry in WalkDir::new(root).follow_links(false).into_iter() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if !entry.file_type().is_file() {
-            continue;
+    for r in roots {
+        for entry in WalkDir::new(r).follow_links(false).into_iter() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let p = entry.path();
+            if pairing::classify(&pairing::ext_lower(p)).is_none() {
+                continue;
+            }
+            files.push(p.to_path_buf());
         }
-        let p = entry.path();
-        if pairing::classify(&pairing::ext_lower(p)).is_none() {
-            continue;
-        }
-        files.push(p.to_path_buf());
     }
     summary.scanned = files.len();
+    let total = files.len();
+    if total == 0 {
+        // 一个文件都没有：没有可写的东西，但统计阶段仍要跑（让前端拿到 0 张）。
+        on_progress(ScanProgress::new("stats", 0, 1));
+        let conn = db.lock().map_err(|e| anyhow!("{e}"))?;
+        summarize(&conn, &mut summary)?;
+        summary.elapsed_ms = t0.elapsed().as_millis();
+        return Ok(summary);
+    }
 
     // ---- 2) 已入库的 路径 -> 快照 ----
     let mut known: HashMap<String, KnownFile> = HashMap::new();
     {
+        let conn = db.lock().map_err(|e| anyhow!("{e}"))?;
         let mut stmt = conn.prepare("SELECT path, fingerprint, file_size, mtime FROM photos")?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
@@ -166,45 +192,10 @@ where
         }
     }
 
-    // ---- 3) 并行解析（指纹 + EXIF）----
-    let total = files.len();
-    on_progress(ScanProgress::new("parsing", 0, total));
-    let counter = AtomicUsize::new(0);
-    let outcome: Vec<Parsed> = files
-        .par_iter()
-        .map(|p| {
-            let result = parse_one(p, &known);
-            // 每 64 个报一次：既够流畅，又不会让事件把主线程淹没
-            let n = counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if n % 64 == 0 || n == total {
-                on_progress(ScanProgress::new("parsing", n, total));
-            }
-            result
-        })
-        .collect();
-
-    let mut fresh: Vec<PhotoRow> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for o in outcome {
-        match o {
-            Parsed::Unchanged(p) => {
-                summary.unchanged += 1;
-                seen.insert(p);
-            }
-            Parsed::Fresh(r) => {
-                seen.insert(r.path.clone());
-                fresh.push(*r);
-            }
-            Parsed::Failed(p) => {
-                summary.failed += 1;
-                seen.insert(p);
-            }
-        }
-    }
-
-    // ---- 4) 机身时间偏移（用于 taken_at_corrected）----
+    // ---- 3) 机身时间偏移（用于 taken_at_corrected）----
     let mut offsets: HashMap<String, i64> = HashMap::new();
     {
+        let conn = db.lock().map_err(|e| anyhow!("{e}"))?;
         let mut stmt = conn.prepare("SELECT serial, time_offset_seconds FROM camera_bodies")?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
@@ -212,98 +203,159 @@ where
         }
     }
 
-    let now = now_epoch();
-
-    // ---- 5) 事务内批量写入 ----
-    on_progress(ScanProgress::new("writing", 0, fresh.len()));
-    let tx = conn.transaction()?;
+    // ---- 4) 并行解析，结果经 channel 流式回主线程 ----
+    //
+    // 不用 `.collect()` 一次拿全，而是每解析完一张就 send 出来。主线程边收边
+    // 攒批写库，所以第一批（比如前 200 张）一落库，前端就能查到并开始显示，
+    // 不用傻等几千张全部解析完。rayon 负责把解析平摊到所有核。
+    on_progress(ScanProgress::new("parsing", 0, total));
+    let (tx, rx) = mpsc::channel::<Parsed>();
     {
-        let mut ins = tx.prepare(
-            "INSERT INTO photos (
-                path, fingerprint, pair_key, file_kind, file_size, mtime,
-                width, height, taken_at, taken_at_corrected,
-                camera_model, camera_serial, lens, focal_len, aperture, shutter,
-                iso, orientation, exif_ok, indexed_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
-             ON CONFLICT(path) DO UPDATE SET
-                fingerprint        = excluded.fingerprint,
-                pair_key           = excluded.pair_key,
-                file_kind          = excluded.file_kind,
-                file_size          = excluded.file_size,
-                mtime              = excluded.mtime,
-                width              = excluded.width,
-                height             = excluded.height,
-                taken_at           = excluded.taken_at,
-                taken_at_corrected = excluded.taken_at_corrected,
-                camera_model       = excluded.camera_model,
-                camera_serial      = excluded.camera_serial,
-                lens               = excluded.lens,
-                focal_len          = excluded.focal_len,
-                aperture           = excluded.aperture,
-                shutter            = excluded.shutter,
-                iso                = excluded.iso,
-                orientation        = excluded.orientation,
-                exif_ok            = excluded.exif_ok,
-                indexed_at         = excluded.indexed_at",
-        )?;
+        let known = &known;
+        let worker = tx.clone();
+        drop(tx);
+        files.par_iter().for_each(|p| {
+            let _ = worker.send(parse_one(p, known));
+        });
+        // worker 的克隆在 for_each 结束（所有线程 join）后随闭包一起丢弃，
+        // 加上上面 drop 掉的原 sender，channel 在此关闭，主线程的 for 循环得以结束。
+    }
 
-        for r in &fresh {
-            let corrected = r.taken_at.map(|t| {
-                let off = r
-                    .camera_serial
-                    .as_deref()
-                    .and_then(|s| offsets.get(s))
-                    .copied()
-                    .unwrap_or(0);
-                t + off
-            });
-            let changed = ins.execute(params![
-                r.path,
-                r.fingerprint,
-                r.pair_key,
-                r.file_kind,
-                r.file_size,
-                r.mtime,
-                r.width,
-                r.height,
-                r.taken_at,
-                corrected,
-                r.camera_model,
-                r.camera_serial,
-                r.lens,
-                r.focal_len,
-                r.aperture,
-                r.shutter,
-                r.iso,
-                r.orientation,
-                r.exif_ok,
-                now,
-            ])?;
-            // ON CONFLICT DO UPDATE 也返回 1，所以按是否已在 known 里判断更准
-            if known.contains_key(&r.path) {
-                summary.updated += 1;
-            } else {
-                summary.inserted += 1;
-            }
-            let _ = changed;
+    // ---- 5) 边收边写：每 BATCH 张提交一次事务 ----
+    const BATCH: usize = 200;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut batch_rows: Vec<PhotoRow> = Vec::new();
+    let mut batch_keys: Vec<String> = Vec::new();
+    let mut parsed = 0usize;
+    let mut written = 0usize;
+
+    // 闭包：把攒好的一批写进库并提交，同时把这批涉及 pair 的主文件标记算对。
+    // 每次调用都重新取锁/放锁，所以前端在批与批之间能插进来查询。
+    let commit = |batch_rows: &mut Vec<PhotoRow>,
+                  batch_keys: &mut Vec<String>,
+                  summary: &mut ScanSummary|
+     -> Result<()> {
+        if batch_rows.is_empty() {
+            return Ok(());
         }
+        let mut conn = db.lock().map_err(|e| anyhow!("{e}"))?;
+        let tx = conn.transaction()?;
+        {
+            let mut ins = tx.prepare(
+                "INSERT INTO photos (
+                    path, fingerprint, pair_key, file_kind, file_size, mtime,
+                    width, height, taken_at, taken_at_corrected,
+                    camera_model, camera_serial, lens, focal_len, aperture, shutter,
+                    iso, orientation, exif_ok, indexed_at
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+                 ON CONFLICT(path) DO UPDATE SET
+                    fingerprint        = excluded.fingerprint,
+                    pair_key           = excluded.pair_key,
+                    file_kind          = excluded.file_kind,
+                    file_size          = excluded.file_size,
+                    mtime              = excluded.mtime,
+                    width              = excluded.width,
+                    height             = excluded.height,
+                    taken_at           = excluded.taken_at,
+                    taken_at_corrected = excluded.taken_at_corrected,
+                    camera_model       = excluded.camera_model,
+                    camera_serial      = excluded.camera_serial,
+                    lens                = excluded.lens,
+                    focal_len          = excluded.focal_len,
+                    aperture           = excluded.aperture,
+                    shutter            = excluded.shutter,
+                    iso                 = excluded.iso,
+                    orientation         = excluded.orientation,
+                    exif_ok             = excluded.exif_ok,
+                    indexed_at          = excluded.indexed_at",
+            )?;
 
-        // 主文件标记：同一 pair 内 RAW 优先。用窗口函数一次算完，兼容历史数据。
-        tx.execute_batch(
-            "UPDATE photos SET is_primary = 0;
-             UPDATE photos SET is_primary = 1 WHERE id IN (
-                SELECT id FROM (
-                    SELECT id,
-                           ROW_NUMBER() OVER (
-                             PARTITION BY pair_key
-                             ORDER BY (file_kind = 'raw') DESC, id
-                           ) AS rn
-                    FROM photos
-                ) WHERE rn = 1
-             );",
-        )?;
+            for r in batch_rows.iter() {
+                let corrected = r.taken_at.map(|t| {
+                    let off = r
+                        .camera_serial
+                        .as_deref()
+                        .and_then(|s| offsets.get(s))
+                        .copied()
+                        .unwrap_or(0);
+                    t + off
+                });
+                ins.execute(params![
+                    r.path,
+                    r.fingerprint,
+                    r.pair_key,
+                    r.file_kind,
+                    r.file_size,
+                    r.mtime,
+                    r.width,
+                    r.height,
+                    r.taken_at,
+                    corrected,
+                    r.camera_model,
+                    r.camera_serial,
+                    r.lens,
+                    r.focal_len,
+                    r.aperture,
+                    r.shutter,
+                    r.iso,
+                    r.orientation,
+                    r.exif_ok,
+                    now_epoch(),
+                ])?;
+                if known.contains_key(&r.path) {
+                    summary.updated += 1;
+                } else {
+                    summary.inserted += 1;
+                }
+            }
 
-        // ---- 6) 清理已从磁盘移走的记录 ----
+            // 主文件标记：同一 pair 内 RAW 优先。只重算这批涉及到的 pair，
+            // 既正确又能让前端在写入当下就能按 is_primary 查到。
+            set_primary_for(&tx, batch_keys)?;
+        }
+        tx.commit()?;
+        batch_rows.clear();
+        batch_keys.clear();
+        Ok(())
+    };
+
+    for o in rx {
+        match o {
+            Parsed::Unchanged(p) => {
+                summary.unchanged += 1;
+                seen.insert(p);
+            }
+            Parsed::Fresh(r) => {
+                seen.insert(r.path.clone());
+                batch_keys.push(r.pair_key.clone());
+                batch_rows.push(*r);
+                if batch_rows.len() >= BATCH {
+                    commit(&mut batch_rows, &mut batch_keys, &mut summary)?;
+                    written += BATCH;
+                    on_progress(ScanProgress::new("writing", written.min(total), total));
+                }
+            }
+            Parsed::Failed(p) => {
+                summary.failed += 1;
+                seen.insert(p);
+            }
+        }
+        parsed += 1;
+        if parsed % 250 == 0 {
+            on_progress(ScanProgress::new("parsing", parsed, total));
+        }
+    }
+    commit(&mut batch_rows, &mut batch_keys, &mut summary)?;
+    on_progress(ScanProgress::new("writing", total, total));
+
+    // ---- 6) 清理已从磁盘移走的记录 ----
+    //
+    // 只在「属于本次某个扫描根目录、却又不在 seen 里」的记录上动手——
+    // 没勾选的别的目录下的老照片不会被误删。
+    on_progress(ScanProgress::new("stats", 0, 1));
+    {
+        let mut conn = db.lock().map_err(|e| anyhow!("{e}"))?;
+        let tx = conn.transaction()?;
         let mut stale: Vec<i64> = Vec::new();
         {
             let mut stmt = tx.prepare("SELECT id, path FROM photos")?;
@@ -311,7 +363,8 @@ where
             while let Some(r) = rows.next()? {
                 let id: i64 = r.get(0)?;
                 let path: String = r.get(1)?;
-                if Path::new(&path).starts_with(root) && !seen.contains(&path) {
+                let under_root = roots.iter().any(|r| Path::new(&path).starts_with(r));
+                if under_root && !seen.contains(&path) {
                     stale.push(id);
                 }
             }
@@ -323,11 +376,22 @@ where
             }
             summary.removed = stale.len();
         }
+        tx.commit()?;
     }
-    tx.commit()?;
-    on_progress(ScanProgress::new("stats", 0, 1));
 
     // ---- 7) 配对统计 ----
+    {
+        let conn = db.lock().map_err(|e| anyhow!("{e}"))?;
+        summarize(&conn, &mut summary)?;
+    }
+
+    summary.elapsed_ms = t0.elapsed().as_millis();
+    Ok(summary)
+}
+
+/// 配对 / 孤立 / EXIF 失败的统计。抽出来是因为「空目录」提前返回的那条路径
+/// 也要算一遍，避免 0 张时统计字段是 0 以外的脏值。
+fn summarize(conn: &Connection, summary: &mut ScanSummary) -> Result<()> {
     {
         let mut stmt = conn.prepare(
             "SELECT
@@ -360,9 +424,102 @@ where
             summary.exif_failed = r.get::<_, i64>(0).unwrap_or(0) as usize;
         }
     }
+    Ok(())
+}
 
-    summary.elapsed_ms = t0.elapsed().as_millis();
-    Ok(summary)
+/// 只把给定 pair 的主文件标记算对：RAW 优先，其次按 id。
+///
+/// 分批写库时每批只重算本批涉及的 pair，避免每次都全表 UPDATE。
+fn set_primary_for(tx: &Transaction, keys: &[String]) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let holders = vec!["?"; keys.len()].join(",");
+    let sql = format!(
+        "UPDATE photos SET is_primary = (id IN (
+            SELECT id FROM (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                         PARTITION BY pair_key
+                         ORDER BY (file_kind = 'raw') DESC, id
+                       ) AS rn
+                FROM photos WHERE pair_key IN ({holders})
+            ) WHERE rn = 1))
+         WHERE pair_key IN ({holders})"
+    );
+    let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(keys.len() * 2);
+    for k in keys {
+        params.push(rusqlite::types::Value::Text(k.clone()));
+    }
+    for k in keys {
+        params.push(rusqlite::types::Value::Text(k.clone()));
+    }
+    tx.execute(&sql, rusqlite::params_from_iter(params))?;
+    Ok(())
+}
+
+/// 文件夹范围选择时用到的一个节点。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirNode {
+    /// 绝对路径
+    pub path: String,
+    /// 文件夹名（不含父级）
+    pub name: String,
+    /// 相对所选根目录的深度：根本身为 0，其直接子目录为 1，依此类推
+    pub depth: usize,
+    /// 是否还有更深的子目录
+    pub has_children: bool,
+}
+
+/// 以广度优先列出 `root` 下的子目录（含 root 自身，depth=0），
+/// 供「文件夹范围选择」弹窗做一棵可勾选的树。
+///
+/// 递归过深或目录爆炸时靠 `max_depth` / `max_nodes` 兜底，
+/// 毕竟选片是给人挑照片用的，三千个子目录的树也没人看得过来。
+pub fn list_subdirs(root: &Path, max_depth: usize, max_nodes: usize) -> Vec<DirNode> {
+    let mut out: Vec<DirNode> = Vec::new();
+    if !root.is_dir() {
+        return out;
+    }
+    let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
+    queue.push_back((root.to_path_buf(), 0));
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        if out.len() >= max_nodes {
+            break;
+        }
+        let mut kids: Vec<PathBuf> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if let Ok(md) = e.metadata() {
+                    if md.is_dir() {
+                        kids.push(e.path());
+                    }
+                }
+            }
+        }
+        kids.sort();
+
+        if depth > 0 {
+            out.push(DirNode {
+                path: dir.to_string_lossy().to_string(),
+                name: dir
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                depth,
+                has_children: !kids.is_empty(),
+            });
+        }
+        if depth >= max_depth {
+            continue;
+        }
+        for k in kids {
+            queue.push_back((k, depth + 1));
+        }
+    }
+    out
 }
 
 /// 单个文件的解析：先看「大小 + 修改时间」是否变过，没变就直接跳过；
@@ -653,10 +810,10 @@ mod tests {
             std::fs::write(dir.join(format!("DSC_{i}.JPG")), format!("jpg-{i}")).unwrap();
         }
 
-        let mut conn = crate::db::open_in_memory().unwrap();
+        let db = Arc::new(Mutex::new(crate::db::open_in_memory().unwrap()));
 
         // 首次扫描：4 个文件全部入库，配成 2 张照片
-        let s = scan(&dir, &mut conn).unwrap();
+        let s = scan(&dir, &db).unwrap();
         assert_eq!(s.scanned, 4);
         assert_eq!(s.inserted, 4);
         assert_eq!(s.updated, 0);
@@ -665,14 +822,14 @@ mod tests {
         assert_eq!(s.orphan_jpg, 0);
 
         // 再扫一次：指纹未变，应该全部跳过（增量扫描）
-        let s2 = scan(&dir, &mut conn).unwrap();
+        let s2 = scan(&dir, &db).unwrap();
         assert_eq!(s2.unchanged, 4);
         assert_eq!(s2.inserted, 0);
         assert_eq!(s2.pairs, 2);
 
         // 删掉一个 JPG：扫描后应清理该记录，并报出一对孤立
         std::fs::remove_file(dir.join("DSC_0002.JPG")).unwrap();
-        let s3 = scan(&dir, &mut conn).unwrap();
+        let s3 = scan(&dir, &db).unwrap();
         assert_eq!(s3.removed, 1);
         assert_eq!(s3.pairs, 2);
         assert_eq!(s3.orphan_raw, 1, "DSC_0002 只剩 NEF，应报缺 JPG");
@@ -689,11 +846,13 @@ mod tests {
         std::fs::write(dir.join("DSC_0001.NEF"), "nef").unwrap();
         std::fs::write(dir.join("DSC_0001.JPG"), "jpg").unwrap();
 
-        let mut conn = crate::db::open_in_memory().unwrap();
-        scan(&dir, &mut conn).unwrap();
+        let db = Arc::new(Mutex::new(crate::db::open_in_memory().unwrap()));
+        scan(&dir, &db).unwrap();
 
         let pk = pairing::pair_key(&dir.join("DSC_0001.NEF")).unwrap();
-        let kind: String = conn
+        let kind: String = db
+            .lock()
+            .unwrap()
             .query_row(
                 "SELECT file_kind FROM photos WHERE pair_key = ?1 AND is_primary = 1",
                 [&pk],
@@ -702,7 +861,9 @@ mod tests {
             .unwrap();
         assert_eq!(kind, "raw", "配对里主文件必须是 NEF");
 
-        let primaries: i64 = conn
+        let primaries: i64 = db
+            .lock()
+            .unwrap()
             .query_row(
                 "SELECT COUNT(*) FROM photos WHERE pair_key = ?1 AND is_primary = 1",
                 [&pk],
@@ -720,8 +881,8 @@ mod tests {
         let dir = temp_dir("jpgonly");
         std::fs::write(dir.join("IMG_9001.JPG"), "jpg-only").unwrap();
 
-        let mut conn = crate::db::open_in_memory().unwrap();
-        let s = scan(&dir, &mut conn).unwrap();
+        let db = Arc::new(Mutex::new(crate::db::open_in_memory().unwrap()));
+        let s = scan(&dir, &db).unwrap();
 
         assert_eq!(s.scanned, 1);
         assert_eq!(s.pairs, 1);
@@ -743,12 +904,14 @@ mod tests {
         let dir = temp_dir("fastpath");
         std::fs::write(dir.join("DSC_0001.NEF"), "pretend-nef").unwrap();
 
-        let mut conn = crate::db::open_in_memory().unwrap();
-        scan(&dir, &mut conn).unwrap();
-        conn.execute("UPDATE photos SET fingerprint = 'corrupted-on-purpose'", [])
+        let db = Arc::new(Mutex::new(crate::db::open_in_memory().unwrap()));
+        scan(&dir, &db).unwrap();
+        db.lock()
+            .unwrap()
+            .execute("UPDATE photos SET fingerprint = 'corrupted-on-purpose'", [])
             .unwrap();
 
-        let s = scan(&dir, &mut conn).unwrap();
+        let s = scan(&dir, &db).unwrap();
         assert_eq!(s.unchanged, 1, "大小与修改时间都没变，不该重新读文件");
         assert_eq!(s.updated, 0);
 
@@ -763,9 +926,9 @@ mod tests {
             std::fs::write(dir.join(format!("DSC_{i:04}.NEF")), format!("n{i}")).unwrap();
         }
 
-        let mut conn = crate::db::open_in_memory().unwrap();
+        let db = Arc::new(Mutex::new(crate::db::open_in_memory().unwrap()));
         let seen = std::sync::Mutex::new(Vec::new());
-        scan_with_progress(&dir, &mut conn, |p| {
+        scan_with_progress(&[dir.clone()], &db, |p| {
             seen.lock().unwrap().push(p.phase);
         })
         .unwrap();
@@ -775,6 +938,39 @@ mod tests {
         assert!(phases.contains(&"parsing"), "应报告解析进度：{phases:?}");
         assert!(phases.contains(&"writing"), "应报告写入进度：{phases:?}");
         assert_eq!(phases.last().copied(), Some("stats"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 文件夹范围：只扫勾选的子目录，没勾选目录下的老照片不应被误删。
+    #[test]
+    fn scans_only_selected_subdirs() {
+        let dir = temp_dir("scope");
+        let a = dir.join("A");
+        let b = dir.join("B");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("DSC_A.NEF"), "a").unwrap();
+        std::fs::write(b.join("DSC_B.NEF"), "b").unwrap();
+
+        let db = Arc::new(Mutex::new(crate::db::open_in_memory().unwrap()));
+        // 只扫 A 目录
+        scan_with_progress(&[a.clone()], &db, |_| {}).unwrap();
+        let only_a: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(only_a, 1, "只应扫到 A 里的 1 个文件");
+
+        // 再扫 B：A 不应被清理（因为本次根目录不包含 A）
+        scan_with_progress(&[b.clone()], &db, |_| {}).unwrap();
+        let both: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM photos", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(both, 2, "B 追加进来，A 的老记录应保留");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

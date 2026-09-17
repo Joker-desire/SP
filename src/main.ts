@@ -69,6 +69,14 @@ interface PairPage {
   total: number;
 }
 
+/** 文件夹范围选择弹窗里用的目录节点。 */
+interface DirNode {
+  path: string;
+  name: string;
+  depth: number;
+  hasChildren: boolean;
+}
+
 interface Facet {
   key: string;
   label: string;
@@ -254,6 +262,17 @@ const elExportReveal = $<HTMLButtonElement>("#export-reveal");
 const elExportProgress = $<HTMLElement>("#export-progress");
 const elExportFill = $<HTMLElement>("#export-fill");
 const elExportProgressText = $<HTMLElement>("#export-progress-text");
+
+// ── 文件夹范围选择与分组 ───────────────────────────────────────────────
+const elBtnClearLib = $<HTMLButtonElement>("#btn-clear-lib");
+const elBtnGroup = $<HTMLButtonElement>("#btn-group");
+const elScopeModal = $<HTMLElement>("#scope-modal");
+const elScopeRoot = $<HTMLElement>("#scope-root");
+const elScopeList = $<HTMLElement>("#scope-list");
+const elScopeAll = $<HTMLButtonElement>("#scope-all");
+const elScopeNone = $<HTMLButtonElement>("#scope-none");
+const elScopeOk = $<HTMLButtonElement>("#scope-ok");
+const elScopeCancel = $<HTMLButtonElement>("#scope-cancel");
 const elExportResult = $<HTMLElement>("#export-result");
 const elNoteKeep = $<HTMLElement>("#note-keep");
 const elNoteReject = $<HTMLElement>("#note-reject");
@@ -289,11 +308,19 @@ const elCompareDone = $<HTMLButtonElement>("#compare-done");
 const ROOT_KEY = "sp:root";
 const THEME_KEY = "sp:theme";
 const DEN_KEY = "sp:density";
+const GROUP_KEY = "sp:group";
 
 const PAGE_SIZE = 120;
 
 let rootPath: string | null = null;
 let scanning = false;
+
+/** 上次扫描时勾选的文件夹范围；重新扫描沿用同一范围，不必每次重选。 */
+let lastScopeDirs: string[] | null = null;
+/** 按文件夹分组：同一目录的照片收进一组，可逐组折叠 / 展开。 */
+let groupByFolder = localStorage.getItem(GROUP_KEY) === "1";
+/** 分组模式下，目录路径 → 该组 DOM 与计数。 */
+let groupMap: Map<string, { el: HTMLElement; body: HTMLElement; count: number }> | null = null;
 
 let items: PairCard[] = [];
 let total = 0;
@@ -728,6 +755,8 @@ async function reload() {
   nearObserver.disconnect();
   farObserver.disconnect();
   elGrid.innerHTML = "";
+  elGrid.classList.toggle("is-grouped", groupByFolder);
+  groupMap = groupByFolder ? new Map() : null;
   elGrid.scrollTop = 0;
   updateCount();
   updateCullInfo();
@@ -774,6 +803,10 @@ async function loadMore(token: number) {
 }
 
 function appendCards(list: PairCard[]) {
+  if (groupByFolder) {
+    appendGrouped(list);
+    return;
+  }
   const frag = document.createDocumentFragment();
   const cards: HTMLElement[] = [];
   for (const c of list) {
@@ -785,6 +818,68 @@ function appendCards(list: PairCard[]) {
   elGrid.appendChild(frag);
   // 必须先入 DOM 再 observe，否则 IntersectionObserver 拿不到位置
   for (const card of cards) observeCard(card);
+}
+
+/** 照片所在目录（父文件夹的绝对路径）。分组时一组对应一个这样的路径。 */
+function dirOf(path: string): string {
+  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return i < 0 ? "" : path.slice(0, i);
+}
+
+/** 路径最后一段（文件名或目录名）。 */
+function baseOf(path: string): string {
+  const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return i < 0 ? path : path.slice(i + 1);
+}
+
+/** 分组标题：优先显示目录名，拿不到名字时退回到完整路径。 */
+function folderLabel(path: string): string {
+  const dir = dirOf(path);
+  return baseOf(dir) || dir || "(根目录)";
+}
+
+/** 分组模式下，拿到或创建一个目录对应的分组容器（标题 + 卡片网格）。 */
+function ensureGroup(key: string): { el: HTMLElement; body: HTMLElement; count: number } {
+  let g = groupMap!.get(key);
+  if (g) return g;
+  const el = document.createElement("section");
+  el.className = "group";
+  const head = document.createElement("div");
+  head.className = "group-head";
+  const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  caret.setAttribute("viewBox", "0 0 16 16");
+  caret.setAttribute("class", "group-caret");
+  caret.innerHTML =
+    '<path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>';
+  const name = document.createElement("span");
+  name.className = "group-name";
+  name.textContent = folderLabel(key);
+  name.title = key;
+  const count = document.createElement("span");
+  count.className = "group-count";
+  count.textContent = "0";
+  head.append(caret, name, count);
+  const body = document.createElement("div");
+  body.className = "group-grid";
+  if (elGrid.dataset.density) body.dataset.density = elGrid.dataset.density;
+  head.addEventListener("click", () => el.classList.toggle("is-collapsed"));
+  el.append(head, body);
+  elGrid.appendChild(el);
+  g = { el, body, count: 0 };
+  groupMap!.set(key, g);
+  return g;
+}
+
+function appendGrouped(list: PairCard[]) {
+  for (const c of list) {
+    itemById.set(c.id, c);
+    const g = ensureGroup(dirOf(c.path));
+    const card = cardEl(c);
+    g.body.appendChild(card);
+    g.count += 1;
+    (g.el.querySelector(".group-count") as HTMLElement).textContent = String(g.count);
+    observeCard(card);
+  }
 }
 
 function updateCount() {
@@ -1187,6 +1282,13 @@ elDensity.addEventListener("click", (e) => {
   else elGrid.dataset.density = density;
   for (const b of elDensity.querySelectorAll("button")) {
     b.classList.toggle("is-active", b === btn);
+  }
+  // 分组模式下真正的卡片网格在 .group-grid 里，密度得同步过去
+  if (groupMap) {
+    for (const g of groupMap.values()) {
+      if (density === "normal") delete g.body.dataset.density;
+      else g.body.dataset.density = density;
+    }
   }
   localStorage.setItem(DEN_KEY, density);
 });
@@ -1975,9 +2077,11 @@ document.addEventListener("keydown", (e) => {
 function renderRoot() {
   if (!rootPath) {
     elRootChip.hidden = true;
+    elBtnClearLib.hidden = true;
     return;
   }
   elRootChip.hidden = false;
+  elBtnClearLib.hidden = false;
   elRootPath.textContent = rootPath;
   elRootPath.title = rootPath;
   elRootPath.parentElement?.setAttribute("title", rootPath);
@@ -2033,17 +2137,52 @@ function summaryText(r: ScanSummary): string {
   return bits.join(" · ");
 }
 
-async function startScan(path: string, opts: { quiet: boolean }) {
+// 渐进式显示：扫描进行时，每隔一小段时间把「已经入库的部分」铺到网格上，
+// 用户先看到前 N 张，剩下的在后台继续扫。批与批之间后端会释放数据库连接锁，
+// 所以前端插进来查询不会卡住扫描。
+let progressiveTimer: number | null = null;
+function startProgressiveRefresh() {
+  if (progressiveTimer !== null) return;
+  const tick = async () => {
+    if (!scanning) return;
+    try {
+      await reload();
+    } catch {
+      /* 扫描中途偶发读不到无所谓，下一拍再试 */
+    }
+    if (scanning) progressiveTimer = window.setTimeout(tick, 400);
+  };
+  progressiveTimer = window.setTimeout(tick, 350);
+}
+function stopProgressiveRefresh() {
+  if (progressiveTimer !== null) {
+    clearTimeout(progressiveTimer);
+    progressiveTimer = null;
+  }
+}
+
+async function startScan(
+  path: string,
+  opts: { quiet: boolean; includeDirs?: string[] | null },
+) {
   if (scanning) return;
   scanning = true;
+  lastScopeDirs = opts.includeDirs ?? null;
   elPick.disabled = true;
   elRescan.disabled = true;
   elProgressFill.classList.add("is-indeterminate");
   elProgressText.textContent = "准备中…";
   elProgress.hidden = false;
 
+  startProgressiveRefresh();
+
   try {
-    const r = await invoke<ScanSummary>("scan_folder", { path });
+    const r = await invoke<ScanSummary>("scan_folder", {
+      path,
+      includeDirs: opts.includeDirs ?? null,
+    });
+    // 扫描已经结束，立刻停下轮询，避免和下面的完整刷新打架
+    stopProgressiveRefresh();
 
     const changed = r.inserted + r.updated + r.removed;
     if (opts.quiet && changed === 0) {
@@ -2054,6 +2193,7 @@ async function startScan(path: string, opts: { quiet: boolean }) {
       await refreshLibrary();
     }
   } catch (e) {
+    stopProgressiveRefresh();
     const msg = String(e);
     if (msg.includes("目录不存在") || msg.includes("不是文件夹")) {
       setHint(`文件夹访问不到：${path}（外置盘没插？）—— 图库内容仍然可用`, "warn");
@@ -2073,21 +2213,154 @@ async function pickFolder() {
   const picked = await open({ directory: true, multiple: false, title: "选择照片文件夹" });
   if (typeof picked !== "string") return;
 
+  const previous = rootPath;
   rootPath = picked;
   localStorage.setItem(ROOT_KEY, picked);
   renderRoot();
   elRescan.disabled = false;
   elRootMeta.textContent = "";
 
-  // 选完即扫，扫完自动出图——不需要任何额外的点击
-  setHint("正在扫描…缩略图会在过程中逐张出现。");
-  await startScan(picked, { quiet: false });
+  // 看看有没有子目录——有就先让用户勾选要纳入扫描的范围
+  let subdirs: DirNode[] = [];
+  try {
+    subdirs = await invoke<DirNode[]>("list_subdirs", { path: picked });
+  } catch {
+    subdirs = [];
+  }
+  if (subdirs.length > 0) {
+    scopePrevRoot = previous;
+    openScopeModal(picked, subdirs);
+  } else {
+    setHint("正在扫描…缩略图会在过程中逐张出现。");
+    await startScan(picked, { quiet: false });
+  }
 }
+
+/** 清空当前文件夹：不删原片、不丢标记、不碰索引库，只是回到「未选文件夹」状态，
+ *  等用户再选一个。已经做过的选片标记按 pair_key 落在库里，重扫同目录会回来。 */
+function clearLibrary() {
+  stopProgressiveRefresh();
+  rootPath = null;
+  lastScopeDirs = null;
+  scopePrevRoot = null;
+  localStorage.removeItem(ROOT_KEY);
+  items = [];
+  total = 0;
+  noMore = false;
+  itemById.clear();
+  selection.clear();
+  nearObserver.disconnect();
+  farObserver.disconnect();
+  elGrid.innerHTML = "";
+  elGrid.classList.remove("is-grouped");
+  groupMap = null;
+  renderRoot();
+  elRescan.disabled = true;
+  elCullbar.hidden = true;
+  elCount.textContent = "";
+  setHint("已清空。选择一个装有 NEF / JPG 的文件夹，选完会自动扫描并出图。");
+  void refreshCacheInfo();
+}
+
+// ── 文件夹范围选择弹窗 ───────────────────────────────────────────────────
+
+let scopePrevRoot: string | null = null;
+let scopeTargetPath = "";
+
+function openScopeModal(root: string, dirs: DirNode[]) {
+  scopeTargetPath = root;
+  elScopeRoot.textContent = `根目录：${root}`;
+  elScopeList.innerHTML = "";
+  for (const d of dirs) {
+    const li = document.createElement("li");
+    li.className = "scope-item";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.value = d.path;
+    const label = document.createElement("span");
+    label.className = "scope-item-name";
+    label.textContent = "　".repeat(Math.max(0, d.depth - 1)) + d.name + (d.hasChildren ? " ›" : "");
+    label.title = d.path;
+    li.append(cb, label);
+    // 点整行也能勾选 / 取消
+    li.addEventListener("click", (e) => {
+      if (e.target !== cb) cb.checked = !cb.checked;
+    });
+    elScopeList.appendChild(li);
+  }
+  elScopeModal.hidden = false;
+}
+
+function closeScopeModal() {
+  elScopeModal.hidden = true;
+}
+
+function applyScopeSelection(checked: boolean) {
+  for (const cb of elScopeList.querySelectorAll<HTMLInputElement>("input[type=checkbox]")) {
+    cb.checked = checked;
+  }
+}
+
+elScopeAll.addEventListener("click", () => applyScopeSelection(true));
+elScopeNone.addEventListener("click", () => applyScopeSelection(false));
+
+elScopeCancel.addEventListener("click", () => {
+  closeScopeModal();
+  // 取消范围选择：退回原来的文件夹，不切换图库
+  if (scopePrevRoot !== null) {
+    rootPath = scopePrevRoot;
+    if (rootPath) localStorage.setItem(ROOT_KEY, rootPath);
+    else localStorage.removeItem(ROOT_KEY);
+    renderRoot();
+    elRescan.disabled = !rootPath;
+    scopePrevRoot = null;
+  }
+  setHint("已取消范围选择，仍是原来的文件夹。");
+});
+
+elScopeOk.addEventListener("click", () => {
+  const chosen = Array.from(
+    elScopeList.querySelectorAll<HTMLInputElement>("input[type=checkbox]"),
+  )
+    .filter((cb) => cb.checked)
+    .map((cb) => cb.value);
+  closeScopeModal();
+  if (chosen.length === 0) {
+    setHint("至少勾选一个子文件夹才能扫描。", "warn");
+    return;
+  }
+  const root = scopeTargetPath;
+  scopePrevRoot = null;
+  setHint("正在扫描…缩略图会在过程中逐张出现。");
+  void startScan(root, { quiet: false, includeDirs: chosen });
+});
+
+// 点遮罩空白处关闭（等同取消）
+elScopeModal.addEventListener("click", (e) => {
+  if (e.target === elScopeModal) {
+    elScopeCancel.click();
+  }
+});
+
+// ── 按文件夹分组开关 ─────────────────────────────────────────────────────
+
+function setGrouping(on: boolean) {
+  groupByFolder = on;
+  localStorage.setItem(GROUP_KEY, on ? "1" : "0");
+  elBtnGroup.setAttribute("aria-pressed", on ? "true" : "false");
+  elBtnGroup.classList.toggle("is-active", on);
+  // 重新铺一遍当前图库，分组视图立刻生效
+  if (rootPath) void reload();
+}
+
+elBtnGroup.addEventListener("click", () => setGrouping(!groupByFolder));
+elBtnClearLib.addEventListener("click", () => clearLibrary());
 
 elPick.addEventListener("click", () => void pickFolder());
 
 elRescan.addEventListener("click", () => {
-  if (rootPath) void startScan(rootPath, { quiet: false });
+  if (rootPath) void startScan(rootPath, { quiet: false, includeDirs: lastScopeDirs });
 });
 
 // ---------------------------------------------------------------------------
@@ -2750,6 +3023,10 @@ async function boot() {
       b.classList.toggle("is-active", b.dataset.density === savedDensity);
     }
   }
+
+  // 同步「按文件夹分组」开关的初始状态
+  elBtnGroup.setAttribute("aria-pressed", groupByFolder ? "true" : "false");
+  elBtnGroup.classList.toggle("is-active", groupByFolder);
 
   await listen<ScanProgress>("scan://progress", (e) => showProgress(e.payload));
   await listen<ExportProgress>("export://progress", (e) => showExportProgress(e.payload));

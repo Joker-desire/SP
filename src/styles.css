@@ -1931,3 +1931,119 @@ kbd {
   font-size: 11px;
   font-weight: 700;
 }
+
+/* ---------- 按文件夹分组 ---------- */
+
+.grid.is-grouped {
+  display: block;
+  padding-top: 4px;
+}
+
+.group {
+  margin-bottom: 18px;
+}
+
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  padding: 6px 2px;
+  cursor: pointer;
+  user-select: none;
+  z-index: 1;
+  border-bottom: 1px solid var(--border);
+}
+
+.group-caret {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  transition: transform 0.15s ease;
+  color: var(--text-dim);
+}
+
+.group.is-collapsed .group-caret {
+  transform: rotate(-90deg);
+}
+
+.group-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.group-count {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(202px, 1fr));
+  gap: 10px;
+  align-content: start;
+  padding-top: 10px;
+}
+
+.group-grid[data-density="compact"] {
+  grid-template-columns: repeat(auto-fill, minmax(142px, 1fr));
+  gap: 7px;
+}
+
+.group-grid[data-density="large"] {
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 12px;
+}
+
+.group.is-collapsed .group-grid {
+  display: none;
+}
+
+/* ---------- 文件夹范围选择 ---------- */
+
+.scope-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.scope-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 52vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.scope-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.scope-item:last-child {
+  border-bottom: none;
+}
+
+.scope-item:hover {
+  background: var(--bg-soft);
+}
+
+.scope-item input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+
+.scope-item-name {
+  font-size: 13px;
+  word-break: break-all;
+}
