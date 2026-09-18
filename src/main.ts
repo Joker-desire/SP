@@ -104,6 +104,10 @@ interface Facet {
 
 interface LibraryFacets {
   total: number;
+  /** 已过目：有保留 / 淘汰决定，或打了星。 */
+  processed: number;
+  /** 其中判为保留的张数。 */
+  kept: number;
   pairStates: Facet[];
   cameras: Facet[];
   days: Facet[];
@@ -265,6 +269,10 @@ const elProgressFill = $<HTMLElement>("#progress-fill");
 const elProgressText = $<HTMLElement>("#progress-text");
 const elHint = $<HTMLElement>("#hint");
 const elCacheInfo = $<HTMLElement>("#cache-info");
+const elCullProgress = $<HTMLElement>("#cull-progress");
+const elBulk = $<HTMLElement>("#bulk");
+const elBtnBulk = $<HTMLButtonElement>("#btn-bulk");
+const elBulkMenu = $<HTMLElement>("#bulk-menu");
 const elBanner = $<HTMLElement>("#banner");
 const elBannerText = $<HTMLElement>("#banner-text");
 const elBannerClose = $<HTMLButtonElement>("#banner-close");
@@ -1573,7 +1581,29 @@ elFacetsDays.addEventListener("click", (e) => {
 /** 侧栏摆出「图库空」的状态：各分组清掉，只留一句话。
  *  图库查出来是 0 张时用，手动「清空当前文件夹」后也直接用它——
  *  那种时候不该再拿 roots=null 去查后端（那会把历史文件夹的照片全数出来）。 */
+/**
+ * 页脚的选片进度：还有多少张没过目。
+ *
+ * 口径是「当前文件夹里的全部照片」，不跟着筛选变——挑到一半想筛一下再回来，
+ * 进度不该跳。打了星也算过目（很多人先打星、再决定去留）。
+ */
+function updateCullProgress(f: LibraryFacets | null) {
+  if (!f || f.total === 0) {
+    elCullProgress.hidden = true;
+    return;
+  }
+  elCullProgress.hidden = false;
+  const pct = Math.round((f.processed / f.total) * 100);
+  const left = f.total - f.processed;
+  elCullProgress.textContent = `已过目 ${f.processed} / ${f.total}（${pct}%）· 保留 ${f.kept}`;
+  elCullProgress.title =
+    left > 0
+      ? `还剩 ${left} 张没看。进度按当前文件夹的全部照片算，不受筛选影响。`
+      : "这个文件夹里的照片都过目过了。";
+}
+
 function renderFacetsEmpty() {
+  elCullProgress.hidden = true;
   for (const host of [
     elFacetsDecision,
     elFacetsStars,
@@ -1601,6 +1631,7 @@ function renderFacetsEmpty() {
 async function loadFacets() {
   const f = await invoke<LibraryFacets>("library_facets", { roots: currentRoots() });
   lastFacets = f;
+  updateCullProgress(f);
 
   if (f.total === 0) {
     // 图库空的时候别摆一排 0，一句话说清就够了
@@ -1629,6 +1660,7 @@ async function refreshFacetCounts() {
   try {
     const f = await invoke<LibraryFacets>("library_facets", { roots: currentRoots() });
     if (f.total === 0) return;
+    updateCullProgress(f);
     renderDecisionFacets(f);
     renderStarFacets(f);
   } catch {
@@ -1970,8 +2002,11 @@ function fillIfNeeded() {
  * 应用一次标记。`patch` 里没给的项就不动——
  * 这样「只改星级」不会把已经做好的保留/淘汰决定冲掉。
  */
-async function applyPatch(patch: { decision?: Decision; stars?: number }) {
-  const ids = markTargets();
+async function applyPatch(patch: { decision?: Decision; stars?: number }, idsOverride?: number[]) {
+  // idsOverride：批量标记时直接由调用方给全量 id（含还没滚出来的那些），
+  // 不走「当前选中」那一套
+  const bulk = idsOverride !== undefined;
+  const ids = idsOverride ?? markTargets();
   if (ids.length === 0) {
     setHint("先单击选中一张照片，或双击打开大图，再按 P / X。", "warn");
     return;
@@ -2030,6 +2065,14 @@ async function applyPatch(patch: { decision?: Decision; stars?: number }) {
   }
   const dropped = dropFromView(gone);
   if (dropped) fillIfNeeded();
+
+  // 批量标记：不动光标、不过片（本来也不是在看某一张），选择清掉收尾
+  if (bulk) {
+    selection.clear();
+    syncSelection();
+    setHint(`已${labelForPatch(patch, ids.length)} —— ⌘Z 可整批撤销`);
+    return;
+  }
 
   // ---- 自动前进 ----
   //
@@ -2095,6 +2138,58 @@ function applyDecision(d: Decision) {
 
 function applyStars(n: number) {
   void applyPatch({ stars: n });
+}
+
+// ---- 批量标记：对当前筛选出来的每一张 ----
+
+function closeBulkMenu() {
+  elBulkMenu.hidden = true;
+  elBtnBulk.setAttribute("aria-expanded", "false");
+}
+
+elBtnBulk.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const open = elBulkMenu.hidden;
+  elBulkMenu.hidden = !open;
+  elBtnBulk.setAttribute("aria-expanded", String(open));
+});
+
+// 点菜单外面就收起——浮层叠在网格上，不收会一直挡着
+document.addEventListener("click", (e) => {
+  if (!elBulkMenu.hidden && !elBulk.contains(e.target as Node)) closeBulkMenu();
+});
+
+elBulkMenu.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-bulk]");
+  if (!btn) return;
+  closeBulkMenu();
+  void bulkMark(
+    btn.dataset.bulk === "stars"
+      ? { stars: Number(btn.dataset.value) }
+      : { decision: btn.dataset.bulk as Decision },
+  );
+});
+
+/**
+ * 对当前筛选条件下的**全部**照片执行一次标记。
+ *
+ * 走的是和单张标记同一条 apply_decision，所以撤销栈里记的是这一整批的旧值，
+ * 一次 ⌘Z 全部退回；侧栏计数、进度也跟着动。
+ */
+async function bulkMark(patch: { decision?: Decision; stars?: number }) {
+  let ids: number[];
+  try {
+    ids = await allMatchingIds();
+  } catch (e) {
+    setHint(`取不到当前筛选的照片：${String(e)}`, "error");
+    return;
+  }
+  if (ids.length === 0) {
+    setHint("当前筛选下没有照片，先放宽条件再批量标记。", "warn");
+    return;
+  }
+  setHint(`正在对 ${ids.length} 张执行${labelForPatch(patch, ids.length)}…`);
+  await applyPatch(patch, ids);
 }
 
 // ---- 撤销 ----

@@ -324,6 +324,21 @@
             <button class="cbtn" id="btn-select-all" title="选中当前筛选下的全部照片（⌘/Ctrl + A）">全选</button>
             <button class="cbtn" id="btn-invert" title="选中当前筛选下还没被选中的">反选</button>
             <button class="cbtn" id="btn-select-none" title="取消选择（Esc）">取消</button>
+            <div class="bulk" id="bulk">
+              <button class="cbtn" id="btn-bulk" aria-haspopup="true" aria-expanded="false" title="对当前筛选出来的每张照片一次性标记（含还没滚出来的那些），⌘Z 可整批撤销">批量 ▾</button>
+              <div class="bulk-menu" id="bulk-menu" hidden>
+                <button type="button" data-bulk="keep">标为保留</button>
+                <button type="button" data-bulk="reject">标为淘汰</button>
+                <button type="button" data-bulk="none">清除标记与星级</button>
+                <div class="bulk-sep"></div>
+                <button type="button" data-bulk="stars" data-value="1">1 星</button>
+                <button type="button" data-bulk="stars" data-value="2">2 星</button>
+                <button type="button" data-bulk="stars" data-value="3">3 星</button>
+                <button type="button" data-bulk="stars" data-value="4">4 星</button>
+                <button type="button" data-bulk="stars" data-value="5">5 星</button>
+                <button type="button" data-bulk="stars" data-value="0">清除星级</button>
+              </div>
+            </div>
             <button class="btn btn-primary" id="btn-export">
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M8 1.8v8.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
@@ -348,6 +363,7 @@
     <footer class="footer">
       <span class="footer-hint" id="hint">选择一个装有 NEF / JPG 的文件夹，选完自动出图；然后 P 保留、X 淘汰、← → 翻页。</span>
       <span class="footer-right">
+        <span class="footer-progress" id="cull-progress" hidden></span>
         <span id="cache-info"></span>
       </span>
     </footer>

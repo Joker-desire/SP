@@ -327,6 +327,10 @@ struct Facet {
 #[serde(rename_all = "camelCase")]
 struct LibraryFacets {
     total: i64,
+    /// 已过目：有保留 / 淘汰决定，或打了星。用于「还剩多少没看」的进度。
+    processed: i64,
+    /// 其中判为保留的张数
+    kept: i64,
     pair_states: Vec<Facet>,
     cameras: Vec<Facet>,
     days: Vec<Facet>,
@@ -867,6 +871,19 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         |r| r.get(0),
     )?;
 
+    // 选片进度：过目了多少、其中留了多少。
+    // 打了星也算「看过」——很多人先打星、再决定去留，只数 keep/reject 会低估进度。
+    let (processed, kept): (i64, i64) = conn.query_row(
+        &format!(
+            "SELECT
+                COALESCE(SUM(CASE WHEN {DECISION} IN ('keep', 'reject') OR {STARS} > 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN {DECISION} = 'keep' THEN 1 ELSE 0 END), 0)
+             {FROM_PHOTOS} WHERE p.is_primary = 1{scope}"
+        ),
+        sp(),
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+    )?;
+
     let (both, raw_only, jpg_only) = conn.query_row(
         &format!(
             "SELECT
@@ -1151,6 +1168,8 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
 
     Ok(LibraryFacets {
         total,
+        processed,
+        kept,
         pair_states,
         cameras,
         days_truncated: distinct_days > DAY_FACET_LIMIT,

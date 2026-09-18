@@ -1046,6 +1046,63 @@ select {
   white-space: nowrap;
 }
 
+/* 批量标记的下拉：挂在「批量」按钮上方，点外面自动收起 */
+.bulk {
+  position: relative;
+}
+
+.bulk-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 40;
+  min-width: 150px;
+  padding: 6px;
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+}
+
+/* 这里的 display: grid 会盖掉 [hidden] 的 UA 样式，必须补一条 */
+.bulk-menu[hidden] {
+  display: none;
+}
+
+.bulk-menu button {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.bulk-menu button:hover {
+  background: var(--bg-hover);
+}
+
+.bulk-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+
+/* 选片进度：挑到一半最想知道的就是「还剩多少」，给个显眼一点的颜色 */
+.footer-progress {
+  margin-right: 14px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.footer-progress[hidden] {
+  display: none;
+}
+
 /* 页脚的缓存占用是清理面板的第二个入口：数字本身就在提醒人该清了 */
 #cache-info.is-link {
   cursor: pointer;
