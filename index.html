@@ -391,6 +391,12 @@
         </div>
 
         <img class="loupe-img" id="loupe-img" alt="" />
+        <!-- 对焦框：和图片同尺寸同位置居中，缩放时套用同一个 transform -->
+        <div class="loupe-af" id="loupe-af" hidden>
+          <div class="loupe-af-fit" id="loupe-af-fit">
+            <div class="loupe-af-box" id="loupe-af-box"></div>
+          </div>
+        </div>
 
         <!-- 详细信息面板：库里有的全摆出来。覆盖在图右侧，按 I 开关，翻页自动跟着换内容 -->
         <aside class="loupe-detail" id="loupe-detail-panel" hidden>
@@ -417,6 +423,7 @@
           </button>
           <button class="cbtn" id="loupe-unmark" title="清除标记（U）">清除<kbd>U</kbd></button>
           <button class="cbtn" id="loupe-detail" title="详细信息（I）">详情<kbd>I</kbd></button>
+          <button class="cbtn" id="loupe-af-toggle" title="显示相机记录的对焦框（O）">对焦点<kbd>O</kbd></button>
 
           <!-- 星级放一组可点的按钮：按 1-5 打星，按完停在原地，
                再按别的数字就是调整——打星是评价，不是过片 -->
@@ -436,7 +443,7 @@
           <span class="loupe-name" id="loupe-name"></span>
           <span class="loupe-exif" id="loupe-exif"></span>
           <span class="loupe-pos" id="loupe-pos"></span>
-          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · I 详情 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
+          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · I 详情 · O 对焦点 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
           <button class="btn btn-ghost loupe-close" id="loupe-close">关闭</button>
         </div>
       </div>

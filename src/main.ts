@@ -299,7 +299,30 @@ const elLoupeNext = $<HTMLButtonElement>("#loupe-next");
 const elLoupeKeep = $<HTMLButtonElement>("#loupe-keep");
 const elLoupeReject = $<HTMLButtonElement>("#loupe-reject");
 const elLoupeUnmark = $<HTMLButtonElement>("#loupe-unmark");
+const AF_KEY = "sp:af";
+
+/** 相机记下的对焦框：归一化坐标 0–1，已按 EXIF 方向摆正。 */
+interface AfArea {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  mode: string | null;
+}
+
 const elLoupeDetailBtn = $<HTMLButtonElement>("#loupe-detail");
+const elLoupeAf = $<HTMLElement>("#loupe-af");
+const elLoupeAfFit = $<HTMLElement>("#loupe-af-fit");
+const elLoupeAfBox = $<HTMLElement>("#loupe-af-box");
+const elLoupeAfToggle = $<HTMLButtonElement>("#loupe-af-toggle");
+
+/** 是否显示对焦框。默认关：不是每台相机都往 MakerNote 里写对焦框，
+ *  开着却画不出来，比没这个开关更让人以为是 bug。 */
+let showAf = localStorage.getItem(AF_KEY) === "1";
+/** 当前这张的对焦框，null = 这张没读到（或还没读）。 */
+let afArea: AfArea | null = null;
+/** 异步回来时对号用：期间翻页 / 关了大图就整包丢掉。 */
+let afForId: number | null = null;
 const elLoupeDetailPanel = $<HTMLElement>("#loupe-detail-panel");
 const elLoupeDetailClose = $<HTMLButtonElement>("#loupe-detail-close");
 const elLoupeDetailBody = $<HTMLElement>("#loupe-detail-body");
@@ -3427,6 +3450,8 @@ function applyZoom() {
     zoom <= ZOOM_MIN && panX === 0 && panY === 0
       ? ""
       : `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  // 对焦框贴着图片走：套同一个 transform 就够了
+  elLoupeAf.style.transform = elLoupeImg.style.transform;
   elLoupeZoomLabel.textContent = `${Math.round(zoom * 100)}%`;
   elLoupe.classList.toggle("is-zoomed", zoom > ZOOM_MIN);
   elLoupeZoomActual.classList.toggle("is-active", Math.abs(zoom - actualZoom()) < 0.01);
@@ -3516,6 +3541,7 @@ function swapLoupeSrc(t: ThumbPayload) {
 elLoupeImg.addEventListener("load", () => {
   naturalW = elLoupeImg.naturalWidth;
   applyZoom();
+  drawAf(); // 图片尺寸定了，框按新尺寸重画
 });
 
 elLoupe.addEventListener(
@@ -3986,6 +4012,8 @@ async function openLoupe(index: number) {
   paintLoupeMark(c);
   // 详情面板开着就跟着翻页换内容；读取是异步的，回来对不上号会自己丢弃
   if (detailOpen) void loadPhotoDetail(c.id);
+  if (showAf) void loadAf(c.id);
+  else hideAf();
   updateCullInfo();
 
   elLoupeImg.removeAttribute("src");
@@ -4008,9 +4036,75 @@ async function openLoupe(index: number) {
   }
 }
 
+// ---- 对焦框 ----
+//
+// 对焦框是相机按快门时真正用上的那一块：落在眼睛上和落在背景上，
+// 是两张完全不同的照片。数据来自 MakerNote，一张一次现读——
+// 读不到就是没有框，不报错也不重试（大部分非尼康机身都读不到）。
+
+async function loadAf(id: number) {
+  afArea = null;
+  afForId = id;
+  try {
+    const a = await invoke<AfArea | null>("photo_af", { id });
+    if (afForId !== id || loupeIndex < 0) return; // 期间翻页 / 关大图了
+    afArea = a;
+  } catch {
+    afArea = null;
+  }
+  drawAf();
+}
+
+function drawAf() {
+  if (!showAf || !afArea || elLoupe.hidden) {
+    elLoupeAf.hidden = true;
+    return;
+  }
+  const fw = elLoupeImg.offsetWidth;
+  const fh = elLoupeImg.offsetHeight;
+  if (!fw || !fh) {
+    elLoupeAf.hidden = true;
+    return;
+  }
+  elLoupeAfFit.style.width = `${fw}px`;
+  elLoupeAfFit.style.height = `${fh}px`;
+  // 下限 10px：对焦框本来就只占画面的百分之几，跟着图缩到看不见就没意义了
+  elLoupeAfBox.style.left = `${(afArea.x - afArea.w / 2) * fw}px`;
+  elLoupeAfBox.style.top = `${(afArea.y - afArea.h / 2) * fh}px`;
+  elLoupeAfBox.style.width = `${Math.max(afArea.w * fw, 10)}px`;
+  elLoupeAfBox.style.height = `${Math.max(afArea.h * fh, 10)}px`;
+  elLoupeAfBox.title = afArea.mode ? `对焦框 · ${afArea.mode}` : "对焦框";
+  elLoupeAf.hidden = false;
+}
+
+function hideAf() {
+  afArea = null;
+  afForId = null;
+  elLoupeAf.hidden = true;
+}
+
+function setAf(on: boolean) {
+  showAf = on;
+  localStorage.setItem(AF_KEY, on ? "1" : "0");
+  elLoupeAfToggle.classList.toggle("is-active", on);
+  if (!on) {
+    hideAf();
+    setHint("已关闭对焦框显示。");
+    return;
+  }
+  const c = items[loupeIndex];
+  if (!c) return;
+  void loadAf(c.id);
+  setHint("已开启对焦框显示——读不到就说明这台相机没把对焦点写进文件。");
+}
+
+elLoupeAfToggle.addEventListener("click", () => setAf(!showAf));
+elLoupeAfToggle.classList.toggle("is-active", showAf);
+
 function closeLoupe() {
   loupeIndex = -1;
   elLoupe.hidden = true;
+  hideAf();
   elLoupeImg.removeAttribute("src");
   loupeSrcSize = 0;
   // 大图关了详情也收起来，下次进来从干净状态开始
@@ -4152,6 +4246,11 @@ window.addEventListener("keydown", (e) => {
     if (lower === "a") {
       e.preventDefault();
       elLoupeZoomActual.click();
+      return;
+    }
+    if (lower === "o") {
+      e.preventDefault();
+      setAf(!showAf);
       return;
     }
     if (lower === "i") {

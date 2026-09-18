@@ -4,6 +4,7 @@
 //! 所有磁盘操作必须经过这里显式暴露的命令。这正是「原片只读」原则的机制保障
 //! —— 前端就算有 bug 也碰不到你的照片。
 
+mod af;
 mod analyze;
 mod db;
 mod exif_detail;
@@ -851,10 +852,70 @@ async fn photo_exif(
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let conn = db.lock().map_err(|e| e.to_string())?;
-        let path: String = conn
-            .query_row("SELECT path FROM photos WHERE id = ?1", [id], |r| r.get(0))
+        let (path, orientation): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT path, orientation FROM photos WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .map_err(|e| e.to_string())?;
-        exif_detail::read_full(Path::new(&path)).map_err(|e| format!("{e:#}"))
+        let mut items = exif_detail::read_full(Path::new(&path)).map_err(|e| format!("{e:#}"))?;
+
+        // 对焦框藏在 MakerNote 里，顺手也摆进详情：大图上那个黄框就是这个数。
+        // 插在「曝光」小节末尾而不是追加到最后，免得同一个 group 被拆成两段。
+        if let Some(af) = af::af_area_of(Path::new(&path), orientation.unwrap_or(1)) {
+            let value = format!(
+                "横向 {:.1}%、纵向 {:.1}%（区域 {:.1}% × {:.1}%）{}",
+                af.x * 100.0,
+                af.y * 100.0,
+                af.w * 100.0,
+                af.h * 100.0,
+                af.mode
+                    .as_deref()
+                    .map(|m| format!(" · {m}"))
+                    .unwrap_or_default()
+            );
+            let at = items
+                .iter()
+                .rposition(|i| i.group == "曝光")
+                .map(|i| i + 1)
+                .unwrap_or(items.len());
+            items.insert(
+                at,
+                exif_detail::ExifItem {
+                    group: "曝光".to_string(),
+                    label: "对焦区域".to_string(),
+                    value,
+                },
+            );
+        }
+        Ok(items)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 大图上要画的那个对焦框。
+///
+/// 读原文件的 MakerNote，一张一次、只在开大图且开关打开时调。
+/// 读不到（不是尼康 / 机型没写 / 模式不支持）返回 null，前端就不画。
+#[tauri::command]
+async fn photo_af(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<Option<af::AfArea>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let (path, orientation): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT path, orientation FROM photos WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        // orientation 决定了对焦框要不要跟着图一起转
+        Ok(af::af_area_of(Path::new(&path), orientation.unwrap_or(1)))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2510,6 +2571,7 @@ pub fn run() {
             list_pairs,
             list_pair_ids,
             photo_exif,
+            photo_af,
             photo_detail,
             apply_decision,
             similar_groups,

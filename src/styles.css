@@ -2384,3 +2384,34 @@ kbd {
   font-size: 13px;
   word-break: break-all;
 }
+
+/* ===========================================================================
+   对焦框
+   =========================================================================== */
+
+/* 整层和图片同尺寸同位置居中，缩放时 JS 给它套和图片一样的 transform，
+   框就跟着图走；pointer-events: none 是为了不影响拖拽平移 */
+.loupe-af {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* 尺寸由 JS 设成图片渲染出来的大小，框的坐标才能直接按比例放 */
+.loupe-af-fit {
+  position: relative;
+}
+
+.loupe-af-box {
+  position: absolute;
+  border: 1.5px solid #ffd24a;
+  border-radius: 2px;
+  /* 一层深色描边 + 一点外发光：浅色照片和深色照片里都得看得见 */
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 0 6px rgba(255, 210, 74, 0.35);
+}
