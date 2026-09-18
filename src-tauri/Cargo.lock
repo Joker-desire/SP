@@ -3944,6 +3944,8 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tauri-plugin-single-instance",
+ "tauri-plugin-window-state",
  "walkdir",
 ]
 
@@ -4325,6 +4327,37 @@ dependencies = [
  "url",
  "windows",
  "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-single-instance"
+version = "2.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cd0cb5c412a5071b69bab6a6df1583cbb89460d4a83b6a24769b08d15b6b1e1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "windows-sys 0.60.2",
+ "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-window-state"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73736611e14142408d15353e21e3cca2f12a3cfb523ad0ce85999b6d2ef1a704"
+dependencies = [
+ "bitflags 2.13.2",
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

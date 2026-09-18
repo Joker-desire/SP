@@ -37,6 +37,8 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 rawler = "0.8.0"
 memmap2 = "0.9.11"
 base64 = "0.23.1"
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
 
 
 # 依赖一律用优化级别 3 编译，自己的代码保持默认（快速增量）。

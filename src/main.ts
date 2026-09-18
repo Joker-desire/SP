@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as zoomMath from "./zoom";
@@ -316,6 +317,7 @@ const elExportProgressText = $<HTMLElement>("#export-progress-text");
 // ── 文件夹范围选择与分组 ───────────────────────────────────────────────
 const elBtnClearLib = $<HTMLButtonElement>("#btn-clear-lib");
 const elBtnUndo = $<HTMLButtonElement>("#btn-undo");
+const elBtnRedo = $<HTMLButtonElement>("#btn-redo");
 const elScopeModal = $<HTMLElement>("#scope-modal");
 const elScopeRoot = $<HTMLElement>("#scope-root");
 const elScopeList = $<HTMLElement>("#scope-list");
@@ -449,6 +451,9 @@ interface UndoEntry {
 /** 最多记这么多步。再早的操作用户也不会想退回去，留着只是占内存。 */
 const UNDO_LIMIT = 50;
 const undoStack: UndoEntry[] = [];
+/** 重做栈。存的也是「改动之前是什么样」——撤销时被改掉的那些当前值，
+ *  重做就是把它再写回去。有了新操作就整个清空（标准语义：分叉了就不再往前）。 */
+const redoStack: UndoEntry[] = [];
 
 /** 每次筛选条件变化就自增，用来丢弃过期请求的结果（防止旧页码插到新列表里）。 */
 let renderToken = 0;
@@ -2109,35 +2114,55 @@ function pushUndo(label: string, before: UndoItem[]) {
   if (before.length === 0) return;
   undoStack.push({ label, before });
   if (undoStack.length > UNDO_LIMIT) undoStack.shift();
-  updateUndoBtn();
+  // 有了新操作，之前那条「往前一步」的路就作废了
+  redoStack.length = 0;
+  updateUndoRedo();
 }
 
 function clearUndo() {
   undoStack.length = 0;
-  updateUndoBtn();
+  redoStack.length = 0;
+  updateUndoRedo();
 }
 
-function updateUndoBtn() {
-  const top = undoStack[undoStack.length - 1];
-  elBtnUndo.disabled = !top;
-  elBtnUndo.title = top
-    ? `撤销：${top.label}（⌘Z / Ctrl+Z）`
+function updateUndoRedo() {
+  const topUndo = undoStack[undoStack.length - 1];
+  elBtnUndo.disabled = !topUndo;
+  elBtnUndo.title = topUndo
+    ? `撤销：${topUndo.label}（⌘Z / Ctrl+Z）`
     : "没有可撤销的标记操作（⌘Z / Ctrl+Z）";
+
+  const topRedo = redoStack[redoStack.length - 1];
+  elBtnRedo.disabled = !topRedo;
+  elBtnRedo.title = topRedo
+    ? `重做：${topRedo.label}（⇧⌘Z / Ctrl+Shift+Z）`
+    : "没有可重做的操作（⇧⌘Z / Ctrl+Shift+Z）";
 }
 
 /**
- * 把上一次标记改回原样。
+ * 在两个栈之间挪一步：把 from 顶上那批值写回库，同时把「写之前的样子」压进 to。
  *
- * 走的是和正向标记同一个 apply_decision，所以侧栏计数、筛选、导出全都跟着回退，
- * 不会出现「界面退了、库里没退」这种对不上的情况。
+ * 撤销和重做其实是同一件事的两个方向（都是「把某批旧值写回去」），
+ * 所以只写一份代码，靠传参区分方向。
  */
-async function undoLast() {
-  const entry = undoStack.pop();
-  updateUndoBtn();
+async function moveStack(from: UndoEntry[], to: UndoEntry[], verb: string) {
+  const entry = from.pop();
+  updateUndoRedo();
   if (!entry) {
-    setHint("没有可撤销的标记操作。", "warn");
+    setHint(verb === "撤销" ? "没有可撤销的标记操作。" : "没有可重做的操作。", "warn");
     return;
   }
+
+  // 反向一步要用的值：这几项现在的样子。卡片不在内存里就当作「没动过」，
+  // 免得往库里写一个我们其实不知道的值
+  const inverse: UndoItem[] = entry.before.map((it) => {
+    const c = itemById.get(it.id);
+    return {
+      id: it.id,
+      decision: it.decision !== null ? (c?.decision ?? null) : null,
+      stars: it.stars !== null ? (c?.stars ?? null) : null,
+    };
+  });
 
   // 旧值相同的归成一批，一次调用写完——批量标记时不至于一张一个来回
   const groups = new Map<string, { ids: number[]; decision: Decision | null; stars: number | null }>();
@@ -2160,14 +2185,18 @@ async function undoLast() {
       });
     }
   } catch (e) {
-    // 没退成就塞回去，别把这一步弄丢
-    undoStack.push(entry);
-    updateUndoBtn();
-    setHint(`撤销失败：${String(e)}`, "error");
+    // 没走成就塞回去，别把这一步弄丢
+    from.push(entry);
+    updateUndoRedo();
+    setHint(`${verb}失败：${String(e)}`, "error");
     return;
   }
 
-  // 库已经改回去了，但内存里的卡片要跟着退，否则界面还是旧的
+  to.push({ label: entry.label, before: inverse });
+  if (to.length > UNDO_LIMIT) to.shift();
+  updateUndoRedo();
+
+  // 库已经改过去了，但内存里的卡片要跟着变，否则界面还是旧的
   let missing = false;
   for (const it of entry.before) {
     const c = itemById.get(it.id);
@@ -2188,7 +2217,7 @@ async function undoLast() {
     const c = items[loupeIndex];
     if (c) paintLoupeMark(c);
   } else {
-    // 网格里把光标放回被撤销的那张：退回来了什么，一眼能看到
+    // 网格里把光标放回刚动过的那张：退回来了什么，一眼能看到
     const first = entry.before.find((it) => itemById.has(it.id));
     if (first) {
       selection.clear();
@@ -2199,7 +2228,15 @@ async function undoLast() {
     }
   }
 
-  setHint(`已撤销：${entry.label}`);
+  setHint(`已${verb}：${entry.label}`);
+}
+
+function undoLast() {
+  return moveStack(undoStack, redoStack, "撤销");
+}
+
+function redoLast() {
+  return moveStack(redoStack, undoStack, "重做");
 }
 
 // ---- 操作栏与网格的事件绑定 ----
@@ -2624,6 +2661,7 @@ function closeCompareDialog() {
 
 elBtnSimilar.addEventListener("click", () => void openSimilarDialog());
 elBtnUndo.addEventListener("click", () => void undoLast());
+elBtnRedo.addEventListener("click", () => void redoLast());
 elSimilarClose.addEventListener("click", closeSimilarDialog);
 elSimilarModal.addEventListener("click", (e) => {
   if (e.target === elSimilarModal) closeSimilarDialog();
@@ -3815,6 +3853,21 @@ function weekdayOf(t: string): string {
 elLoupeDetailBtn.addEventListener("click", () => toggleDetail());
 elLoupeDetailClose.addEventListener("click", () => toggleDetail(false));
 
+/**
+ * 全屏切换。
+ *
+ * 浏览器预览里（npm run dev 直接开页面）没有 Tauri 的窗口 API，
+ * 调了会抛错——那种情况下这个功能本来也不存在，静默忽略即可。
+ */
+async function toggleFullscreen() {
+  try {
+    const w = getCurrentWindow();
+    await w.setFullscreen(!(await w.isFullscreen()));
+  } catch {
+    /* 预览环境没有窗口可操作 */
+  }
+}
+
 async function openLoupe(index: number) {
   const c = items[index];
   if (!c) return;
@@ -3951,11 +4004,22 @@ window.addEventListener("keydown", (e) => {
 
   if (typingInField(e)) return;
 
-  // ---- 撤销：⌘Z / Ctrl+Z ----
+  // ---- 撤销 / 重做：⌘Z / ⇧⌘Z ----
   // 放在输入框判断之后，输入文字时把 ⌘Z 还给浏览器自己的撤销
-  if (meta && !e.shiftKey && key.toLowerCase() === "z") {
+  if (meta && key.toLowerCase() === "z") {
     e.preventDefault();
-    void undoLast();
+    if (e.shiftKey) void redoLast();
+    else void undoLast();
+    return;
+  }
+
+  // ---- 全屏：F ----
+  // 大图里 ⇧F 是「复位缩放」——F 给了全屏之后，复位退到 Shift 上，
+  // 因为 0 已经被「清除星级」占了。
+  if (!meta && key.toLowerCase() === "f") {
+    e.preventDefault();
+    if (e.shiftKey && !elLoupe.hidden) resetZoom();
+    else void toggleFullscreen();
     return;
   }
 
@@ -3977,7 +4041,7 @@ window.addEventListener("keydown", (e) => {
       return;
     }
 
-    // 缩放：+ 放大、- 缩小、F 复位、A 到 1:1。
+    // 缩放：+ 放大、- 缩小、⇧F 复位、A 到 1:1、F 全屏（在前面统一处理）。
     // 0 已经被「清除星级」占了，所以复位不用 0。
     const lower = key.toLowerCase();
     if (key === "+" || key === "=") {
@@ -3988,11 +4052,6 @@ window.addEventListener("keydown", (e) => {
     if (key === "-" || key === "_") {
       e.preventDefault();
       zoomBy(1 / 1.4);
-      return;
-    }
-    if (lower === "f") {
-      e.preventDefault();
-      resetZoom();
       return;
     }
     if (lower === "a") {
@@ -4095,7 +4154,7 @@ async function boot() {
   }
   elGroupMode.hidden = viewMode !== "group";
   if (viewMode === "large") elGrid.dataset.density = "large";
-  updateUndoBtn();
+  updateUndoRedo();
 
   await listen<ScanProgress>("scan://progress", (e) => showProgress(e.payload));
   await listen<ExportProgress>("export://progress", (e) => showExportProgress(e.payload));

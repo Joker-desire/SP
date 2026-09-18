@@ -138,6 +138,13 @@
           <span class="btn-text">撤销</span>
         </button>
 
+        <button class="btn btn-ghost" id="btn-redo" disabled title="没有可重做的操作（⇧⌘Z / Ctrl+Shift+Z）">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M9.6 4.6l3.2 3.2-3.2 3.2M12.8 7.8H7.4a3.3 3.3 0 0 0 0 6.6h2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="btn-text">重做</span>
+        </button>
+
         <select class="select" id="group-mode" aria-label="分组依据" title="分组视图按什么依据收组" hidden>
           <option value="folder">按文件夹分组</option>
           <option value="decision">按选片状态分组</option>
@@ -413,7 +420,7 @@
           <span class="loupe-name" id="loupe-name"></span>
           <span class="loupe-exif" id="loupe-exif"></span>
           <span class="loupe-pos" id="loupe-pos"></span>
-          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · I 详情 · 滚轮缩放 · 双击放大 · F 复位 · Esc 关闭</span>
+          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · I 详情 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
           <button class="btn btn-ghost loupe-close" id="loupe-close">关闭</button>
         </div>
       </div>

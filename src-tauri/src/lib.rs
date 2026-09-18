@@ -16,7 +16,7 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
@@ -2464,6 +2464,18 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 窗口大小与位置记下来，下次打开回到上次的样子。
+        // 默认保存尺寸 / 位置 / 最大化，状态文件落在应用数据目录里。
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // 只允许一个实例。开第二个会把已经开着的那份提到前面——
+        // 两个进程各持一个 SQLite 连接写同一个库，选片状态会打架，
+        // 而这种问题排查起来极费劲，不如在入口就堵死。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .manage(AppState {
             db: Arc::new(Mutex::new(conn)),
             startup_error,
