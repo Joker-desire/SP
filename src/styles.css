@@ -249,6 +249,26 @@ select {
   border-color: var(--accent);
 }
 
+/* 正在跑的任务：按钮同时是「停止」开关，得让人一眼看出它在动 */
+.btn.is-busy {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  animation: btn-busy 1.1s ease-in-out infinite;
+}
+
+@keyframes btn-busy {
+  50% {
+    opacity: 0.62;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn.is-busy {
+    animation: none;
+  }
+}
+
 .btn:disabled {
   opacity: 0.42;
   cursor: default;

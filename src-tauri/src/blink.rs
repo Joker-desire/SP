@@ -124,6 +124,16 @@ fn engine() -> Result<Arc<Engine>, String> {
 /// 优先用 RAW 里内嵌的 JPEG（快一个数量级）；内嵌预览太小时才退到完整解码——
 /// 一百多像素宽的脸，神仙也算不出眼眶在哪。
 fn load_rgb(path: &Path) -> Result<RgbImage> {
+    // 1. 「够用就行」的内嵌预览。
+    //    一台 Z50II 的 NEF 里躺着 160 / 640 / 1620 / 5568 四张 JPEG，
+    //    检测只需要一千多像素宽，解 1620 那张比解 5568 那张快一个数量级——
+    //    这一步曾经占掉整张照片八成的时间。
+    if let Ok((bytes, _)) = thumb::fitting_jpeg_from_file(path, WORK_SIZE) {
+        if let Ok(img) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg) {
+            return Ok(shrink(img.into_rgb8()));
+        }
+    }
+    // 2. 没有够大的预览，就用最大的那张（多半还是比工作尺寸小，但总比没有强）
     if let Ok((bytes, _)) = thumb::best_jpeg_from_file(path) {
         if let Ok(img) = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg) {
             let img = img.into_rgb8();
@@ -132,6 +142,7 @@ fn load_rgb(path: &Path) -> Result<RgbImage> {
             }
         }
     }
+    // 3. 连预览都没有（少数 RAW / 纯位图）：完整解码。慢，但总得有个结果。
     let (img, _) = thumb::decode_source(path)?;
     Ok(shrink(img.into_rgb8()))
 }
@@ -139,18 +150,74 @@ fn load_rgb(path: &Path) -> Result<RgbImage> {
 /// 缩到工作尺寸。只缩不放：本来就小的图（老照片、裁切图）保持原样，
 /// 放大只会让模型看到插值出来的假边缘。
 fn shrink(img: RgbImage) -> RgbImage {
+    box_resize(&img, WORK_SIZE)
+}
+
+/// 整数倍盒式降采样：每个输出像素取输入里一个 `step×step` 块的平均。
+///
+/// 为什么不用 `image::imageops::resize`：那玩意儿在两千万像素的图上要**几秒**
+/// （实测 5568×3712 缩到 1280 是 4.5 秒，比跑两次模型还贵），
+/// 因为它是按输入像素逐个做浮点重采样。而这里只是要把图缩小给模型看，
+/// 面积平均的画质完全够——检测要的是形状，不是边缘锐度。
+///
+/// 只按整数倍缩，所以输出尺寸不一定精确等于目标（5568/5 = 1113）；
+/// 调用方都按实际输出尺寸换算坐标，不依赖这个等式。
+/// 盒式降采样到指定长边：每个输出像素取它覆盖到的那块输入像素的平均。
+///
+/// 为什么不用 `image::imageops::resize`：那玩意儿在两千万像素的图上要**几秒**
+/// （实测 5568×3712 缩到 1280 是 4.5 秒，比跑两次模型还贵），它是按输出像素
+/// 做浮点重采样的。这里改成按输入像素累加一遍，代价只跟输入大小有关。
+///
+/// 也**不按整数倍缩**：1620 的预览按整数倍只能得到 810 或 540，
+/// 而检测画布是 640 见方——硬砍到 540 会让小脸直接消失（实测漏掉一半）。
+fn box_resize(img: &RgbImage, target_long: u32) -> RgbImage {
     let (w, h) = img.dimensions();
     let long = w.max(h);
-    if long <= WORK_SIZE {
-        return img;
+    if long <= target_long {
+        return img.clone();
     }
-    let scale = WORK_SIZE as f32 / long as f32;
-    image::imageops::resize(
-        &img,
-        (w as f32 * scale).round().max(1.0) as u32,
-        (h as f32 * scale).round().max(1.0) as u32,
-        FilterType::Triangle,
-    )
+    let scale = target_long as f32 / long as f32;
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    box_resize_to(img, nw, nh)
+}
+
+/// 缩到确切的宽高。
+fn box_resize_to(img: &RgbImage, nw: u32, nh: u32) -> RgbImage {
+    let (w, h) = img.dimensions();
+    let raw = img.as_raw();
+    let stride = (w * 3) as usize;
+    let mut out = RgbImage::new(nw, nh);
+
+    for y in 0..nh {
+        // 这块输入行区间 [y0, y1)：按输出比例切，用整数运算保证铺满且不重叠
+        let y0 = (y as u64 * h as u64 / nh as u64) as u32;
+        let y1 = (((y as u64 + 1) * h as u64 + nh as u64 - 1) / nh as u64)
+            .min(h as u64)
+            .max(y0 as u64 + 1) as u32;
+        for x in 0..nw {
+            let x0 = (x as u64 * w as u64 / nw as u64) as u32;
+            let x1 = (((x as u64 + 1) * w as u64 + nw as u64 - 1) / nw as u64)
+                .min(w as u64)
+                .max(x0 as u64 + 1) as u32;
+
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for sy in y0..y1 {
+                let base = sy as usize * stride;
+                for sx in x0..x1 {
+                    let i = base + sx as usize * 3;
+                    r += raw[i] as u32;
+                    g += raw[i + 1] as u32;
+                    b += raw[i + 2] as u32;
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                out.get_pixel_mut(x, y).0 = [(r / n) as u8, (g / n) as u8, (b / n) as u8];
+            }
+        }
+    }
+    out
 }
 
 // ── 人脸检测 ────────────────────────────────────────────────────────────
@@ -177,11 +244,9 @@ struct Letterbox {
 /// 为什么不直接拉成 640×640：3:2 的照片硬拉成方的，脸会被压扁 1.5 倍，
 /// 检测器的命中率明显下降。补黑边牺牲一点有效像素，换的是脸不变形。
 fn letterbox(img: &RgbImage, size: usize) -> (RgbImage, Letterbox) {
-    let (w, h) = img.dimensions();
-    let scale = size as f32 / w.max(h) as f32;
-    let nw = ((w as f32 * scale).round() as u32).max(1).min(size as u32);
-    let nh = ((h as f32 * scale).round() as u32).max(1).min(size as u32);
-    let small = image::imageops::resize(img, nw, nh, FilterType::Triangle);
+    // 同样走盒式降采样：这里是每批都要跑的一步，用 image 的 resize 光它就几秒
+    let small = box_resize(img, size as u32);
+    let (nw, nh) = small.dimensions();
     let mut canvas = RgbImage::from_pixel(size as u32, size as u32, image::Rgb([0, 0, 0]));
     let off_x = ((size as u32 - nw) / 2) as i64;
     let off_y = ((size as u32 - nh) / 2) as i64;
@@ -189,7 +254,8 @@ fn letterbox(img: &RgbImage, size: usize) -> (RgbImage, Letterbox) {
     (
         canvas,
         Letterbox {
-            scale,
+            // 整数倍缩放后的真实比例：坐标要靠它换回工作图，不能用目标尺寸算
+            scale: nw as f32 / img.width() as f32,
             off_x: off_x as f32,
             off_y: off_y as f32,
         },
@@ -440,6 +506,11 @@ pub fn eyes_for(path: &Path) -> Result<EyeReport> {
 pub struct BlinkProgress {
     pub done: usize,
     pub total: usize,
+    /// 到目前为止判为闭眼的张数。跑的过程中就能看到「已经揪出几张」，
+    /// 比干等一个百分比有用——用户可以据此决定要不要继续。
+    pub closed: usize,
+    /// 读不出来 / 算不出来的张数。
+    pub failed: usize,
 }
 
 /// 一趟批量检测的结果。
@@ -450,7 +521,21 @@ pub struct BlinkSummary {
     pub closed: usize,
     pub failed: usize,
     pub remaining: usize,
+    /// 是不是被用户中途停掉的。true 时界面要说清楚「没跑完」，
+    /// 否则用户会以为剩下的都没问题。
+    pub stopped: bool,
     pub elapsed_ms: u64,
+}
+
+/// 用户中途喊停。
+///
+/// 一趟全库检测是几分钟量级，没有停止按钮就只能杀进程——
+/// 而杀掉进程还要担心写了一半的数据库。这里做成协作式取消：
+/// 批与批之间检查一次，已经算完的照常落库，下次接着从没算过的开始。
+static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn cancel() {
+    CANCEL.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 把库里「还没检测过」的照片过一遍。
@@ -498,21 +583,51 @@ where
         });
     }
 
+    CANCEL.store(false, std::sync::atomic::Ordering::Relaxed);
+
     let done = std::sync::atomic::AtomicUsize::new(0);
     let failed = std::sync::atomic::AtomicUsize::new(0);
+    let closed_found = std::sync::atomic::AtomicUsize::new(0);
     let on_progress = &on_progress;
+    // 进度上报要有节制：每张都发一次事件，几千张下来事件通道自己就成了瓶颈。
+    // 150 毫秒一拍，人的眼睛也只跟得上这个频率。
+    let last_emit = std::sync::Mutex::new(std::time::Instant::now());
+    let report = |done: usize| {
+        if let Ok(mut last) = last_emit.try_lock() {
+            if last.elapsed() < std::time::Duration::from_millis(150) {
+                return;
+            }
+            *last = std::time::Instant::now();
+        } else {
+            return;
+        }
+        on_progress(BlinkProgress {
+            done,
+            total,
+            closed: closed_found.load(std::sync::atomic::Ordering::Relaxed),
+            failed: failed.load(std::sync::atomic::Ordering::Relaxed),
+        });
+    };
 
     const BATCH: usize = 32;
     let mut closed_total = 0usize;
+    let mut stopped = false;
     for chunk in targets.chunks(BATCH) {
+        if CANCEL.load(std::sync::atomic::Ordering::Relaxed) {
+            stopped = true;
+            break;
+        }
         let results: Vec<(i64, Option<EyeReport>)> = chunk
             .par_iter()
             .map(|(id, path)| {
                 let r = eyes_for(Path::new(path)).ok();
-                done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 if r.is_none() {
                     failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else if r.is_some_and(|r| r.closed()) {
+                    closed_found.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
+                report(n);
                 (*id, r)
             })
             .collect();
@@ -541,9 +656,13 @@ where
         on_progress(BlinkProgress {
             done: done.load(std::sync::atomic::Ordering::Relaxed),
             total,
+            closed: closed_total,
+            failed: failed.load(std::sync::atomic::Ordering::Relaxed),
         });
     }
 
+    // 中途喊停时，已经算完的批次已经落库了，剩下列进 remaining——
+    // 下次开检会从这里接着走，不会白干。
     let remaining = {
         let conn = db.lock().map_err(|e| anyhow!("{e}"))?;
         conn.query_row(
@@ -554,10 +673,12 @@ where
     };
 
     Ok(BlinkSummary {
-        checked: total - failed.load(std::sync::atomic::Ordering::Relaxed),
+        checked: done.load(std::sync::atomic::Ordering::Relaxed)
+            - failed.load(std::sync::atomic::Ordering::Relaxed),
         closed: closed_total,
         failed: failed.load(std::sync::atomic::Ordering::Relaxed),
         remaining,
+        stopped,
         elapsed_ms: t0.elapsed().as_millis() as u64,
     })
 }
@@ -585,6 +706,39 @@ mod tests {
             p.1 *= 0.12;
         }
         pts
+    }
+
+    #[test]
+    fn box_resize_keeps_sizes_and_averages() {
+        // 纯色图缩放后还是同一个颜色：别把像素算错
+        let flat = RgbImage::from_pixel(400, 300, image::Rgb([120, 160, 90]));
+        let small = box_resize(&flat, 200);
+        assert_eq!(small.dimensions(), (200, 150), "长边要落在目标上");
+        assert_eq!(small.get_pixel(0, 0).0, [120, 160, 90]);
+        assert_eq!(small.get_pixel(199, 149).0, [120, 160, 90]);
+
+        // 等比：3:2 的图缩完还是 3:2，否则脸会被拉扁，检测框就偏了
+        let (w, h) = small.dimensions();
+        assert!((w as f32 / h as f32 - 400.0 / 300.0).abs() < 0.02);
+
+        // 黑白相间：2×2 平均成中间灰——证明取的是块平均而不是抽样
+        let mut checker = RgbImage::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                let v = if (x + y) % 2 == 0 { 0u8 } else { 200u8 };
+                checker.put_pixel(x, y, image::Rgb([v, v, v]));
+            }
+        }
+        let mixed = box_resize_to(&checker, 2, 2);
+        assert_eq!(
+            mixed.get_pixel(0, 0).0,
+            [100, 100, 100],
+            "一块里黑白各半，平均是 100"
+        );
+
+        // 已经比目标小的图不动：放大只会喂给模型插值出来的假边缘
+        let tiny = RgbImage::from_pixel(100, 80, image::Rgb([10, 20, 30]));
+        assert_eq!(box_resize(&tiny, 1280).dimensions(), (100, 80));
     }
 
     #[test]
@@ -647,5 +801,89 @@ mod tests {
         eprintln!("{path} -> {report:?}");
         assert!(report.faces > 0, "这张照片里应该能找到脸");
         assert!(report.ratio.is_some(), "找到脸就该算出 EAR");
+    }
+
+    /// 真机素材上的耗时分解：看清时间到底花在解码、找脸还是定眼眶上。
+    ///
+    /// ```sh
+    /// SP_BLINK_SAMPLE_DIR=/path/to/dir cargo test blink_bench -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "需要一整个目录的真实素材，通过 SP_BLINK_SAMPLE_DIR 指定"]
+    fn blink_bench_on_real_dir() {
+        let Ok(dir) = std::env::var("SP_BLINK_SAMPLE_DIR") else {
+            eprintln!("未设置 SP_BLINK_SAMPLE_DIR，跳过");
+            return;
+        };
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("目录要能读")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                matches!(
+                    p.extension()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_ascii_lowercase())
+                        .as_deref(),
+                    Some("nef") | Some("cr3") | Some("arw") | Some("jpg") | Some("jpeg")
+                )
+            })
+            .collect();
+        paths.sort();
+        if paths.is_empty() {
+            eprintln!("目录里没有照片");
+            return;
+        }
+
+        let e = engine().expect("模型要能加载");
+        let mut t_load = std::time::Duration::ZERO;
+        let mut t_det = std::time::Duration::ZERO;
+        let mut t_lmk = std::time::Duration::ZERO;
+        let mut faces_total = 0usize;
+        let t_all = std::time::Instant::now();
+
+        for p in &paths {
+            let t0 = std::time::Instant::now();
+            let img = match load_rgb(p) {
+                Ok(i) => i,
+                Err(err) => {
+                    eprintln!("{} 取图失败：{err}", p.display());
+                    continue;
+                }
+            };
+            let t1 = std::time::Instant::now();
+            let faces = detect_faces(&e, &img).expect("找脸不该出错");
+            let t2 = std::time::Instant::now();
+            for f in &faces {
+                let _ = eye_ratio(&e, &img, f);
+            }
+            let t3 = std::time::Instant::now();
+
+            t_load += t1 - t0;
+            t_det += t2 - t1;
+            t_lmk += t3 - t2;
+            faces_total += faces.len();
+            eprintln!(
+                "{} {}x{}  解码 {:?} · 找脸 {:?} · 眼眶 {:?} · {} 张脸",
+                p.file_name().unwrap().to_string_lossy(),
+                img.width(),
+                img.height(),
+                t1 - t0,
+                t2 - t1,
+                t3 - t2,
+                faces.len()
+            );
+        }
+
+        let n = paths.len();
+        eprintln!("---- 合计 {n} 张，总耗时 {:?} ----", t_all.elapsed());
+        eprintln!(
+            "解码 {:?}（每张 {:?}） · 找脸 {:?}（每张 {:?}） · 眼眶 {:?} · 共 {} 张脸",
+            t_load,
+            t_load / n as u32,
+            t_det,
+            t_det / n as u32,
+            t_lmk,
+            faces_total
+        );
     }
 }

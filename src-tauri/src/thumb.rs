@@ -77,12 +77,9 @@ pub fn best_jpeg_from_file(path: &Path) -> Result<(Vec<u8>, &'static str)> {
     }
 }
 
-/// 扫描整段数据，返回面积最大的那张合法 JPEG。
-///
-/// 「面积最大」是关键：NEF 里往往存着不止一张 JPEG——EXIF 里有个 160px 小缩略图，
-/// 后面还有全尺寸预览。取最大才不会挑错。
-pub fn best_jpeg(data: &[u8]) -> Option<JpegSpan> {
-    let mut best: Option<JpegSpan> = None;
+/// 扫描整段数据，列出所有合法的 JPEG（已按面积从大到小排好）。
+pub fn jpeg_spans(data: &[u8]) -> Vec<JpegSpan> {
+    let mut found: Vec<JpegSpan> = Vec::new();
 
     let mut i = 0usize;
     while i + 3 < data.len() {
@@ -96,10 +93,8 @@ pub fn best_jpeg(data: &[u8]) -> Option<JpegSpan> {
                     width: rel.width,
                     height: rel.height,
                 };
-                if span.len() <= MAX_CANDIDATE_BYTES && span.width >= MIN_PREVIEW_WIDTH {
-                    if best.map_or(true, |b| span.pixels() > b.pixels()) {
-                        best = Some(span);
-                    }
+                if span.len() <= MAX_CANDIDATE_BYTES {
+                    found.push(span);
                 }
                 // 从这张图的结尾继续找，避免在大图内部反复匹配
                 i = span.end.max(i + 2);
@@ -109,7 +104,58 @@ pub fn best_jpeg(data: &[u8]) -> Option<JpegSpan> {
         i += 1;
     }
 
-    best
+    found.sort_by_key(|s| std::cmp::Reverse(s.pixels()));
+    found
+}
+
+/// 扫描整段数据，返回面积最大的那张合法 JPEG。
+///
+/// 「面积最大」是关键：NEF 里往往存着不止一张 JPEG——EXIF 里有个 160px 小缩略图，
+/// 后面还有全尺寸预览。取最大才不会挑错。
+///
+/// 但「最大」不等于「最合适」：显示大图确实要最大的，
+/// 而只要一张缩略图的时候，解全尺寸那张纯属浪费——见 [`fitting_jpeg`]。
+pub fn best_jpeg(data: &[u8]) -> Option<JpegSpan> {
+    jpeg_spans(data)
+        .into_iter()
+        .find(|s| s.width >= MIN_PREVIEW_WIDTH)
+}
+
+/// 长边不小于 `min_width` 的里面**面积最小**的那张。
+///
+/// 一台尼康 Z50II 的 NEF 里实测躺着四张 JPEG：160、640、1620、5568。
+/// 只要一千多像素宽就够用的场合（人脸检测就是），解 1620 那张比解 5568 那张
+/// 快一个数量级——差的是两千万像素的解码和缩放，而结果对模型来说没区别。
+///
+/// 没有任何一张够大时返回 `None`，调用方自己决定要不要退到 [`best_jpeg`]。
+pub fn fitting_jpeg(data: &[u8], min_width: u32) -> Option<JpegSpan> {
+    jpeg_spans(data)
+        .into_iter()
+        .filter(|s| s.width.max(s.height) >= min_width)
+        .min_by_key(|s| s.pixels())
+}
+
+/// 从文件里读出「够用就行」的那张 JPEG（见 [`fitting_jpeg`]）。
+pub fn fitting_jpeg_from_file(path: &Path, min_width: u32) -> Result<(Vec<u8>, &'static str)> {
+    let file = File::open(path).with_context(|| format!("无法打开 {}", path.display()))?;
+    let map =
+        unsafe { Mmap::map(&file) }.with_context(|| format!("无法映射 {}", path.display()))?;
+
+    fitting_jpeg(&map, min_width)
+        .map(|span| {
+            let route = if span.start == 0 {
+                "file-jpeg"
+            } else {
+                "embedded-jpeg"
+            };
+            (map[span.start..span.end].to_vec(), route)
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "在文件里找不到 {min_width} 像素宽的 JPEG 预览（{}）",
+                path.display()
+            )
+        })
 }
 
 /// 解析一张 JPEG，返回它在 `data` 里的结束位置和宽高。
@@ -733,6 +779,32 @@ mod tests {
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
         enc.encode_image(&img).unwrap();
         out
+    }
+
+    #[test]
+    fn fitting_jpeg_takes_the_smallest_one_that_is_big_enough() {
+        // 模拟 Z50II 的 NEF：160 / 640 / 1620 / 5568 四张 JPEG 依次排着
+        let sizes = [(160u32, 120u32), (640, 424), (1620, 1080), (5568, 3712)];
+        let mut file: Vec<u8> = vec![0u8; 1024];
+        let mut spans = Vec::new();
+        for (w, h) in sizes {
+            let start = file.len();
+            file.extend_from_slice(&make_jpeg(w, h));
+            file.extend_from_slice(&vec![7u8; 512]);
+            spans.push((start, w, h));
+        }
+
+        // 要 1280 宽：该挑 1620 那张，而不是最大的 5568
+        let pick = fitting_jpeg(&file, 1280).expect("应该挑得出一张");
+        assert_eq!((pick.width, pick.height), (1620, 1080));
+        assert_eq!(pick.start, spans[2].0, "挑中的应该是第三张");
+
+        // 要 4096：只有全尺寸那张够格
+        let pick = fitting_jpeg(&file, 4096).expect("应该挑得出一张");
+        assert_eq!(pick.width, 5568);
+
+        // 谁都不够就返回 None，让调用方自己退到 best_jpeg
+        assert!(fitting_jpeg(&file, 8192).is_none());
     }
 
     #[test]

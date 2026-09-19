@@ -162,6 +162,12 @@ async fn analyze_blink(
     .map_err(|e| e.to_string())?
 }
 
+/// 中途喊停闭眼检测。已经算完的照常留着，剩下的下次接着算。
+#[tauri::command]
+fn cancel_blink() {
+    blink::cancel();
+}
+
 /// 单张现算：大图里按一下就出结果，不用等整库跑完。
 ///
 /// 算完顺手写回库里——下次批量检测会跳过它，批量跑到一半被打断也不会白算。
@@ -2710,6 +2716,7 @@ pub fn run() {
             blink_enabled,
             set_blink_enabled,
             analyze_blink,
+            cancel_blink,
             photo_detail,
             apply_decision,
             similar_groups,

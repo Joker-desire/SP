@@ -85,12 +85,16 @@ interface BlinkSummary {
   closed: number;
   failed: number;
   remaining: number;
+  /** 被用户中途停掉了：这时「没标出来」不等于「没问题」 */
+  stopped: boolean;
   elapsedMs: number;
 }
 
 interface BlinkProgress {
   done: number;
   total: number;
+  closed: number;
+  failed: number;
 }
 
 interface CameraBody {
@@ -2822,7 +2826,14 @@ function closeCompareDialog() {
   void refreshSimilarGroups();
 }
 
-elBtnBlink.addEventListener("click", () => void setBlink(!blinkOn));
+elBtnBlink.addEventListener("click", () => {
+  if (blinkRunning) {
+    void invoke("cancel_blink").catch(() => undefined);
+    setHint("正在停止闭眼检测…");
+    return;
+  }
+  void setBlink(!blinkOn);
+});
 
 elBtnSimilar.addEventListener("click", () => void openSimilarDialog());
 elBtnUndo.addEventListener("click", () => void undoLast());
@@ -3120,11 +3131,23 @@ async function runAnalysis() {
 // 开关存在后端库里（meta 表）：它决定的是这台机器上要不要做这件事，
 // 不是某个窗口的临时状态。
 
+const BLINK_LABEL = "闭眼检测";
+
 function paintBlinkToggle() {
   elBtnBlink.classList.toggle("is-active", blinkOn);
-  elBtnBlink.title = blinkOn
-    ? "闭眼检测：已开启 —— 扫描 / 分析之后会自动过一遍人脸模型（模型随应用打包，不联网）"
-    : "闭眼检测：已关闭 —— 开启后扫描会多跑一趟，标出有人眨眼的照片";
+  elBtnBlink.title = blinkRunning
+    ? "闭眼检测：正在跑 —— 点一下停止（已经算完的会留着，剩下的下次接着算）"
+    : blinkOn
+      ? "闭眼检测：已开启 —— 扫描 / 分析之后会自动过一遍人脸模型（模型随应用打包，不联网）"
+      : "闭眼检测：已关闭 —— 开启后扫描会多跑一趟，标出有人眨眼的照片";
+}
+
+/** 跑起来时这个按钮变成「停止」。跑一趟要几分钟，不能让人只能干等。 */
+function setBlinkRunning(running: boolean) {
+  const text = elBtnBlink.querySelector<HTMLElement>(".btn-text");
+  if (text) text.textContent = running ? "停止检测" : BLINK_LABEL;
+  elBtnBlink.classList.toggle("is-busy", running);
+  paintBlinkToggle();
 }
 
 async function loadBlinkSetting() {
@@ -3155,26 +3178,53 @@ async function setBlink(on: boolean) {
   if (rootPath) void runBlinkAnalysis();
 }
 
+/** 闭眼检测的进度：走底部那条进度条，跟扫描同一套视觉。
+ *  只往 hint 里写字是不够的——页脚那行字太容易被忽略，
+ *  而这一趟要跑几分钟，没有百分比就是「不知道死没死」。 */
+function showBlinkProgress(p: BlinkProgress) {
+  elProgress.hidden = false;
+  elProgressFill.classList.remove("is-indeterminate");
+  elProgressFill.style.width = `${Math.round((p.done / p.total) * 100)}%`;
+  const hit = p.closed > 0 ? ` · 已标出 ${p.closed.toLocaleString()} 张` : "";
+  elProgressText.textContent = `闭眼检测 ${p.done.toLocaleString()} / ${p.total.toLocaleString()}${hit}`;
+}
+
 async function runBlinkAnalysis() {
   if (blinkRunning || !rootPath || !blinkOn) return;
   blinkRunning = true;
-  elBtnBlink.disabled = true;
+  setBlinkRunning(true);
+  elProgressFill.classList.remove("is-indeterminate");
+  elProgressFill.style.width = "0%";
+  elProgressText.textContent = "闭眼检测：准备中…";
+  elProgress.hidden = false;
   try {
-    setHint("正在检测闭眼：解码 + 本机跑人脸模型，几千张要等一会儿…");
     const r = await invoke<BlinkSummary>("analyze_blink", { roots: currentRoots() });
-    if (r.checked === 0) return;
+    if (r.checked === 0) {
+      hideProgress();
+      return;
+    }
     await loadFacets();
     await refreshLibrary();
-    setHint(
-      r.closed > 0
-        ? `闭眼检测完成（${r.checked.toLocaleString()} 张）：${r.closed.toLocaleString()} 张疑似有人闭眼，左侧「画面质量 → 疑似闭眼」可单独筛`
-        : `闭眼检测完成（${r.checked.toLocaleString()} 张），没发现有人眨眼`,
-    );
+    const secs = (r.elapsedMs / 1000).toFixed(1);
+    const rate = r.checked > 0 ? `每秒 ${(r.checked / (r.elapsedMs / 1000)).toFixed(1)} 张` : "";
+    if (r.stopped) {
+      setHint(
+        `闭眼检测已停止：这趟看了 ${r.checked.toLocaleString()} 张（${r.closed.toLocaleString()} 张疑似闭眼），还剩 ${r.remaining.toLocaleString()} 张没看——下次开启会接着算。`,
+        "warn",
+      );
+    } else if (r.closed > 0) {
+      setHint(
+        `闭眼检测完成（${r.checked.toLocaleString()} 张 / ${secs} 秒）：${r.closed.toLocaleString()} 张疑似有人闭眼，左侧「画面质量 → 疑似闭眼」可单独筛`,
+      );
+    } else {
+      setHint(`闭眼检测完成（${r.checked.toLocaleString()} 张 / ${secs} 秒${rate ? " · " + rate : ""}），没发现有人眨眼`);
+    }
   } catch (e) {
     setHint(`闭眼检测没跑起来：${String(e)}`, "warn");
   } finally {
+    hideProgress();
     blinkRunning = false;
-    elBtnBlink.disabled = false;
+    setBlinkRunning(false);
   }
 }
 
@@ -4524,11 +4574,8 @@ async function boot() {
 
   await listen<ScanProgress>("scan://progress", (e) => showProgress(e.payload));
   await listen<ExportProgress>("export://progress", (e) => showExportProgress(e.payload));
-  // 闭眼检测一趟要几分钟，把张数报出来——不然又是「不知道死没死」的等待
-  await listen<BlinkProgress>("blink://progress", (e) => {
-    const { done, total } = e.payload;
-    if (total > 0) setHint(`正在检测闭眼：${done.toLocaleString()} / ${total.toLocaleString()}`);
-  });
+  // 闭眼检测一趟要几分钟：走底部进度条，报张数 + 已经揪出几张
+  await listen<BlinkProgress>("blink://progress", (e) => showBlinkProgress(e.payload));
   await showStartupError();
   // 闭眼检测的开关在后端库里，启动先读一次把按钮画对
   await loadBlinkSetting();
