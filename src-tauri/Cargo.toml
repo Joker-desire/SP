@@ -39,6 +39,10 @@ memmap2 = "0.9.11"
 base64 = "0.23.1"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
+# 本地推理引擎（纯 Rust，跑 ONNX）。闭眼检测要在用户自己机器上跑，
+# 不能联网、不能调 API——这是选它的唯一理由。
+rten = "0.26"
+rten-tensor = "0.26"
 
 
 # 依赖一律用优化级别 3 编译，自己的代码保持默认（快速增量）。

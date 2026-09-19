@@ -84,6 +84,18 @@
 
         <button
           class="btn btn-ghost"
+          id="btn-blink"
+          title="闭眼检测：扫描后在本机跑一遍人脸模型，标出有人眨眼的照片（模型随应用打包，不联网）"
+        >
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M1.4 8s2.4-3.6 6.6-3.6S14.6 8 14.6 8s-2.4 3.6-6.6 3.6S1.4 8 1.4 8Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+            <circle cx="8" cy="8" r="1.9" fill="none" stroke="currentColor" stroke-width="1.3"/>
+          </svg>
+          <span class="btn-text">闭眼检测</span>
+        </button>
+
+        <button
+          class="btn btn-ghost"
           id="btn-similar"
           title="把连着拍的照片按时间分组，一次挑出最好的一张"
         >
@@ -443,7 +455,7 @@
           <span class="loupe-name" id="loupe-name"></span>
           <span class="loupe-exif" id="loupe-exif"></span>
           <span class="loupe-pos" id="loupe-pos"></span>
-          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · I 详情 · O 对焦点 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
+          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · I 详情 · O 对焦点 · B 闭眼 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
           <button class="btn btn-ghost loupe-close" id="loupe-close">关闭</button>
         </div>
       </div>

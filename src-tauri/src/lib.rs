@@ -6,6 +6,7 @@
 
 mod af;
 mod analyze;
+mod blink;
 mod db;
 mod exif_detail;
 mod indexer;
@@ -99,6 +100,105 @@ async fn analyze_library(
             let _ = app.emit("analyze://progress", &p);
         })
         .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 闭眼检测的总开关存在库里（meta 表），不在前端。
+///
+/// 存库里的理由：它决定的是「扫描之后要不要多跑一趟」，属于这台机器上的
+/// 持久偏好，跟窗口大小那种界面状态不是一回事——换台机器不该被带过去。
+const BLINK_KEY: &str = "blink_enabled";
+
+#[tauri::command]
+async fn blink_enabled(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        Ok(db::meta_get(&conn, BLINK_KEY)
+            .map_err(|e| format!("{e:#}"))?
+            .map(|v| v == "1")
+            .unwrap_or(false))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn set_blink_enabled(state: tauri::State<'_, AppState>, on: bool) -> Result<(), String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        db::meta_set(&conn, BLINK_KEY, if on { "1" } else { "0" }).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 把「还没检测过」的照片挨个找一遍有没有人闭眼。
+///
+/// 和画面分析一样是后台趟：分批、可中断、算过的不再算。
+/// 开关关着时前端不会调它——几千张的解码 + 推理不是免费的。
+#[tauri::command]
+async fn analyze_blink(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    roots: Option<Vec<String>>,
+) -> Result<blink::BlinkSummary, String> {
+    let db = state.db.clone();
+    let roots: Vec<PathBuf> = roots
+        .unwrap_or_default()
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    tauri::async_runtime::spawn_blocking(move || {
+        blink::analyze_pending(&roots, &db, |p| {
+            let _ = app.emit("blink://progress", &p);
+        })
+        .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 单张现算：大图里按一下就出结果，不用等整库跑完。
+///
+/// 算完顺手写回库里——下次批量检测会跳过它，批量跑到一半被打断也不会白算。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BlinkReport {
+    faces: usize,
+    ratio: Option<f64>,
+    closed: bool,
+}
+
+#[tauri::command]
+async fn photo_blink(state: tauri::State<'_, AppState>, id: i64) -> Result<BlinkReport, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path: String = {
+            let conn = db.lock().map_err(|e| e.to_string())?;
+            conn.query_row("SELECT path FROM photos WHERE id = ?1", [id], |r| r.get(0))
+                .map_err(|e| format!("这张照片已经不在库里了：{e}"))?
+        };
+
+        let report = blink::eyes_for(Path::new(&path)).map_err(|e| format!("{e:#}"))?;
+
+        {
+            let conn = db.lock().map_err(|e| e.to_string())?;
+            conn.execute(
+                "UPDATE photos SET faces = ?1, eye_ratio = ?2 WHERE id = ?3",
+                rusqlite::params![report.faces as i64, report.ratio, id],
+            )
+            .map_err(|e| format!("写回检测结果失败：{e}"))?;
+        }
+
+        Ok(BlinkReport {
+            faces: report.faces,
+            ratio: report.ratio,
+            closed: report.closed(),
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -305,6 +405,10 @@ struct PairCard {
     overexposed: Option<f64>,
     /// 暗部死黑像素占比 0–1
     underexposed: Option<f64>,
+    /// 检出的人脸数。NULL = 还没检测过（闭眼检测默认关，多数时候就是 NULL）。
+    faces: Option<i64>,
+    /// 最闭的那只眼睛的 EAR；NULL = 没测出关键点（包括压根没脸的情况）。
+    eye_ratio: Option<f64>,
 }
 
 /// 一页照片 + 满足条件的总数（前端据此显示「共 N 张」和决定还要不要继续加载）。
@@ -513,6 +617,11 @@ fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
             "p.underexposed IS NOT NULL AND p.underexposed >= {}",
             analyze::UNDEREXPOSED_THRESHOLD
         )),
+        // 疑似闭眼。同理：没检测过的一律不算有嫌疑。
+        Some("blink") => conds.push(format!(
+            "p.eye_ratio IS NOT NULL AND p.eye_ratio < {}",
+            blink::CLOSED_THRESHOLD
+        )),
         _ => {}
     }
 
@@ -602,7 +711,7 @@ fn query_pairs(
                 p.lens, p.focal_len, p.aperture, p.shutter, p.iso,
                 p.file_size, p.decode_path,
                 {DECISION}, {STARS},
-                p.sharpness, p.overexposed, p.underexposed
+                p.sharpness, p.overexposed, p.underexposed, p.faces, p.eye_ratio
          {FROM_PHOTOS}
          WHERE {where_sql}
          {}
@@ -644,6 +753,8 @@ fn query_pairs(
             sharpness: r.get(19)?,
             overexposed: r.get(20)?,
             underexposed: r.get(21)?,
+            faces: r.get(22)?,
+            eye_ratio: r.get(23)?,
         })
     })?;
 
@@ -730,6 +841,10 @@ struct PhotoDetail {
     phash: Option<String>,
     decision: String,
     stars: i64,
+    /// 闭眼检测：检出的人脸数，NULL = 还没检测过
+    faces: Option<i64>,
+    /// 最闭的那只眼睛的 EAR
+    eye_ratio: Option<f64>,
     siblings: Vec<SiblingFile>,
 }
 
@@ -744,7 +859,7 @@ fn photo_detail_of(conn: &Connection, id: i64) -> anyhow::Result<PhotoDetail> {
                 strftime('%Y-%m-%d %H:%M:%S', p.indexed_at, 'unixepoch', 'localtime'),
                 p.sharpness, p.overexposed, p.underexposed, p.decode_path,
                 p.fingerprint, p.content_hash, p.phash,
-                {DECISION}, {STARS}
+                {DECISION}, {STARS}, p.faces, p.eye_ratio
          {FROM_PHOTOS} WHERE p.id = ?1"
     );
 
@@ -779,6 +894,8 @@ fn photo_detail_of(conn: &Connection, id: i64) -> anyhow::Result<PhotoDetail> {
             phash: r.get(25)?,
             decision: r.get(26)?,
             stars: r.get(27)?,
+            faces: r.get(28)?,
+            eye_ratio: r.get(29)?,
             file_name: String::new(),
             dir: String::new(),
             siblings: Vec::new(),
@@ -1135,24 +1252,28 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         }
     }
 
-    // 画面质量：三档一次数完。没分析过的（NULL）不算进来，
+    // 画面质量：四档一次数完。没分析过的（NULL）不算进来，
     // 否则刚扫完就显示「几千张糊了」——那是还没算，不是糊。
+    // 「疑似闭眼」同理：检测默认关着，没跑过就是 0，不是「没人眨眼」。
     let quality = {
         let sql = format!(
             "SELECT
                 COALESCE(SUM(CASE WHEN p.sharpness    IS NOT NULL AND p.sharpness    <  {} THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN p.overexposed  IS NOT NULL AND p.overexposed  >= {} THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.underexposed IS NOT NULL AND p.underexposed >= {} THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN p.underexposed IS NOT NULL AND p.underexposed >= {} THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN p.eye_ratio    IS NOT NULL AND p.eye_ratio    <  {} THEN 1 ELSE 0 END), 0)
              {FROM_PHOTOS} WHERE p.is_primary = 1{scope}",
             analyze::BLUR_THRESHOLD,
             analyze::OVEREXPOSED_THRESHOLD,
             analyze::UNDEREXPOSED_THRESHOLD,
+            blink::CLOSED_THRESHOLD,
         );
-        let (blur, over, under) = conn.query_row(&sql, sp(), |r| {
+        let (blur, over, under, blink) = conn.query_row(&sql, sp(), |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
             ))
         })?;
         vec![
@@ -1170,6 +1291,11 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
                 key: "under".into(),
                 label: "暗部死黑".into(),
                 count: under,
+            },
+            Facet {
+                key: "blink".into(),
+                label: "疑似闭眼".into(),
+                count: blink,
             },
         ]
     };
@@ -2560,6 +2686,14 @@ pub fn run() {
             db: Arc::new(Mutex::new(conn)),
             startup_error,
         })
+        // 闭眼检测的模型在哪里，交给打包后的资源目录说了算。
+        // 开发态这个目录里没有模型，`blink.rs` 会自己退回仓库里的那一份。
+        .setup(|app| {
+            if let Ok(dir) = app.path().resource_dir() {
+                blink::set_model_dir(dir);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             startup_status,
             scan_folder,
@@ -2572,6 +2706,10 @@ pub fn run() {
             list_pair_ids,
             photo_exif,
             photo_af,
+            photo_blink,
+            blink_enabled,
+            set_blink_enabled,
+            analyze_blink,
             photo_detail,
             apply_decision,
             similar_groups,

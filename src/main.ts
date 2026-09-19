@@ -65,6 +65,32 @@ interface PairCard {
   sharpness: number | null;
   overexposed: number | null;
   underexposed: number | null;
+  /** 闭眼检测。null＝还没检测过（开关默认关，多数时候就是 null） */
+  faces: number | null;
+  /** 最闭的那只眼睛的 EAR；越小越闭 */
+  eyeRatio: number | null;
+}
+
+/** EAR 门槛，和后端 blink.rs 里的 CLOSED_THRESHOLD 是同一个数。 */
+const CLOSED_THRESHOLD = 0.21;
+
+interface BlinkReport {
+  faces: number;
+  ratio: number | null;
+  closed: boolean;
+}
+
+interface BlinkSummary {
+  checked: number;
+  closed: number;
+  failed: number;
+  remaining: number;
+  elapsedMs: number;
+}
+
+interface BlinkProgress {
+  done: number;
+  total: number;
 }
 
 interface CameraBody {
@@ -375,6 +401,7 @@ const elCacheCancel = $<HTMLButtonElement>("#cache-cancel");
 const elCacheClear = $<HTMLButtonElement>("#cache-clear");
 
 const elBtnSimilar = $<HTMLButtonElement>("#btn-similar");
+const elBtnBlink = $<HTMLButtonElement>("#btn-blink");
 const elSimilarModal = $<HTMLElement>("#similar-modal");
 const elSimilarList = $<HTMLElement>("#similar-list");
 const elSimilarGap = $<HTMLElement>("#similar-gap");
@@ -401,6 +428,10 @@ let rootPath: string | null = null;
 let scanning = false;
 /** 画面分析（清晰度 / 曝光）的后台任务，同一时刻只跑一个。 */
 let analyzing = false;
+/** 闭眼检测的后台任务。和画面分析分开计：两者可以一前一后跑，不能互相顶掉。 */
+let blinkRunning = false;
+/** 闭眼检测开关。值存在后端库里（meta 表），前端启动时读一次。 */
+let blinkOn = false;
 /** 最近一次拉到的分面数据。分析完要报「多少张糊了」，从这里读现成的，不再多问一次。 */
 let lastFacets: LibraryFacets | null = null;
 
@@ -707,12 +738,19 @@ function loadThumb(id: number, size: ThumbSize): Promise<ThumbPayload> {
 //
 // 阈值和后端 analyze.rs 里的是一对，改一边就要改另一边，
 // 否则会出现「侧栏说 15 张、筛出来 12 张」这种对不上的情况。
-const BLUR_THRESHOLD = 30;
+// 后端是计数和筛选的口径，以前端为准只会两边打架，所以这里跟着后端走。
+const BLUR_THRESHOLD = 25;
 const OVEREXPOSED_THRESHOLD = 0.02;
 const UNDEREXPOSED_THRESHOLD = 0.25;
 
+/** 有没有人闭眼。闭眼是唯一「看着没事、其实废了」的硬伤，所以排在最前面。 */
+function blinkClosed(c: PairCard): boolean {
+  return is(c.eyeRatio) && (c.eyeRatio as number) < CLOSED_THRESHOLD;
+}
+
 /** 这张照片有没有机器能看出来的硬伤。没有就返回 null——不给人添标签。 */
 function qualityIssue(c: PairCard): string | null {
+  if (blinkClosed(c)) return "闭眼";
   if (is(c.sharpness) && (c.sharpness as number) < BLUR_THRESHOLD) return "糊";
   if (is(c.overexposed) && (c.overexposed as number) >= OVEREXPOSED_THRESHOLD) return "过曝";
   if (is(c.underexposed) && (c.underexposed as number) >= UNDEREXPOSED_THRESHOLD) return "欠曝";
@@ -722,6 +760,11 @@ function qualityIssue(c: PairCard): string | null {
 /** 徽标的悬停说明：把具体数值摆出来，阈值准不准一眼能判断。 */
 function qualityDetail(c: PairCard): string {
   const bits: string[] = [];
+  if (is(c.eyeRatio)) {
+    bits.push(
+      `${c.faces ?? 0} 张脸 · 最闭的眼睛 ${(c.eyeRatio as number).toFixed(2)}（低于 ${CLOSED_THRESHOLD} 判为闭眼）`,
+    );
+  }
   if (is(c.sharpness)) bits.push(`清晰度 ${Math.round(c.sharpness as number)}（低于 ${BLUR_THRESHOLD} 判为糊）`);
   if (is(c.overexposed)) bits.push(`高光溢出 ${((c.overexposed as number) * 100).toFixed(1)}%`);
   if (is(c.underexposed)) bits.push(`暗部死黑 ${((c.underexposed as number) * 100).toFixed(1)}%`);
@@ -798,11 +841,12 @@ function cardEl(c: PairCard): HTMLElement {
     card.appendChild(badge);
   }
 
-  // 分析出问题才标。阈值与后端 analyze.rs 保持一致，别各改各的。
+  // 分析出问题才标。阈值与后端保持一致，别各改各的。
   const issue = qualityIssue(c);
   if (issue) {
     const badge = document.createElement("span");
-    badge.className = "card-badge card-badge--quality";
+    badge.className =
+      issue === "闭眼" ? "card-badge card-badge--blink" : "card-badge card-badge--quality";
     badge.textContent = issue;
     badge.title = qualityDetail(c);
     card.appendChild(badge);
@@ -1183,9 +1227,10 @@ function bucketOf(v: number | null, buckets: typeof FOCAL_BUCKETS): { key: strin
   return buckets.find((b) => v >= b.lo && v < b.hi) ?? null;
 }
 
-/** 画面质量归档：优先级 跑焦 > 过曝 > 欠曝 > 正常；还没分析过的归「未分析」。
- *  三个阈值与 src-tauri/src/analyze.rs 保持一致（改动要两边同步）。 */
+/** 画面质量归档：优先级 闭眼 > 跑焦 > 过曝 > 欠曝 > 正常；还没分析过的归「未分析」。
+ *  几个阈值与 src-tauri/src/{analyze,blink}.rs 保持一致（改动要两边同步）。 */
 function qualityOf(c: PairCard): { key: string; label: string } {
+  if (blinkClosed(c)) return { key: "blink", label: "疑似闭眼" };
   if (c.sharpness === null && c.overexposed === null && c.underexposed === null) {
     return { key: "pending", label: "未分析" };
   }
@@ -2777,6 +2822,8 @@ function closeCompareDialog() {
   void refreshSimilarGroups();
 }
 
+elBtnBlink.addEventListener("click", () => void setBlink(!blinkOn));
+
 elBtnSimilar.addEventListener("click", () => void openSimilarDialog());
 elBtnUndo.addEventListener("click", () => void undoLast());
 elBtnRedo.addEventListener("click", () => void redoLast());
@@ -3055,10 +3102,79 @@ async function runAnalysis() {
         ? `画面分析完成（${r.analyzed.toLocaleString()} 张）：${bits.join(" · ")}，左侧「画面质量」可单独筛`
         : `画面分析完成（${r.analyzed.toLocaleString()} 张），没发现明显问题`,
     );
+
+    // 闭眼检测排在画面分析之后：它要解码 + 跑模型，慢得多，
+    // 让「糊不糊」这种便宜的结论先出来。
+    if (blinkOn) await runBlinkAnalysis();
   } catch {
     /* 分析失败不影响选片本身，静默跳过 */
   } finally {
     analyzing = false;
+  }
+}
+
+// ---- 闭眼检测 ----
+//
+// 默认关。要解码、要跑两个模型，几千张的量级是几分钟而不是几秒；
+// 拍风景、拍静物的人根本用不上，不该让他们等。
+// 开关存在后端库里（meta 表）：它决定的是这台机器上要不要做这件事，
+// 不是某个窗口的临时状态。
+
+function paintBlinkToggle() {
+  elBtnBlink.classList.toggle("is-active", blinkOn);
+  elBtnBlink.title = blinkOn
+    ? "闭眼检测：已开启 —— 扫描 / 分析之后会自动过一遍人脸模型（模型随应用打包，不联网）"
+    : "闭眼检测：已关闭 —— 开启后扫描会多跑一趟，标出有人眨眼的照片";
+}
+
+async function loadBlinkSetting() {
+  try {
+    blinkOn = await invoke<boolean>("blink_enabled");
+  } catch {
+    blinkOn = false;
+  }
+  paintBlinkToggle();
+}
+
+async function setBlink(on: boolean) {
+  blinkOn = on;
+  paintBlinkToggle();
+  try {
+    await invoke("set_blink_enabled", { on });
+  } catch (e) {
+    setHint(`闭眼检测的开关没能保存：${String(e)}`, "warn");
+    blinkOn = !on;
+    paintBlinkToggle();
+    return;
+  }
+  if (!on) {
+    setHint("已关闭闭眼检测：不再新增检测，已经标出来的结果保留。");
+    return;
+  }
+  setHint("已开启闭眼检测。");
+  if (rootPath) void runBlinkAnalysis();
+}
+
+async function runBlinkAnalysis() {
+  if (blinkRunning || !rootPath || !blinkOn) return;
+  blinkRunning = true;
+  elBtnBlink.disabled = true;
+  try {
+    setHint("正在检测闭眼：解码 + 本机跑人脸模型，几千张要等一会儿…");
+    const r = await invoke<BlinkSummary>("analyze_blink", { roots: currentRoots() });
+    if (r.checked === 0) return;
+    await loadFacets();
+    await refreshLibrary();
+    setHint(
+      r.closed > 0
+        ? `闭眼检测完成（${r.checked.toLocaleString()} 张）：${r.closed.toLocaleString()} 张疑似有人闭眼，左侧「画面质量 → 疑似闭眼」可单独筛`
+        : `闭眼检测完成（${r.checked.toLocaleString()} 张），没发现有人眨眼`,
+    );
+  } catch (e) {
+    setHint(`闭眼检测没跑起来：${String(e)}`, "warn");
+  } finally {
+    blinkRunning = false;
+    elBtnBlink.disabled = false;
   }
 }
 
@@ -3687,6 +3803,10 @@ interface PhotoDetail {
   phash: string | null;
   decision: string;
   stars: number;
+  /** 闭眼检测：人脸数，null = 没检测过 */
+  faces: number | null;
+  /** 最闭的眼睛的 EAR */
+  eyeRatio: number | null;
   siblings: SiblingFile[];
 }
 
@@ -3935,6 +4055,12 @@ function renderDetail(d: PhotoDetail) {
               "暗部死黑",
               d.underexposed === null ? "" : `${(d.underexposed * 100).toFixed(1)}%（≥ 25% 判死黑）`,
             ),
+            detailRow(
+              "闭眼检测",
+              d.eyeRatio === null
+                ? "还没检测（顶栏开关打开后才会跑）"
+                : `${d.faces ?? 0} 张脸 · 最闭的眼睛 ${d.eyeRatio.toFixed(2)}（< ${CLOSED_THRESHOLD} 判闭眼）${d.eyeRatio < CLOSED_THRESHOLD ? " ⚠ 疑似闭眼" : ""}`,
+            ),
           ],
     ),
     exifSec,
@@ -4101,6 +4227,47 @@ function setAf(on: boolean) {
 elLoupeAfToggle.addEventListener("click", () => setAf(!showAf));
 elLoupeAfToggle.classList.toggle("is-active", showAf);
 
+// ---- 单张现算闭眼 ----
+//
+// 整库跑一遍要几分钟；但「这一张到底有没有人眨眼」是看大图时才会问的问题，
+// 按一下就出答案，比等后台跑完有用得多。
+
+/** 把某张卡片上的质量徽标按最新数据重画一次（不重建卡片，缩略图不掉）。 */
+function repaintQualityBadge(c: PairCard) {
+  const card = elGrid.querySelector<HTMLElement>(`.card[data-id="${c.id}"]`);
+  if (!card) return;
+  card.querySelector(".card-badge--blink, .card-badge--quality")?.remove();
+  const issue = qualityIssue(c);
+  if (!issue) return;
+  const badge = document.createElement("span");
+  badge.className =
+    issue === "闭眼" ? "card-badge card-badge--blink" : "card-badge card-badge--quality";
+  badge.textContent = issue;
+  badge.title = qualityDetail(c);
+  card.appendChild(badge);
+}
+
+async function checkBlinkHere() {
+  const c = items[loupeIndex];
+  if (!c) return;
+  setHint("正在检测这张有没有人闭眼…");
+  try {
+    const r = await invoke<BlinkReport>("photo_blink", { id: c.id });
+    c.faces = r.faces;
+    c.eyeRatio = r.ratio;
+    repaintQualityBadge(c);
+    if (r.faces === 0) {
+      setHint("这张没找到人脸：侧脸太偏、人太小、戴墨镜都会漏。", "warn");
+    } else if (r.closed) {
+      setHint(`疑似有人闭眼：${r.faces} 张脸，最闭的眼睛 ${(r.ratio ?? 0).toFixed(2)}（低于 ${CLOSED_THRESHOLD} 判为闭眼）`, "warn");
+    } else {
+      setHint(`${r.faces} 张脸都睁着眼（最闭的 ${(r.ratio ?? 0).toFixed(2)}）`);
+    }
+  } catch (err) {
+    setHint(`这张没检测成：${String(err)}`, "warn");
+  }
+}
+
 function closeLoupe() {
   loupeIndex = -1;
   elLoupe.hidden = true;
@@ -4253,6 +4420,11 @@ window.addEventListener("keydown", (e) => {
       setAf(!showAf);
       return;
     }
+    if (lower === "b") {
+      e.preventDefault();
+      void checkBlinkHere();
+      return;
+    }
     if (lower === "i") {
       e.preventDefault();
       toggleDetail();
@@ -4352,7 +4524,14 @@ async function boot() {
 
   await listen<ScanProgress>("scan://progress", (e) => showProgress(e.payload));
   await listen<ExportProgress>("export://progress", (e) => showExportProgress(e.payload));
+  // 闭眼检测一趟要几分钟，把张数报出来——不然又是「不知道死没死」的等待
+  await listen<BlinkProgress>("blink://progress", (e) => {
+    const { done, total } = e.payload;
+    if (total > 0) setHint(`正在检测闭眼：${done.toLocaleString()} / ${total.toLocaleString()}`);
+  });
   await showStartupError();
+  // 闭眼检测的开关在后端库里，启动先读一次把按钮画对
+  await loadBlinkSetting();
 
   updateCullInfo();
 

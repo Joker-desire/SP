@@ -145,6 +145,10 @@ fn add_missing_columns(conn: &Connection) {
         ("sharpness", "REAL"),
         ("overexposed", "REAL"),
         ("underexposed", "REAL"),
+        // 闭眼检测（见 blink.rs）。faces = 检出的人脸数，eye_ratio = 最闭的那只眼的 EAR。
+        // 两个都是 NULL 表示还没轮到这张；faces = 0 表示查过了、画面里没有脸。
+        ("faces", "INTEGER"),
+        ("eye_ratio", "REAL"),
     ];
     for (col, ty) in wanted {
         let exists: i64 = conn
@@ -239,7 +243,10 @@ CREATE TABLE IF NOT EXISTS photos (
   -- 画面分析（后台算，见 analyze.rs）。NULL = 还没轮到它 / 这张算不出来。
   sharpness          REAL,
   overexposed        REAL,
-  underexposed       REAL
+  underexposed       REAL,
+  -- 闭眼检测（后台算，见 blink.rs）。faces = 人脸数，eye_ratio = 最闭的眼睛的 EAR。
+  faces              INTEGER,
+  eye_ratio          REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_photos_pair  ON photos(pair_key);

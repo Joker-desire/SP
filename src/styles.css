@@ -241,6 +241,14 @@ select {
   border-color: var(--border-strong);
 }
 
+/* 开着的开关要看得出来：边框和文字都换成强调色，
+   不然「点了但不知道开没开」比不做这个功能更让人怀疑 */
+.btn.is-active {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 .btn:disabled {
   opacity: 0.42;
   cursor: default;
@@ -958,6 +966,23 @@ select {
   color: #8a5a12;
 }
 
+/* 闭眼：和「画面质量」同一个位置（左下角），换一套冷色区分——
+   两者不会同时出现，共用一块地方比再挤一个角更干净 */
+.card-badge--blink {
+  top: auto;
+  bottom: 7px;
+  right: auto;
+  left: 7px;
+  background: rgba(20, 22, 26, 0.72);
+  color: #9fd2ff;
+  border-color: rgba(159, 210, 255, 0.4);
+}
+
+:root[data-theme="light"] .card-badge--blink {
+  background: rgba(255, 255, 255, 0.92);
+  color: #1a5b8a;
+}
+
 /* 拍摄时刻。原来浮在右上角、只在悬停时出现；现在挪进底部那一行常驻——
    选连拍时「这两张差几秒」是判断依据，藏在悬停后面等于没有。 */
 .card-time {
@@ -1425,6 +1450,14 @@ select {
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+
+/* 「对焦点」这类开关键开着时的样子。之前只有 JS 加了 is-active、没给样式，
+   结果按钮按下去毫无变化——看起来就像关不掉。 */
+.cbtn.is-active {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border-color: var(--accent);
 }
 
 .cbtn:hover:not(:disabled) {
@@ -2399,6 +2432,12 @@ kbd {
   justify-content: center;
   pointer-events: none;
   z-index: 1;
+}
+
+/* .loupe-af 的 display:flex 会盖掉 [hidden] 的 display:none（同一特异度、后来者胜），
+   必须补这条——不然 JS 里 hidden = true 也关不掉对焦框 */
+.loupe-af[hidden] {
+  display: none;
 }
 
 /* 尺寸由 JS 设成图片渲染出来的大小，框的坐标才能直接按比例放 */
