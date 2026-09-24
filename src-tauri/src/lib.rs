@@ -315,6 +315,31 @@ const HAS_JPG: &str = "EXISTS(SELECT 1 FROM photos b \
 /// 给出默认值，否则「未标记」这一档会因为 NULL 而筛不出来。
 const DECISION: &str = "COALESCE(d.decision, 'none')";
 const STARS: &str = "COALESCE(d.stars, 0)";
+/// 色标。没打过色标的行取不到值，同样要兜成空串，否则「无色标」这一档筛不出来。
+const COLOR: &str = "COALESCE(d.color, '')";
+
+/// 色标的全部取值与显示名。顺序决定 `6`-`0` 这五个键的排布，
+/// 前端 `src/main.ts` 里有一份对应的定义，两边改任一边都要通知另一边。
+const COLOR_KEYS: &[(&str, &str)] = &[
+    ("red", "红"),
+    ("yellow", "黄"),
+    ("green", "绿"),
+    ("blue", "蓝"),
+    ("purple", "紫"),
+];
+
+/// 认不出来的一律当无色标，而不是报错——色标是给人眼帮忙的，
+/// 不该因为一个脏值让这一张照片没法选。
+fn normalize_color(s: Option<&str>) -> Option<String> {
+    match s?.trim().to_ascii_lowercase().as_str() {
+        "red" => Some("red".into()),
+        "yellow" => Some("yellow".into()),
+        "green" => Some("green".into()),
+        "blue" => Some("blue".into()),
+        "purple" => Some("purple".into()),
+        _ => None,
+    }
+}
 
 /// `build_where` 拼出来的条件会引用别名 `p` 和 `d`，
 /// 所有用它的查询都必须带上这个 FROM，否则会漏掉选片状态这一维的筛选。
@@ -346,6 +371,9 @@ struct PairFilter {
     /// 合成一个「0 就是不筛」的约定，会让「找没打星的」这个需求没法表达。
     #[serde(default)]
     stars: Option<i64>,
+    /// 色标：red / yellow / green / blue / purple。`None`＝不筛。
+    #[serde(default)]
+    color: Option<String>,
     /// takenDesc（默认）/ takenAsc / nameAsc / nameDesc / sizeDesc / starsDesc
     #[serde(default)]
     sort: Option<String>,
@@ -404,6 +432,8 @@ struct PairCard {
     decision: String,
     /// 0–5
     stars: i64,
+    /// 色标：'' / red / yellow / green / blue / purple
+    color: String,
     /// 画面分析。NULL = 还没分析过——后台分析是扫描之后才跑的，
     /// 刚扫完的库里大部分都是 NULL，前端要能正常显示而不是当成 0。
     sharpness: Option<f64>,
@@ -451,6 +481,8 @@ struct LibraryFacets {
     decisions: Vec<Facet>,
     /// 星级：未打星 / 1★…5★
     stars: Vec<Facet>,
+    /// 色标：红 / 黄 / 绿 / 蓝 / 紫。顺序与 `COLOR_KEYS` 一致。
+    colors: Vec<Facet>,
     /// 画面质量：可能糊了 / 高光溢出 / 暗部死黑。分析还没跑完时计数偏小，
     /// 这是正常的——跑完一趟再打开侧栏就补齐了。
     quality: Vec<Facet>,
@@ -589,6 +621,13 @@ fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
         args.push(Value::Integer(s.clamp(0, 5)));
     }
 
+    // 色标。认不出来的值按「不筛」处理，理由同 decision：
+    // 传错一个字符串导致条件被悄悄丢掉，比明确报错更难查。
+    if let Some(c) = normalize_color(f.color.as_deref()) {
+        conds.push(format!("{COLOR} = ?"));
+        args.push(Value::Text(c));
+    }
+
     if let Some(l) = f.lens.as_deref().filter(|s| !s.is_empty()) {
         if l == NONE_KEY {
             conds.push("p.lens IS NULL".to_string());
@@ -716,7 +755,7 @@ fn query_pairs(
                 p.camera_model, p.camera_serial,
                 p.lens, p.focal_len, p.aperture, p.shutter, p.iso,
                 p.file_size, p.decode_path,
-                {DECISION}, {STARS},
+                {DECISION}, {STARS}, {COLOR},
                 p.sharpness, p.overexposed, p.underexposed, p.faces, p.eye_ratio
          {FROM_PHOTOS}
          WHERE {where_sql}
@@ -756,11 +795,12 @@ fn query_pairs(
             decode_path: r.get(16)?,
             decision: r.get(17)?,
             stars: r.get(18)?,
-            sharpness: r.get(19)?,
-            overexposed: r.get(20)?,
-            underexposed: r.get(21)?,
-            faces: r.get(22)?,
-            eye_ratio: r.get(23)?,
+            color: r.get(19)?,
+            sharpness: r.get(20)?,
+            overexposed: r.get(21)?,
+            underexposed: r.get(22)?,
+            faces: r.get(23)?,
+            eye_ratio: r.get(24)?,
         })
     })?;
 
@@ -847,6 +887,8 @@ struct PhotoDetail {
     phash: Option<String>,
     decision: String,
     stars: i64,
+    /// 色标：'' / red / yellow / green / blue / purple
+    color: String,
     /// 闭眼检测：检出的人脸数，NULL = 还没检测过
     faces: Option<i64>,
     /// 最闭的那只眼睛的 EAR
@@ -865,7 +907,7 @@ fn photo_detail_of(conn: &Connection, id: i64) -> anyhow::Result<PhotoDetail> {
                 strftime('%Y-%m-%d %H:%M:%S', p.indexed_at, 'unixepoch', 'localtime'),
                 p.sharpness, p.overexposed, p.underexposed, p.decode_path,
                 p.fingerprint, p.content_hash, p.phash,
-                {DECISION}, {STARS}, p.faces, p.eye_ratio
+                {DECISION}, {STARS}, {COLOR}, p.faces, p.eye_ratio
          {FROM_PHOTOS} WHERE p.id = ?1"
     );
 
@@ -900,8 +942,9 @@ fn photo_detail_of(conn: &Connection, id: i64) -> anyhow::Result<PhotoDetail> {
             phash: r.get(25)?,
             decision: r.get(26)?,
             stars: r.get(27)?,
-            faces: r.get(28)?,
-            eye_ratio: r.get(29)?,
+            color: r.get(28)?,
+            faces: r.get(29)?,
+            eye_ratio: r.get(30)?,
             file_name: String::new(),
             dir: String::new(),
             siblings: Vec::new(),
@@ -1258,6 +1301,30 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         }
     }
 
+    // 色标分面同样固定给出全部五档：位置记住了眼睛才不用重新找，
+    // 理由与星级那六档一样。
+    let mut colors = COLOR_KEYS
+        .iter()
+        .map(|(key, label)| Facet {
+            key: (*key).into(),
+            label: (*label).into(),
+            count: 0,
+        })
+        .collect::<Vec<_>>();
+    {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLOR} AS c, COUNT(*) {FROM_PHOTOS}
+             WHERE p.is_primary = 1{scope} GROUP BY c"
+        ))?;
+        let mut rows = stmt.query(sp())?;
+        while let Some(r) = rows.next()? {
+            let c: String = r.get(0)?;
+            if let Some(slot) = colors.iter_mut().find(|f| f.key == c) {
+                slot.count = r.get(1)?;
+            }
+        }
+    }
+
     // 画面质量：四档一次数完。没分析过的（NULL）不算进来，
     // 否则刚扫完就显示「几千张糊了」——那是还没算，不是糊。
     // 「疑似闭眼」同理：检测默认关着，没跑过就是 0，不是「没人眨眼」。
@@ -1369,6 +1436,7 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         days,
         decisions,
         stars,
+        colors,
         quality,
         lenses,
         focals,
@@ -1444,6 +1512,7 @@ fn apply_decision_rows(
     ids: &[i64],
     decision: Option<&str>,
     stars: Option<i64>,
+    color: Option<&str>,
 ) -> anyhow::Result<usize> {
     if ids.is_empty() {
         return Ok(0);
@@ -1451,6 +1520,12 @@ fn apply_decision_rows(
 
     let decision = normalize_decision(decision);
     let stars = stars.map(|s| s.clamp(0, 5));
+    // 一个字段要表达三种意图（设 / 清 / 不动），所以空串是有意义的取值：
+    // Some("") = 清掉色标，None = 别动色标。图省事把空串折成 None 就永远清不掉。
+    let color = match color {
+        Some(c) => normalize_color(Some(c)).or(Some(String::new())),
+        None => None,
+    };
     let now = now_epoch();
 
     let tx = conn.transaction()?;
@@ -1475,15 +1550,16 @@ fn apply_decision_rows(
 
     {
         let mut up = tx.prepare(
-            "INSERT INTO decisions(pair_key, decision, stars, updated_at)
-             VALUES(?1, COALESCE(?2, 'none'), COALESCE(?3, 0), ?4)
+            "INSERT INTO decisions(pair_key, decision, stars, color, updated_at)
+             VALUES(?1, COALESCE(?2, 'none'), COALESCE(?3, 0), COALESCE(?4, ''), ?5)
              ON CONFLICT(pair_key) DO UPDATE SET
                decision   = COALESCE(?2, decisions.decision),
                stars      = COALESCE(?3, decisions.stars),
-               updated_at = ?4",
+               color      = COALESCE(?4, decisions.color),
+               updated_at = ?5",
         )?;
         for key in &keys {
-            up.execute(rusqlite::params![key, decision, stars, now])?;
+            up.execute(rusqlite::params![key, decision, stars, color, now])?;
         }
     }
 
@@ -1498,12 +1574,19 @@ async fn apply_decision(
     ids: Vec<i64>,
     decision: Option<String>,
     stars: Option<i64>,
+    color: Option<String>,
 ) -> Result<usize, String> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
         let mut conn = db.lock().map_err(|e| e.to_string())?;
-        apply_decision_rows(&mut conn, &ids, decision.as_deref(), stars)
-            .map_err(|e| format!("{e:#}"))
+        apply_decision_rows(
+            &mut conn,
+            &ids,
+            decision.as_deref(),
+            stars,
+            color.as_deref(),
+        )
+        .map_err(|e| format!("{e:#}"))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -3079,6 +3162,25 @@ mod tests {
         }
     }
 
+    /// 只看色标。
+    fn by_color(color: Option<&str>) -> PairFilter {
+        PairFilter {
+            color: color.map(|s| s.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn stored_color(conn: &Arc<Mutex<Connection>>, pair_key: &str) -> String {
+        conn.lock()
+            .unwrap()
+            .query_row(
+                "SELECT color FROM decisions WHERE pair_key = ?1",
+                [pair_key],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap_or_else(|_| String::new())
+    }
+
     fn stored(conn: &Arc<Mutex<Connection>>, pair_key: &str) -> (String, i64) {
         conn.lock()
             .unwrap()
@@ -3100,7 +3202,14 @@ mod tests {
         let card = first_card(&conn);
         let key = card.pair_key.clone();
 
-        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("keep"), Some(3)).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            Some("keep"),
+            Some(3),
+            None,
+        )
+        .unwrap();
 
         // 直接看这个 pair 底下**每一个文件**拿到的状态
         let guard = conn.lock().unwrap();
@@ -3146,7 +3255,7 @@ mod tests {
         assert_eq!(ids.len(), 2);
 
         assert_eq!(
-            apply_decision_rows(&mut conn.lock().unwrap(), &ids, Some("keep"), None).unwrap(),
+            apply_decision_rows(&mut conn.lock().unwrap(), &ids, Some("keep"), None, None).unwrap(),
             1,
             "同一张照片的两个文件应当合并成一次决定"
         );
@@ -3169,6 +3278,7 @@ mod tests {
             &[card.id],
             Some("reject"),
             Some(2),
+            None,
         )
         .unwrap();
         assert_eq!(stored(&conn, &key), ("reject".to_string(), 2));
@@ -3194,9 +3304,16 @@ mod tests {
         let (dir, conn) = seeded("starspatch");
         let card = first_card(&conn);
 
-        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("keep"), None).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            Some("keep"),
+            None,
+            None,
+        )
+        .unwrap();
         // decision 传 None ＝ 这一项不改
-        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], None, Some(5)).unwrap();
+        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], None, Some(5), None).unwrap();
 
         assert_eq!(
             stored(&conn, &card.pair_key),
@@ -3213,10 +3330,124 @@ mod tests {
         let (dir, conn) = seeded("clearpatch");
         let card = first_card(&conn);
 
-        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("keep"), Some(4)).unwrap();
-        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("none"), Some(0)).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            Some("keep"),
+            Some(4),
+            None,
+        )
+        .unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            Some("none"),
+            Some(0),
+            None,
+        )
+        .unwrap();
 
         assert_eq!(stored(&conn, &card.pair_key), ("none".to_string(), 0));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 色标和决定、星级互相独立：改一个不该动另外两个。
+    #[test]
+    fn color_is_independent_of_decision_and_stars() {
+        let (dir, conn) = seeded("colorsolo");
+        let card = first_card(&conn);
+
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            Some("keep"),
+            Some(2),
+            Some("red"),
+        )
+        .unwrap();
+        assert_eq!(stored_color(&conn, &card.pair_key), "red");
+        assert_eq!(stored(&conn, &card.pair_key), ("keep".to_string(), 2));
+
+        // decision / stars 传 None ＝ 这两项不动，只换色标
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            None,
+            None,
+            Some("green"),
+        )
+        .unwrap();
+        assert_eq!(stored_color(&conn, &card.pair_key), "green", "只改色标");
+        assert_eq!(
+            stored(&conn, &card.pair_key),
+            ("keep".to_string(), 2),
+            "改色标不该顺手把决定和星级清掉"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 「清掉色标」必须真的清掉。一个字段要表达设 / 清 / 不动三种意图，
+    /// 最容易出的错就是把 Some("") 折成 None，结果永远清不掉。
+    #[test]
+    fn color_can_be_cleared_without_touching_other_marks() {
+        let (dir, conn) = seeded("colorclear");
+        let card = first_card(&conn);
+
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            Some("keep"),
+            Some(3),
+            Some("purple"),
+        )
+        .unwrap();
+        // 色标要能单独筛出来
+        assert_eq!(count(&conn, by_color(Some("purple"))), 1);
+        assert_eq!(count(&conn, by_color(Some("red"))), 0);
+
+        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], None, None, Some("")).unwrap();
+        assert_eq!(
+            stored_color(&conn, &card.pair_key),
+            "",
+            "传空串要真的把色标清掉"
+        );
+        assert_eq!(
+            stored(&conn, &card.pair_key),
+            ("keep".to_string(), 3),
+            "清色标不该动决定和星级"
+        );
+        assert_eq!(count(&conn, by_color(Some("purple"))), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 色标认值走白名单：写脏数据不能让这张照片在 UI 上变得筛不到。
+    #[test]
+    fn unknown_color_values_are_ignored() {
+        let (dir, conn) = seeded("colorjunk");
+        let card = first_card(&conn);
+
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            None,
+            None,
+            Some("chartreuse"),
+        )
+        .unwrap();
+        assert_eq!(stored_color(&conn, &card.pair_key), "", "认不出就当没标");
+
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            None,
+            None,
+            Some("Red"),
+        )
+        .unwrap();
+        assert_eq!(stored_color(&conn, &card.pair_key), "red", "大小写不敏感");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3227,12 +3458,20 @@ mod tests {
         let page = cards(&conn, PairFilter::default());
         assert_eq!(page.len(), 3);
 
-        apply_decision_rows(&mut conn.lock().unwrap(), &[page[0].id], Some("keep"), None).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[page[0].id],
+            Some("keep"),
+            None,
+            None,
+        )
+        .unwrap();
         apply_decision_rows(
             &mut conn.lock().unwrap(),
             &[page[1].id],
             Some("reject"),
             Some(4),
+            None,
         )
         .unwrap();
 
@@ -3272,7 +3511,7 @@ mod tests {
         assert_eq!(ids.len(), 3);
 
         assert_eq!(
-            apply_decision_rows(&mut conn.lock().unwrap(), &ids, Some("keep"), None).unwrap(),
+            apply_decision_rows(&mut conn.lock().unwrap(), &ids, Some("keep"), None, None).unwrap(),
             3
         );
         assert_eq!(count(&conn, by_mark(Some("keep"), None)), 3);
@@ -3280,7 +3519,8 @@ mod tests {
 
         // 空列表不该报错，也不该把谁标上
         assert_eq!(
-            apply_decision_rows(&mut conn.lock().unwrap(), &[], Some("reject"), None).unwrap(),
+            apply_decision_rows(&mut conn.lock().unwrap(), &[], Some("reject"), None, None)
+                .unwrap(),
             0
         );
         assert_eq!(count(&conn, by_mark(Some("reject"), None)), 0);
@@ -3297,6 +3537,7 @@ mod tests {
             &[page[0].id],
             Some("keep"),
             Some(4),
+            None,
         )
         .unwrap();
 
@@ -3438,7 +3679,14 @@ mod tests {
         .unwrap()
         .items
         .remove(0);
-        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("keep"), Some(5)).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            Some("keep"),
+            Some(5),
+            None,
+        )
+        .unwrap();
 
         let dest = temp_dir("export-dest");
         let filter = by_mark(Some("keep"), None);
@@ -3489,7 +3737,14 @@ mod tests {
     fn list_only_mode_touches_no_files() {
         let (src_dir, conn) = seeded("export-list");
         let card = first_card(&conn);
-        apply_decision_rows(&mut conn.lock().unwrap(), &[card.id], Some("keep"), None).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[card.id],
+            Some("keep"),
+            None,
+            None,
+        )
+        .unwrap();
 
         let dest = temp_dir("export-list-dest");
         let s = export_rows(
@@ -3842,9 +4097,17 @@ mod tests {
             &[page[0].id],
             Some("reject"),
             None,
+            None,
         )
         .unwrap();
-        apply_decision_rows(&mut conn.lock().unwrap(), &[page[1].id], Some("keep"), None).unwrap();
+        apply_decision_rows(
+            &mut conn.lock().unwrap(),
+            &[page[1].id],
+            Some("keep"),
+            None,
+            None,
+        )
+        .unwrap();
 
         let snapshot = |dir: &std::path::Path| -> Vec<(String, u64)> {
             let mut v: Vec<(String, u64)> = std::fs::read_dir(dir)

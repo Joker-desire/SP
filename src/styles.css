@@ -32,6 +32,14 @@
   --keep-soft: rgba(78, 203, 122, 0.16);
   --reject: #ff7a7a;
   --reject-soft: rgba(255, 122, 122, 0.16);
+
+  /* 色标。五个色相要在一屏里一眼分得开，所以按色相均匀铺开而不是挑好看的颜色；
+     饱和度压在中间——太艳会盖过照片本身，太灰就分不出来次。 */
+  --c-red: #f2606a;
+  --c-yellow: #e8b93c;
+  --c-green: #46c877;
+  --c-blue: #4aa3f0;
+  --c-purple: #a074e8;
 }
 
 /* ---------- 深色（默认，摄影工具的常规选择：照片在黑底上更准） ---------- */
@@ -83,6 +91,13 @@
   --keep-soft: rgba(31, 143, 77, 0.12);
   --reject: #c8383c;
   --reject-soft: rgba(200, 56, 60, 0.1);
+
+  /* 浅底上的色标往下压一档明度，否则白底下颜色会发飘、相邻两色糊在一起 */
+  --c-red: #cf3040;
+  --c-yellow: #a97400;
+  --c-green: #1f8f4d;
+  --c-blue: #1f6feb;
+  --c-purple: #7a35cf;
 }
 
 * {
@@ -1380,6 +1395,41 @@ select {
   pointer-events: none;
 }
 
+/* 色标条。竖在卡片最左边的一条，和星级分开画——
+   两个维度经常同时有用，叠在一起就分不清哪个是哪个了。 */
+.card-color {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  border-radius: var(--radius) 0 0 var(--radius);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.card-color[data-color="red"] {
+  background: var(--c-red);
+}
+.card-color[data-color="yellow"] {
+  background: var(--c-yellow);
+}
+.card-color[data-color="green"] {
+  background: var(--c-green);
+}
+.card-color[data-color="blue"] {
+  background: var(--c-blue);
+}
+.card-color[data-color="purple"] {
+  background: var(--c-purple);
+}
+
+/* 又踩同一个坑：自定义 display 会盖掉 [hidden] 的 display:none。
+   凡是自己写了 display 的类，都要补一条 [hidden] 才藏得住。 */
+.card-color[hidden] {
+  display: none;
+}
+
 .card[data-decision="keep"] {
   box-shadow: inset 0 0 0 2px var(--keep);
 }
@@ -1575,6 +1625,33 @@ kbd {
   letter-spacing: 0.08em;
 }
 
+/* 侧栏色标：色块要在「没标色」和「标了色」两种状态下都看得出来。
+   计数为 0 时整块淡掉，避免一排五个色块把侧栏变成调色板。 */
+.facet-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  margin-right: 6px;
+  background: currentColor;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+.facet-swatch[data-color="red"] {
+  color: var(--c-red);
+}
+.facet-swatch[data-color="yellow"] {
+  color: var(--c-yellow);
+}
+.facet-swatch[data-color="green"] {
+  color: var(--c-green);
+}
+.facet-swatch[data-color="blue"] {
+  color: var(--c-blue);
+}
+.facet-swatch[data-color="purple"] {
+  color: var(--c-purple);
+}
+
 /* ---------- 大图里的标记按钮 ---------- */
 
 /* 放大后图片会铺满整个视口，这一排必须压在图上、并且自带底衬才看得清——
@@ -1660,6 +1737,58 @@ kbd {
 .loupe-stars button.is-clear {
   font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 大图里的色标按钮。做成五个小圆点而不是五个字：
+   一排「红黄绿蓝紫」五个字会把操作栏撑宽，颜色块更能一眼认出是哪一个。 */
+.loupe-colors {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px 5px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* 按钮里的「红/黄/…」是给读屏器和 title 用的，眼睛看的是色块本身——
+   所以字号压到 0（文字不可见但仍在无障碍树里），靠背景色区分。 */
+.loupe-colors button {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  font-size: 0;
+  cursor: pointer;
+  opacity: 0.35;
+  transition: opacity 0.12s, border-color 0.12s, transform 0.12s;
+}
+
+.loupe-colors button[data-color="red"] {
+  background: var(--c-red);
+}
+.loupe-colors button[data-color="yellow"] {
+  background: var(--c-yellow);
+}
+.loupe-colors button[data-color="green"] {
+  background: var(--c-green);
+}
+.loupe-colors button[data-color="blue"] {
+  background: var(--c-blue);
+}
+.loupe-colors button[data-color="purple"] {
+  background: var(--c-purple);
+}
+
+/* 未选中的淡下去：五个饱和色常驻会比照片本身还抢眼 */
+.loupe-colors button:hover {
+  opacity: 0.75;
+}
+
+.loupe-colors button.is-active {
+  opacity: 1;
+  border-color: rgba(255, 255, 255, 0.85);
+  transform: scale(1.18);
 }
 
 .loupe-mark {

@@ -188,6 +188,11 @@
             <div class="facet-list facet-list--stars" id="facets-stars"></div>
           </section>
 
+          <section class="facet-group">
+            <h3 class="facet-title">色标</h3>
+            <div class="facet-list facet-list--colors" id="facets-colors"></div>
+          </section>
+
           <section class="facet-group" id="group-quality" hidden>
             <h3 class="facet-title">
               画面质量
@@ -448,6 +453,16 @@
             <button type="button" data-stars="0" class="is-clear" title="清除星级（快捷键 0）">0</button>
           </div>
 
+          <!-- 色标同理做成可点的：键盘 6-9 和减号能按，鼠标这边也要能点。
+               再点一次同一个色＝取消，和键盘一个规矩 -->
+          <div class="loupe-colors" id="loupe-colors" role="group" aria-label="色标">
+            <button type="button" data-color="red" title="红 6">红<kbd>6</kbd></button>
+            <button type="button" data-color="yellow" title="黄 7">黄<kbd>7</kbd></button>
+            <button type="button" data-color="green" title="绿 8">绿<kbd>8</kbd></button>
+            <button type="button" data-color="blue" title="蓝 9">蓝<kbd>9</kbd></button>
+            <button type="button" data-color="purple" title="紫 减号键">紫<kbd>-</kbd></button>
+          </div>
+
           <span class="loupe-mark" id="loupe-mark"></span>
         </div>
 
@@ -455,7 +470,7 @@
           <span class="loupe-name" id="loupe-name"></span>
           <span class="loupe-exif" id="loupe-exif"></span>
           <span class="loupe-pos" id="loupe-pos"></span>
-          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · I 详情 · O 对焦点 · B 闭眼 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
+          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · 0 清星 · 6-9 与 - 色标 · I 详情 · O 对焦点 · B 闭眼 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
           <button class="btn btn-ghost loupe-close" id="loupe-close">关闭</button>
         </div>
       </div>

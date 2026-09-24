@@ -140,28 +140,33 @@ fn open_inner(path: &Path) -> Result<Connection> {
 /// 给老库补新列。`CREATE TABLE IF NOT EXISTS` 对已经存在的表毫无作用，
 /// 所以后来加的每一列都得在这里显式补一次——否则升级上来的库会一直缺列，
 /// 表现为「功能明明写了，就是没数据」，而且只在老用户机器上出现。
+/// 签名是 (表名, 列名, 类型)。之前这里只有 photos 一列特殊情况所以写死表名，
+/// 现在 decisions 也要升级 —— 凡是加了字段就得在这儿登记一次。
 fn add_missing_columns(conn: &Connection) {
-    let wanted: &[(&str, &str)] = &[
-        ("sharpness", "REAL"),
-        ("overexposed", "REAL"),
-        ("underexposed", "REAL"),
+    let wanted: &[(&str, &str, &str)] = &[
+        ("photos", "sharpness", "REAL"),
+        ("photos", "overexposed", "REAL"),
+        ("photos", "underexposed", "REAL"),
         // 闭眼检测（见 blink.rs）。faces = 检出的人脸数，eye_ratio = 最闭的那只眼的 EAR。
         // 两个都是 NULL 表示还没轮到这张；faces = 0 表示查过了、画面里没有脸。
-        ("faces", "INTEGER"),
-        ("eye_ratio", "REAL"),
+        ("photos", "faces", "INTEGER"),
+        ("photos", "eye_ratio", "REAL"),
+        // 色标。空串表示没标。老库升级上来的人以前的保留 / 星级一个都不会少。
+        ("decisions", "color", "TEXT NOT NULL DEFAULT ''"),
     ];
-    for (col, ty) in wanted {
+    for (table, col, ty) in wanted {
         let exists: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('photos') WHERE name = ?1",
-                [col],
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                rusqlite::params![table, col],
                 |r| r.get(0),
             )
             .unwrap_or(0);
         if exists == 0 {
-            // 补列失败不该让整个库打不开：分析结果只是加分项
-            if let Err(e) = conn.execute(&format!("ALTER TABLE photos ADD COLUMN {col} {ty}"), []) {
-                eprintln!("提示：未能给 photos 补上 {col} 列（{e}）");
+            // 补列失败不该让整个库打不开：分析结果和色标都只是加分项
+            if let Err(e) = conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {ty}"), [])
+            {
+                eprintln!("提示：未能给 {table} 补上 {col} 列（{e}）");
             }
         }
     }
@@ -272,10 +277,12 @@ CREATE TABLE IF NOT EXISTS decisions (
   pair_key   TEXT PRIMARY KEY,
   decision   TEXT NOT NULL DEFAULT 'none',   -- none / keep / reject
   stars      INTEGER NOT NULL DEFAULT 0,     -- 0–5
+  color      TEXT NOT NULL DEFAULT '',       -- 色标：''/red/yellow/green/blue/purple
   updated_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_decisions_decision ON decisions(decision);
+CREATE INDEX IF NOT EXISTS idx_decisions_color ON decisions(color);
 
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,

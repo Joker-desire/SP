@@ -61,6 +61,8 @@ interface PairCard {
   decision: Decision;
   /** 0–5 */
   stars: number;
+  /** 色标。空串＝没标。 */
+  color: string;
   /** 画面分析。null＝还没分析过（后台分析是扫描之后才跑的） */
   sharpness: number | null;
   overexposed: number | null;
@@ -113,6 +115,46 @@ interface AnalyzeSummary {
 
 type Decision = "none" | "keep" | "reject";
 
+/**
+ * 一次标记动作能改的东西。三个字段都可以缺席——缺席表示「这一项不动」，
+ * 所以「只改色标」不会顺手把决定和星级清掉，撤销时也能只还原动过的那一项。
+ */
+interface Patch {
+  decision?: Decision;
+  /** 0–5。0 是「清除星级」，要写库。 */
+  stars?: number;
+  /** red / yellow / green / blue / purple；空串＝清除色标。 */
+  color?: string;
+}
+
+/**
+ * 色标。五星 martial 之外的第二条「标记轴」——PC 上不详述：同一批里
+ * 「要修的」「要发的」「给客户看的」常常重叠，星级一旦被用去表示去留，
+ * 就再也表达不了批次了。色标颜色本身不表意，你定它是什么意思。
+ *
+ * 键位上没有第五个数字可用了 —— `0` 已经是「清除星级」，`1`-`5` 是星级，
+ * 所以紫色挂在减号上（就在 `0` 右边，位置上是第五个）。再按一次同一个键＝取消该色标。
+ *
+ * 后端 lib.rs 里有一份对应的 `COLOR_KEYS`，改任一边都要通知另一边。
+ */
+interface ColorDef {
+  key: string;
+  label: string;
+  hot: string;
+}
+const COLORS: ColorDef[] = [
+  { key: "red", label: "红", hot: "6" },
+  { key: "yellow", label: "黄", hot: "7" },
+  { key: "green", label: "绿", hot: "8" },
+  { key: "blue", label: "蓝", hot: "9" },
+  { key: "purple", label: "紫", hot: "-" },
+];
+const findColor = (key: string): ColorDef | undefined => COLORS.find((c) => c.key === key);
+
+/** 按键落在哪个色标上。返回 undefined 表示这个键跟色标无关。 */
+const colorKeyFor = (key: string): string | undefined =>
+  COLORS.find((c) => c.hot === key)?.key;
+
 interface PairPage {
   items: PairCard[];
   total: number;
@@ -144,6 +186,8 @@ interface LibraryFacets {
   daysTruncated: boolean;
   decisions: Facet[];
   stars: Facet[];
+  /** 色标：红 / 黄 / 绿 / 蓝 / 紫。顺序决定 6-0 五个键的排布。 */
+  colors: Facet[];
   /** 画面质量：blur / over / under。后端还没分析过时三项计数都是 0。 */
   quality: Facet[];
   /** 镜头：有几种列几种；ISO 与焦段是固定档位，计数为 0 也会出现。 */
@@ -218,6 +262,8 @@ interface FilterState {
   decision: string;
   /** null＝不筛。注意和 0（只要没打星的）是两码事。 */
   stars: number | null;
+  /** 色标：null＝不筛；'' 是「只要没标色的」，同样和 null 两码事。 */
+  color: string | null;
   /** 画面质量：null / blur / over / under */
   quality: string | null;
   /** 镜头型号，null＝不筛 */
@@ -269,6 +315,7 @@ const elCache = $<HTMLButtonElement>("#btn-cache");
 
 const elFacetsDecision = $<HTMLElement>("#facets-decision");
 const elFacetsStars = $<HTMLElement>("#facets-stars");
+const elFacetsColors = $<HTMLElement>("#facets-colors");
 const elFacetsPair = $<HTMLElement>("#facets-pair");
 const elFacetsQuality = $<HTMLElement>("#facets-quality");
 const elFacetsLens = $<HTMLElement>("#facets-lens");
@@ -358,6 +405,7 @@ const elLoupeDetailClose = $<HTMLButtonElement>("#loupe-detail-close");
 const elLoupeDetailBody = $<HTMLElement>("#loupe-detail-body");
 const elLoupeMark = $<HTMLElement>("#loupe-mark");
 const elLoupeStars = $<HTMLElement>("#loupe-stars");
+const elLoupeColors = $<HTMLElement>("#loupe-colors");
 const elLoupeZoomLabel = $<HTMLButtonElement>("#loupe-zoom-reset");
 const elLoupeZoomIn = $<HTMLButtonElement>("#loupe-zoom-in");
 const elLoupeZoomOut = $<HTMLButtonElement>("#loupe-zoom-out");
@@ -509,6 +557,8 @@ interface UndoItem {
   id: number;
   decision: Decision | null;
   stars: number | null;
+  /** 色标。null＝这一项当时没动过，撤销时别碰它。空串是有意义的取值（清掉了）。 */
+  color: string | null;
 }
 interface UndoEntry {
   label: string;
@@ -530,6 +580,7 @@ const filter: FilterState = {
   day: null,
   decision: "all",
   stars: null,
+  color: null,
   quality: null,
   lens: null,
   focal: null,
@@ -802,6 +853,12 @@ function cardEl(c: PairCard): HTMLElement {
   const mark = document.createElement("span");
   mark.className = "card-mark";
 
+  // 色标条。贴在最左边竖着一条，不和星级抢地方——
+  // 两个维度同时看时才有用，叠在一起就分不清了。
+  const stripe = document.createElement("span");
+  stripe.className = "card-color";
+  stripe.hidden = true;
+
   const overlay = document.createElement("div");
   overlay.className = "card-overlay";
 
@@ -834,7 +891,7 @@ function cardEl(c: PairCard): HTMLElement {
   }
   overlay.append(foot, sub);
 
-  card.append(ph, img, mark, overlay);
+  card.append(ph, img, mark, stripe, overlay);
 
   // 徽标只给「配对不完整」的照片——正常照片不该被任何标签打扰
   const broken = BROKEN_LABEL[c.pairState];
@@ -878,6 +935,14 @@ function paintCard(card: HTMLElement, c: PairCard) {
   const stars = card.querySelector<HTMLElement>(".card-stars");
   if (stars) {
     stars.textContent = c.stars > 0 ? "★".repeat(c.stars) : "";
+  }
+
+  const stripe = card.querySelector<HTMLElement>(".card-color");
+  if (stripe) {
+    stripe.hidden = c.color === "";
+    stripe.dataset.color = c.color;
+    const def = c.color ? findColor(c.color) : undefined;
+    stripe.title = def ? `${def.label}色标 —— 按 ${def.hot} 可取消` : "";
   }
 }
 
@@ -983,6 +1048,7 @@ function currentFilterPayload() {
     // 「全部」在后端是不筛，用一个空值表达最清楚
     decision: filter.decision === "all" ? null : filter.decision,
     stars: filter.stars,
+    color: filter.color,
     quality: filter.quality,
     lens: filter.lens,
     focal: filter.focal,
@@ -1001,6 +1067,7 @@ function isFiltered(): boolean {
     filter.day !== null ||
     filter.decision !== "all" ||
     filter.stars !== null ||
+    filter.color !== null ||
     filter.quality !== null ||
     filter.lens !== null ||
     filter.focal !== null ||
@@ -1016,7 +1083,7 @@ function isFiltered(): boolean {
  * 一屏一屏地清空）。没有依赖时就不动它，免得照片毫无理由地跳走。
  */
 function filterTracksMarks(): boolean {
-  return filter.decision !== "all" || filter.stars !== null;
+  return filter.decision !== "all" || filter.stars !== null || filter.color !== null;
 }
 
 /**
@@ -1498,6 +1565,25 @@ function renderDecisionFacets(f: LibraryFacets) {
   }
 }
 
+function renderColorFacets(f: LibraryFacets) {
+  elFacetsColors.innerHTML = "";
+  for (const it of f.colors) {
+    const swatch = document.createElement("span");
+    swatch.className = "facet-swatch";
+    swatch.dataset.color = it.key;
+    elFacetsColors.appendChild(
+      facetButton({
+        facet: "color",
+        key: it.key,
+        label: it.label,
+        count: it.count,
+        active: filter.color === it.key,
+        extra: swatch,
+      })
+    );
+  }
+}
+
 function renderStarFacets(f: LibraryFacets) {
   elFacetsStars.innerHTML = "";
   for (const it of f.stars) {
@@ -1679,6 +1765,7 @@ function renderFacetsEmpty() {
   for (const host of [
     elFacetsDecision,
     elFacetsStars,
+    elFacetsColors,
     elFacetsPair,
     elFacetsCameras,
     elFacetsDays,
@@ -1713,6 +1800,7 @@ async function loadFacets() {
 
   renderDecisionFacets(f);
   renderStarFacets(f);
+  renderColorFacets(f);
   renderPairFacets(f);
   renderCameraFacets(f);
   renderDayFacets(f);
@@ -1735,6 +1823,7 @@ async function refreshFacetCounts() {
     updateCullProgress(f);
     renderDecisionFacets(f);
     renderStarFacets(f);
+    renderColorFacets(f);
   } catch {
     /* 计数刷不上不影响标记本身 */
   }
@@ -1765,6 +1854,9 @@ document.querySelector(".sidebar")?.addEventListener("click", (e) => {
   } else if (facet === "stars") {
     const n = Number(key);
     filter.stars = filter.stars === n ? null : n;
+  } else if (facet === "color") {
+    // 色标这一栏点两次也回到「不限」——没有单独的「全部」按钮，只能靠再点一次
+    filter.color = key === filter.color ? null : key;
   } else if (facet === "quality") {
     filter.quality = key === filter.quality ? null : key;
   } else if (facet === "lens") {
@@ -1791,6 +1883,7 @@ function resetFilter() {
   filter.day = null;
   filter.decision = "all";
   filter.stars = null;
+  filter.color = null;
   filter.quality = null;
   filter.lens = null;
   filter.focal = null;
@@ -2011,6 +2104,7 @@ function stillMatches(c: PairCard): boolean {
     return false;
   }
   if (filter.stars !== null && c.stars !== filter.stars) return false;
+  if (filter.color !== null && c.color !== filter.color) return false;
   return true;
 }
 
@@ -2074,7 +2168,7 @@ function fillIfNeeded() {
  * 应用一次标记。`patch` 里没给的项就不动——
  * 这样「只改星级」不会把已经做好的保留/淘汰决定冲掉。
  */
-async function applyPatch(patch: { decision?: Decision; stars?: number }, idsOverride?: number[]) {
+async function applyPatch(patch: Patch, idsOverride?: number[]) {
   // idsOverride：批量标记时直接由调用方给全量 id（含还没滚出来的那些），
   // 不走「当前选中」那一套
   const bulk = idsOverride !== undefined;
@@ -2089,11 +2183,11 @@ async function applyPatch(patch: { decision?: Decision; stars?: number }, idsOve
   const anchorIdx = items.findIndex((c) => c.id === ids[0]);
 
   // ---- 乐观更新：先把画面改对，再等数据库确认 ----
-  const backup: Array<{ c: PairCard; decision: Decision; stars: number }> = [];
+  const backup: Array<{ c: PairCard; decision: Decision; stars: number; color: string }> = [];
   for (const id of ids) {
     const c = itemById.get(id);
     if (!c) continue;
-    backup.push({ c, decision: c.decision, stars: c.stars });
+    backup.push({ c, decision: c.decision, stars: c.stars, color: c.color });
 
     if (patch.decision !== undefined) {
       c.decision = patch.decision;
@@ -2101,6 +2195,7 @@ async function applyPatch(patch: { decision?: Decision; stars?: number }, idsOve
       if (patch.decision === "none") c.stars = 0;
     }
     if (patch.stars !== undefined) c.stars = patch.stars;
+    if (patch.color !== undefined) c.color = patch.color;
   }
   repaint(backup.map((b) => b.c.id));
 
@@ -2110,11 +2205,15 @@ async function applyPatch(patch: { decision?: Decision; stars?: number }, idsOve
       decision: patch.decision ?? null,
       // 「清除标记」连星级一起清（界面上就是这么显示的），不写库的话重载后星级会冒回来
       stars: patch.stars ?? (patch.decision === "none" ? 0 : null),
+      // 色标走不了「不传就不动」这条路：传 undefined 会被序列化丢掉，
+      // 前端 `patch.color` 为 undefined 时就是「别动」，所以这里显式给 null
+      color: patch.color ?? null,
     });
   } catch (e) {
     for (const b of backup) {
       b.c.decision = b.decision;
       b.c.stars = b.stars;
+      b.c.color = b.color;
     }
     repaint(backup.map((b) => b.c.id));
     setHint(`标记没能保存：${String(e)}`, "error");
@@ -2124,7 +2223,12 @@ async function applyPatch(patch: { decision?: Decision; stars?: number }, idsOve
   // 落库成功才进撤销栈：没写进去的操作撤销了也没意义
   pushUndo(
     labelForPatch(patch, ids.length),
-    backup.map((b) => ({ id: b.c.id, decision: b.decision, stars: b.stars })),
+    backup.map((b) => ({
+      id: b.c.id,
+      decision: b.decision,
+      stars: b.stars,
+      color: b.color,
+    })),
   );
 
   // 侧栏计数要立刻跟着动——「未标记」少一张是最直接的进度反馈
@@ -2212,6 +2316,17 @@ function applyStars(n: number) {
   void applyPatch({ stars: n });
 }
 
+/**
+ * 设色标。已经在同一个色标上的话就取消——不然「标错了」要眼睁睁看着它变回去还得按别的键。
+ * 一次可以在多选的一批上用，也可以在大图里用。
+ */
+function applyColor(key: string) {
+  // markTargets 在大图里就是眼前这一张，在网格里是选中的一批，不必分两套
+  const ids = markTargets();
+  const allSame = ids.length > 0 && ids.every((id) => itemById.get(id)?.color === key);
+  void applyPatch({ color: allSame ? "" : key });
+}
+
 // ---- 批量标记：对当前筛选出来的每一张 ----
 
 function closeBulkMenu() {
@@ -2248,7 +2363,7 @@ elBulkMenu.addEventListener("click", (e) => {
  * 走的是和单张标记同一条 apply_decision，所以撤销栈里记的是这一整批的旧值，
  * 一次 ⌘Z 全部退回；侧栏计数、进度也跟着动。
  */
-async function bulkMark(patch: { decision?: Decision; stars?: number }) {
+async function bulkMark(patch: Patch) {
   let ids: number[];
   try {
     ids = await allMatchingIds();
@@ -2266,13 +2381,18 @@ async function bulkMark(patch: { decision?: Decision; stars?: number }) {
 
 // ---- 撤销 ----
 
-function labelForPatch(patch: { decision?: Decision; stars?: number }, n: number): string {
+function labelForPatch(patch: Patch, n: number): string {
   const many = n > 1 ? ` ${n} 张` : "";
   if (patch.decision === "keep") return `保留${many}`;
   if (patch.decision === "reject") return `淘汰${many}`;
   if (patch.decision === "none") return `清除标记${many}`;
   if (patch.stars !== undefined) {
     return patch.stars > 0 ? `${patch.stars} 星${many}` : `清除星级${many}`;
+  }
+  if (patch.color !== undefined) {
+    return patch.color === ""
+      ? `清除色标${many}`
+      : `标${findColor(patch.color)?.label ?? patch.color}${many}`;
   }
   return `标记${many}`;
 }
@@ -2328,16 +2448,20 @@ async function moveStack(from: UndoEntry[], to: UndoEntry[], verb: string) {
       id: it.id,
       decision: it.decision !== null ? (c?.decision ?? null) : null,
       stars: it.stars !== null ? (c?.stars ?? null) : null,
+      color: it.color !== null ? (c?.color ?? null) : null,
     };
   });
 
   // 旧值相同的归成一批，一次调用写完——批量标记时不至于一张一个来回
-  const groups = new Map<string, { ids: number[]; decision: Decision | null; stars: number | null }>();
+  const groups = new Map<
+    string,
+    { ids: number[]; decision: Decision | null; stars: number | null; color: string | null }
+  >();
   for (const it of entry.before) {
-    const key = `${it.decision}|${it.stars}`;
+    const key = `${it.decision}|${it.stars}|${it.color}`;
     let g = groups.get(key);
     if (!g) {
-      g = { ids: [], decision: it.decision, stars: it.stars };
+      g = { ids: [], decision: it.decision, stars: it.stars, color: it.color };
       groups.set(key, g);
     }
     g.ids.push(it.id);
@@ -2349,6 +2473,7 @@ async function moveStack(from: UndoEntry[], to: UndoEntry[], verb: string) {
         ids: g.ids,
         decision: g.decision,
         stars: g.stars,
+        color: g.color,
       });
     }
   } catch (e) {
@@ -2373,6 +2498,8 @@ async function moveStack(from: UndoEntry[], to: UndoEntry[], verb: string) {
     }
     if (it.decision !== null) c.decision = it.decision;
     if (it.stars !== null) c.stars = it.stars;
+    // 注意不能用 truthy 判断：空串是「清掉了色标」这种有值的情况
+    if (it.color !== null) c.color = it.color;
   }
   repaint(entry.before.map((it) => it.id));
   void refreshFacetCounts();
@@ -2427,6 +2554,16 @@ elLoupeStars.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-stars]");
   if (!btn?.dataset.stars) return;
   applyStars(Number(btn.dataset.stars));
+});
+
+// 大图里的色标按钮。已经在那个色上就取消——点第二次是「撤销刚才那下」，
+// 否则取消只能靠别的键，手要多动一步。
+elLoupeColors.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-color]");
+  if (!btn?.dataset.color) return;
+  const key = btn.dataset.color;
+  const c = items[loupeIndex];
+  applyColor(c && c.color === key ? "" : key);
 });
 
 elBtnSelectAll.addEventListener("click", () => void selectAll());
@@ -2780,6 +2917,7 @@ async function pickInGroup(group: SimilarGroup, pickId: number) {
     id: m.id,
     decision: m.decision as Decision,
     stars: null,
+    color: null,
   }));
 
   // 先本地乐观更新，避免一张张闪
@@ -3799,12 +3937,19 @@ function paintLoupeMark(c: PairCard) {
   const bits: string[] = [];
   if (c.decision !== "none") bits.push(`已${DECISION_LABEL[c.decision]}`);
   if (c.stars > 0) bits.push("★".repeat(c.stars));
+  const colorDef = c.color ? findColor(c.color) : undefined;
+  if (colorDef) bits.push(`${colorDef.label}色标`);
   elLoupeMark.textContent = bits.join(" · ");
 
   // 点亮到当前星级为止的每一颗——点亮的数字本身也是可点的调整入口
   for (const b of elLoupeStars.querySelectorAll<HTMLButtonElement>("button[data-stars]")) {
     const n = Number(b.dataset.stars);
     b.classList.toggle("is-active", n > 0 && c.stars >= n);
+  }
+
+  // 当前色标那颗点亮：按下去有没有生效，一眼要能看出来
+  for (const b of elLoupeColors.querySelectorAll<HTMLButtonElement>("button[data-color]")) {
+    b.classList.toggle("is-active", b.dataset.color === c.color);
   }
 }
 
@@ -3853,6 +3998,8 @@ interface PhotoDetail {
   phash: string | null;
   decision: string;
   stars: number;
+  /** 色标：'' / red / … */
+  color: string;
   /** 闭眼检测：人脸数，null = 没检测过 */
   faces: number | null;
   /** 最闭的眼睛的 EAR */
@@ -4118,6 +4265,7 @@ function renderDetail(d: PhotoDetail) {
     collapsibleSection("选片与库内标识", [
       detailRow("选片状态", DECISION_LABEL[(d.decision as Decision) ?? "none"] ?? d.decision),
       detailRow("星级", d.stars > 0 ? "★".repeat(d.stars) : "未评分"),
+      detailRow("色标", d.color ? `${findColor(d.color)?.label ?? d.color}色标` : "无"),
       detailRow("入库时间", d.indexedText ?? ""),
       copyableRow("缩略图来源", d.decodePath ?? ""),
       copyableRow("pair_key", d.pairKey),
@@ -4500,6 +4648,12 @@ window.addEventListener("keydown", (e) => {
     if (/^[0-5]$/.test(key)) {
       e.preventDefault();
       applyStars(Number(key));
+      return;
+    }
+    const loupColor = colorKeyFor(key);
+    if (loupColor) {
+      e.preventDefault();
+      applyColor(loupColor);
     }
     return;
   }
@@ -4553,6 +4707,12 @@ window.addEventListener("keydown", (e) => {
   if (/^[0-5]$/.test(key)) {
     e.preventDefault();
     applyStars(Number(key));
+    return;
+  }
+  const gridColor = colorKeyFor(key);
+  if (gridColor) {
+    e.preventDefault();
+    applyColor(gridColor);
   }
 });
 
