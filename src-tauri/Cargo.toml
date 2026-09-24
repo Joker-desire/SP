@@ -1,6 +1,6 @@
 [package]
 name = "sp"
-version = "0.1.0"
+version = "0.2.0"
 description = "S·P —— 本地摄影选片工具"
 authors = ["Joker-desire"]
 license = "MIT"
