@@ -131,10 +131,89 @@ fn open_inner(path: &Path) -> Result<Connection> {
     }
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.execute_batch(SCHEMA)?;
-    add_missing_columns(&conn);
+    apply_schema(&conn)?;
     drop_empty_legacy_table(&conn);
     Ok(conn)
+}
+
+/// 按「先看清这个库是不是我们的 → 建表 → 补新列 → 建索引」的顺序应用 schema。
+///
+/// 两个顺序要求都不能动：
+///
+/// 1. `ensure_core_columns` 排在**写任何东西之前**。它不是普通的校验，而是「能不能碰这个库」
+///    的开关：判定不通过时后面一句都还没执行，文件一个字节都没被改过，
+///    上层才能理直气壮地说「原样保留、未做任何改动」。
+/// 2. `add_missing_columns` 排在**建索引之前**。它负责给老库补上后来才加的列，
+///    而索引里有可能引用这些列（现在 `idx_decisions_color` 就是）。
+///    把 CREATE INDEX 和 CREATE TABLE 写在同一批脚本里时，老库上 `CREATE TABLE IF NOT EXISTS`
+///    是空操作、索引却立刻要那一列 → 整批脚本失败 → 库打不开、应用退化成内存库兜底。
+///    之前犯过一次，症状是「界面提示本次不保存任何索引」，看着像数据丢了。
+fn apply_schema(conn: &Connection) -> Result<()> {
+    ensure_core_columns(conn)?;
+    conn.execute_batch(SCHEMA_TABLES)?;
+    add_missing_columns(conn);
+    create_indexes(conn);
+    Ok(())
+}
+
+/// 每张表最少得有的几个列。
+///
+/// 这是和 `add_missing_columns` 不同的另一类列：它们从第一版 schema 就有，
+/// 缺了说明这个库多半不是我们建的、或者被人手工改过——那种情况下继续自动补齐只是在猜，
+/// 明确报错交给用户处理才是对的（上层会把原文件原样保留，绝不重建）。
+///
+/// 判据刻意取得极小，只挑「没有它整张表就没意义」的那几个：多挑一个，
+/// 就有可能把某个真实存在的老版本库挡在门外，那比让它跑起来糟糕得多。
+const CORE_COLUMNS: &[(&str, &[&str])] = &[
+    ("photos", &["id", "path", "pair_key"]),
+    ("decisions", &["pair_key", "decision"]),
+    ("meta", &["key", "value"]),
+    ("camera_bodies", &["serial"]),
+];
+
+fn ensure_core_columns(conn: &Connection) -> Result<()> {
+    use std::collections::HashSet;
+
+    for (table, cols) in CORE_COLUMNS {
+        // 表还不存在不用管，`CREATE TABLE IF NOT EXISTS` 刚把它建好
+        let present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if present == 0 {
+            continue;
+        }
+
+        let mut have = HashSet::new();
+        let mut stmt = conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for name in rows {
+            have.insert(name?);
+        }
+
+        for col in *cols {
+            anyhow::ensure!(
+                have.contains(*col),
+                "表 {table} 缺少基础列 {col}，这个库可能不是 S·P 建的"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 建索引。只在缺的时候建（`IF NOT EXISTS` 已经写在语句里）。
+///
+/// 单个索引失败只提示、不让整个库打不开：索引只影响查询快慢，
+/// 为了一条索引把用户一晚上的选片结果挡在门外，不划算。
+fn create_indexes(conn: &Connection) {
+    for sql in SCHEMA_INDEXES {
+        if let Err(e) = conn.execute(sql, []) {
+            eprintln!("提示：索引没有建成（{e}），查询会慢一些，但不影响使用");
+        }
+    }
 }
 
 /// 给老库补新列。`CREATE TABLE IF NOT EXISTS` 对已经存在的表毫无作用，
@@ -218,7 +297,8 @@ fn quarantine(path: &Path) -> Result<std::path::PathBuf> {
     Ok(backup)
 }
 
-const SCHEMA: &str = r#"
+/// 只负责建表。索引在 `SCHEMA_INDEXES`，别合并回来。
+const SCHEMA_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS photos (
   id                 INTEGER PRIMARY KEY,
   path               TEXT NOT NULL UNIQUE,
@@ -254,9 +334,7 @@ CREATE TABLE IF NOT EXISTS photos (
   eye_ratio          REAL
 );
 
-CREATE INDEX IF NOT EXISTS idx_photos_pair  ON photos(pair_key);
-CREATE INDEX IF NOT EXISTS idx_photos_time  ON photos(taken_at_corrected);
-CREATE INDEX IF NOT EXISTS idx_photos_kind  ON photos(file_kind);
+-- 注意：索引不写在这里，见下方 SCHEMA_INDEXES —— 它们必须排在新列补齐之后。
 
 CREATE TABLE IF NOT EXISTS camera_bodies (
   serial              TEXT PRIMARY KEY,
@@ -281,19 +359,27 @@ CREATE TABLE IF NOT EXISTS decisions (
   updated_at INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_decisions_decision ON decisions(decision);
-CREATE INDEX IF NOT EXISTS idx_decisions_color ON decisions(color);
-
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 "#;
 
+/// 索引单独列，由 `create_indexes` 在**补完新列之后**逐条执行。
+/// 新增索引写在这里；新增列要同时去 `add_missing_columns` 登记，
+/// 如果索引引用了那一列，靠这个顺序保证老库升级时它已经存在。
+const SCHEMA_INDEXES: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_photos_pair ON photos(pair_key)",
+    "CREATE INDEX IF NOT EXISTS idx_photos_time ON photos(taken_at_corrected)",
+    "CREATE INDEX IF NOT EXISTS idx_photos_kind ON photos(file_kind)",
+    "CREATE INDEX IF NOT EXISTS idx_decisions_decision ON decisions(decision)",
+    "CREATE INDEX IF NOT EXISTS idx_decisions_color ON decisions(color)",
+];
+
 /// 内存库。测试用；同时是「库文件打不开」时让应用还能起来的兜底。
 pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
-    conn.execute_batch(SCHEMA)?;
+    apply_schema(&conn)?;
     Ok(conn)
 }
 
@@ -372,6 +458,83 @@ mod tests {
         conn.execute("INSERT INTO meta(key, value) VALUES('k','v')", [])
             .unwrap();
         assert_eq!(meta_get(&conn, "k").unwrap().as_deref(), Some("v"));
+
+        drop(conn);
+        cleanup(&path);
+    }
+
+    /// 回归：给 `decisions` 加列时，**索引必须排在补列之后**。
+    ///
+    /// 之前的写法把 `CREATE INDEX idx_decisions_color` 和 `CREATE TABLE` 塞在同一份脚本里，
+    /// 老库上建表是空操作、索引却立刻要那一列 → 整批脚本失败 → 库打不开 →
+    /// 应用退化成内存库兜底，界面提示「本次运行不会保存任何索引」。
+    /// 用户看到的是「我的选片结果好像没了」，实际文件一个字没动，但已经足够吓人。
+    #[test]
+    fn upgrades_old_db_without_color_column() {
+        let path = temp_db("legacy");
+
+        // 手工造一个「色标功能之前」的库：decisions 没有 color 列，并且已经有标记数据
+        {
+            let raw = Connection::open(&path).unwrap();
+            raw.execute_batch(
+                "CREATE TABLE photos (
+                   id          INTEGER PRIMARY KEY,
+                   path        TEXT NOT NULL UNIQUE,
+                   fingerprint TEXT NOT NULL DEFAULT '',
+                   pair_key    TEXT NOT NULL DEFAULT '',
+                   file_kind   TEXT NOT NULL DEFAULT 'other',
+                   is_primary  INTEGER NOT NULL DEFAULT 1,
+                   file_size   INTEGER NOT NULL DEFAULT 0,
+                   mtime       INTEGER NOT NULL DEFAULT 0,
+                   indexed_at  INTEGER NOT NULL DEFAULT 0,
+                   exif_ok     INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE decisions (
+                   pair_key   TEXT PRIMARY KEY,
+                   decision   TEXT NOT NULL DEFAULT 'none',
+                   stars      INTEGER NOT NULL DEFAULT 0,
+                   updated_at INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO decisions(pair_key, decision, stars) VALUES('a', 'keep', 5);
+                 INSERT INTO decisions(pair_key, decision, stars) VALUES('b', 'reject', 0);",
+            )
+            .unwrap();
+            raw.close().unwrap();
+        }
+
+        let conn = open(&path).expect("旧版本升级上来不该打不开");
+
+        // 老标记一个都不能少
+        let (decision, stars): (String, i64) = conn
+            .query_row(
+                "SELECT decision, stars FROM decisions WHERE pair_key = 'a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(decision, "keep");
+        assert_eq!(stars, 5);
+
+        // 新列补上了，且默认值为空串（可以直接往里写色标）
+        let color: String = conn
+            .query_row(
+                "SELECT color FROM decisions WHERE pair_key = 'b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(color, "");
+
+        // 引用新列的索引也建起来了 —— 这正是原先崩掉的那一步
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_decisions_color'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1);
 
         drop(conn);
         cleanup(&path);
@@ -649,5 +812,36 @@ mod tests {
             .unwrap();
         drop_empty_legacy_table(&conn);
         assert_eq!(exists(&conn), 1, "有内容的旧表必须留下");
+    }
+
+    /// 抽查测试：拿一份真实库跑一遍升级。`SP_DB_PATH` 没给就跳过，CI 不受影响。
+    ///
+    /// 用法（记得先复制一份，别直接指数据目录里正在用的那个）：
+    /// `SP_DB_PATH=/tmp/sp-dbcheck/library.db cargo test real_db -- --nocapture`
+    ///
+    /// 「造的老库」和「真机上升级上来的库」终究是两回事：真库里可能有别的工具写过的
+    /// 表、有 pragma 留下的痕迹、有想不到的历史版本。验收之前用它跑一次踏实些。
+    #[test]
+    fn real_db_upgrades_on_real_library() {
+        let Some(raw) = std::env::var_os("SP_DB_PATH") else {
+            return;
+        };
+        let path = PathBuf::from(raw);
+
+        let conn = open(&path).expect("真实库应该能被打开并完成升级");
+
+        let has_color = conn.prepare("SELECT color FROM decisions LIMIT 1").is_ok();
+        assert!(has_color, "升级后 decisions 应该有 color 列");
+
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_decisions_color'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "补完列之后 color 的索引应该建起来了");
+
+        drop(conn);
     }
 }
