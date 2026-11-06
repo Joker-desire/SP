@@ -12,6 +12,7 @@ use memmap2::Mmap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 三级缓存尺寸。micro 给时间线/胶片条，grid 给网格，loupe 给单张查看。
 pub const SIZE_MICRO: u32 = 160;
@@ -514,7 +515,13 @@ pub fn ensure(
         .iter()
         .map(|&size| {
             let path = cache_path(thumbs_root, fingerprint, size);
-            path.is_file().then(|| ThumbInfo {
+            // 0 字节文件多半是上次进程被杀时留下的半成品，不能当缓存命中，
+            // 否则会一直拿一张空图去喂前端。
+            let usable = path
+                .metadata()
+                .map(|m| m.is_file() && m.len() > 0)
+                .unwrap_or(false);
+            usable.then(|| ThumbInfo {
                 path,
                 route: "cached".into(),
                 source_width: 0,
@@ -579,14 +586,34 @@ fn encode_thumb(img: &image::DynamicImage, size: u32) -> Result<Vec<u8>> {
 
 /// 先写临时文件再改名。避免中途被杀进程时留下半张图，
 /// 而半张图会被下次运行当成「已缓存」。
+///
+/// **临时文件名每次都必须唯一**：同一张照片被多个线程同时请求是常态
+/// （滚动、分组刷新、重新载入都会撞上）。以前固定用 `xxx.jpg.tmp`，
+/// 后来的 `create` 会把前一个线程正在写的文件截断，前一个线程 rename 走之后，
+/// 后一个线程再 rename 就拿到 ENOENT，前端只看到一句「预览提取失败」。
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("jpg.tmp");
-    {
-        let mut f = File::create(&tmp).with_context(|| format!("无法写入 {}", tmp.display()))?;
-        f.write_all(bytes)?;
-    }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("jpg.{}.{seq}.tmp", std::process::id()));
+
+    let result = (|| -> Result<()> {
+        {
+            let mut f =
+                File::create(&tmp).with_context(|| format!("无法写入 {}", tmp.display()))?;
+            f.write_all(bytes)?;
+        }
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            // 另一个线程已经把同一份缓存写好了：目标存在就算成功，
+            // 一次正常的并发重叠不该被报成错误。
+            Err(_) if path.is_file() => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("无法写入 {}", path.display())),
+        }
+    })();
+
+    // rename 成功后 tmp 已经不存在，删不掉也无所谓
+    let _ = std::fs::remove_file(&tmp);
+    result
 }
 
 /// EXIF 方向值（1-8）→ image crate 的方向枚举。
@@ -733,11 +760,39 @@ pub fn enforce_limit(root: &Path, max_bytes: u64) -> Result<PruneStats> {
     Ok(stats)
 }
 
+/// 清理上次进程被杀时留下的半成品 `.tmp`。
+///
+/// 每个进程只跑一次；只删十分钟以前的，免得把另一个线程正在写的文件删掉。
+/// 这些文件不参与缓存命中，留着只会让缓存目录越来越乱。
+fn cleanup_stale_temps(root: &Path) {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        let cutoff = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(600));
+        for entry in walkdir::WalkDir::new(root).into_iter().flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("tmp") {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .zip(cutoff)
+                .map(|(modified, cutoff)| modified < cutoff)
+                .unwrap_or(false);
+            if stale {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    });
+}
+
 /// 惰性触发的自动淘汰：最多一分钟扫一次，且只在超限后才真的删。
 ///
 /// 每次生成缩略图都遍历整个缓存目录是浪费——几万个文件的 stat 调用比生成一张
 /// 缩略图还贵。所以限流，并且先做一次便宜的总量判断。
 pub fn enforce_if_needed(root: &Path) {
+    cleanup_stale_temps(root);
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     let now = std::time::SystemTime::now()
@@ -970,6 +1025,49 @@ mod tests {
 
         assert_eq!(active.load(Ordering::SeqCst), 0, "名额必须全部归还");
         assert!(peak.load(Ordering::SeqCst) <= 2, "并发不能超过上限");
+    }
+
+    /// 同一张照片被并发请求时（滚动、分组刷新、重新载入很容易撞上），
+    /// 写缓存的临时文件名不能互相踩，否则后一个 rename 会拿到 ENOENT，
+    /// 前端就只看到一句笼统的「预览提取失败」。
+    #[test]
+    fn concurrent_ensure_same_photo_never_fails() {
+        let dir = std::env::temp_dir().join(format!("sp-concurrent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.jpg");
+        std::fs::write(&src, make_jpeg(1200, 800)).unwrap();
+
+        std::thread::scope(|s| {
+            for _ in 0..8 {
+                s.spawn(|| {
+                    let out = ensure(&dir, "same-fp", &src, &[SIZE_GRID, SIZE_MICRO], None);
+                    assert!(out.is_ok(), "并发生成不该失败：{:?}", out.err());
+                });
+            }
+        });
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 进程被杀留下的 0 字节缓存不能算命中，否则那张照片永远是空白。
+    #[test]
+    fn zero_byte_cache_is_regenerated() {
+        let dir = std::env::temp_dir().join(format!("sp-zero-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.jpg");
+        std::fs::write(&src, make_jpeg(1200, 800)).unwrap();
+
+        let (infos, _) = ensure(&dir, "zero-byte", &src, &[SIZE_GRID], None).unwrap();
+        std::fs::write(&infos[0].path, b"").unwrap();
+
+        let (infos2, route2) = ensure(&dir, "zero-byte", &src, &[SIZE_GRID], None).unwrap();
+        assert!(!infos2[0].from_cache, "0 字节缓存必须重新生成");
+        assert_ne!(route2, "cached");
+        assert!(std::fs::metadata(&infos2[0].path).unwrap().len() > 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

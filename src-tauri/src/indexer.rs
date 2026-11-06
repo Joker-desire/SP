@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, Transaction};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use walkdir::WalkDir;
@@ -127,11 +128,41 @@ pub fn scan(root: &Path, db: &Arc<Mutex<Connection>>) -> Result<ScanSummary> {
 /// `max_depth` 用来表达「只读这一层」：文件夹里既有照片又有子文件夹、用户一个
 /// 子文件夹都不勾时，就按 `Some(1)` 扫，只把根目录自己的照片读出来。
 /// `None` 表示不限层数。
+/// 不带取消开关的入口，主要给测试和小工具用；正式命令走 `_cancel` 版。
+#[allow(dead_code)]
 pub fn scan_with_progress<F>(
     roots: &[PathBuf],
     db: &Arc<Mutex<Connection>>,
     on_progress: F,
     max_depth: Option<usize>,
+) -> Result<ScanSummary>
+where
+    F: Fn(ScanProgress) + Send + Sync,
+{
+    scan_with_progress_impl(roots, db, on_progress, max_depth, None)
+}
+
+/// 带取消开关的版本。换文件夹 / 重新扫描时把上一个任务的开关置 true，
+/// 它会在文件与批次边界自己退出来，不会和新的扫描抢同一把数据库写锁。
+pub fn scan_with_progress_cancel<F>(
+    roots: &[PathBuf],
+    db: &Arc<Mutex<Connection>>,
+    on_progress: F,
+    max_depth: Option<usize>,
+    cancel: Arc<AtomicBool>,
+) -> Result<ScanSummary>
+where
+    F: Fn(ScanProgress) + Send + Sync,
+{
+    scan_with_progress_impl(roots, db, on_progress, max_depth, Some(cancel))
+}
+
+fn scan_with_progress_impl<F>(
+    roots: &[PathBuf],
+    db: &Arc<Mutex<Connection>>,
+    on_progress: F,
+    max_depth: Option<usize>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<ScanSummary>
 where
     F: Fn(ScanProgress) + Send + Sync,
@@ -202,6 +233,9 @@ where
         }
     }
 
+    // 解析要搬到独立线程，快照用 Arc 共享；主线程写库时还要拿它判断新增 / 更新。
+    let known = Arc::new(known);
+
     // ---- 3) 机身时间偏移（用于 taken_at_corrected）----
     let mut offsets: HashMap<String, i64> = HashMap::new();
     {
@@ -213,23 +247,31 @@ where
         }
     }
 
-    // ---- 4) 并行解析，结果经 channel 流式回主线程 ----
+    // ---- 4) 并行解析，结果经有界 channel 流式回主线程 ----
     //
-    // 不用 `.collect()` 一次拿全，而是每解析完一张就 send 出来。主线程边收边
-    // 攒批写库，所以第一批（比如前 200 张）一落库，前端就能查到并开始显示，
-    // 不用傻等几千张全部解析完。rayon 负责把解析平摊到所有核。
+    // 以前这里是同步的 `files.par_iter().for_each(...)`：它要等几千张全解析完
+    // 才返回，主线程的接收循环根本没机会跑，注释里承诺的「边收边写」并不成立，
+    // 所有 Parsed 还全堆在无界 channel 里。现在把 par_iter 挪到独立线程，
+    // 主线程真的一边收一边攒批写库；sync_channel 给解析端背压，
+    // 写库跟不上时不会把内存吃光。
     on_progress(ScanProgress::new("parsing", 0, total));
-    let (tx, rx) = mpsc::channel::<Parsed>();
-    {
-        let known = &known;
-        let worker = tx.clone();
-        drop(tx);
+    const CHANNEL_CAP: usize = 400;
+    let (tx, rx) = mpsc::sync_channel::<Parsed>(CHANNEL_CAP);
+    let thread_known = Arc::clone(&known);
+    let thread_cancel = cancel.clone();
+    let parse_thread = std::thread::spawn(move || {
         files.par_iter().for_each(|p| {
-            let _ = worker.send(parse_one(p, known));
+            if thread_cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+            {
+                return;
+            }
+            // 接收端关了说明主线程已经收工，没必要再解析下去
+            let _ = tx.send(parse_one(p, thread_known.as_ref()));
         });
-        // worker 的克隆在 for_each 结束（所有线程 join）后随闭包一起丢弃，
-        // 加上上面 drop 掉的原 sender，channel 在此关闭，主线程的 for 循环得以结束。
-    }
+        // tx 随闭包一起 drop，channel 关闭，主线程的 for 循环得以结束
+    });
 
     // ---- 5) 边收边写：每 BATCH 张提交一次事务 ----
     const BATCH: usize = 200;
@@ -330,6 +372,10 @@ where
     };
 
     for o in rx {
+        // 被新任务顶掉了：把已经攒下的这批写完（下面的 commit）就退出
+        if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+            break;
+        }
         match o {
             Parsed::Unchanged(p) => {
                 summary.unchanged += 1;
@@ -355,6 +401,8 @@ where
             on_progress(ScanProgress::new("parsing", parsed, total));
         }
     }
+    // 等解析线程真正结束再收尾：channel 里的数据已经收完，这一步只是 join
+    let _ = parse_thread.join();
     commit(&mut batch_rows, &mut batch_keys, &mut summary)?;
     on_progress(ScanProgress::new("writing", total, total));
 

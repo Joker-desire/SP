@@ -67,36 +67,6 @@ interface PairCard {
   sharpness: number | null;
   overexposed: number | null;
   underexposed: number | null;
-  /** 闭眼检测。null＝还没检测过（开关默认关，多数时候就是 null） */
-  faces: number | null;
-  /** 最闭的那只眼睛的 EAR；越小越闭 */
-  eyeRatio: number | null;
-}
-
-/** EAR 门槛，和后端 blink.rs 里的 CLOSED_THRESHOLD 是同一个数。 */
-const CLOSED_THRESHOLD = 0.21;
-
-interface BlinkReport {
-  faces: number;
-  ratio: number | null;
-  closed: boolean;
-}
-
-interface BlinkSummary {
-  checked: number;
-  closed: number;
-  failed: number;
-  remaining: number;
-  /** 被用户中途停掉了：这时「没标出来」不等于「没问题」 */
-  stopped: boolean;
-  elapsedMs: number;
-}
-
-interface BlinkProgress {
-  done: number;
-  total: number;
-  closed: number;
-  failed: number;
 }
 
 interface CameraBody {
@@ -337,7 +307,6 @@ const elDaysNote = $<HTMLElement>("#days-note");
 
 const elSearch = $<HTMLInputElement>("#search");const elSearchClear = $<HTMLButtonElement>("#search-clear");
 const elSort = $<HTMLSelectElement>("#sort");
-const elViewMode = $<HTMLElement>("#view-mode");
 const elClear = $<HTMLButtonElement>("#btn-clear");
 const elCount = $<HTMLElement>("#count");
 const elGrid = $<HTMLElement>("#grid");
@@ -453,7 +422,6 @@ const elCacheCancel = $<HTMLButtonElement>("#cache-cancel");
 const elCacheClear = $<HTMLButtonElement>("#cache-clear");
 
 const elBtnSimilar = $<HTMLButtonElement>("#btn-similar");
-const elBtnBlink = $<HTMLButtonElement>("#btn-blink");
 const elSimilarModal = $<HTMLElement>("#similar-modal");
 const elSimilarList = $<HTMLElement>("#similar-list");
 const elSimilarGap = $<HTMLElement>("#similar-gap");
@@ -471,7 +439,6 @@ const elCompareDone = $<HTMLButtonElement>("#compare-done");
 
 const ROOT_KEY = "sp:root";
 const THEME_KEY = "sp:theme";
-const DEN_KEY = "sp:density";
 const GROUP_KEY = "sp:group";
 
 const PAGE_SIZE = 120;
@@ -480,31 +447,15 @@ let rootPath: string | null = null;
 let scanning = false;
 /** 画面分析（清晰度 / 曝光）的后台任务，同一时刻只跑一个。 */
 let analyzing = false;
-/** 闭眼检测的后台任务。和画面分析分开计：两者可以一前一后跑，不能互相顶掉。 */
-let blinkRunning = false;
-/** 闭眼检测开关。值存在后端库里（meta 表），前端启动时读一次。 */
-let blinkOn = false;
 /** 最近一次拉到的分面数据。分析完要报「多少张糊了」，从这里读现成的，不再多问一次。 */
 let lastFacets: LibraryFacets | null = null;
 
 /** 上次扫描时勾选的文件夹范围；重新扫描沿用同一范围，不必每次重选。 */
 let lastScopeDirs: string[] | null = null;
-/** 视图模式，对应顶栏三格图标切换器（参考通用修图软件的画法）：
- *  grid = 平铺网格，group = 分组视图（依据看 #group-mode），large = 大图两列。 */
-type ViewMode = "grid" | "group" | "large";
-const VIEW_KEY = "sp:view";
-
-function loadViewMode(): ViewMode {
-  const v = localStorage.getItem(VIEW_KEY);
-  if (v === "grid" || v === "group" || v === "large") return v;
-  // 老版本只有密度开关：选过大图的迁移到大图视图，其余落到网格
-  if (localStorage.getItem(DEN_KEY) === "large") return "large";
-  return "grid";
-}
 
 /** 分组依据。左侧筛选栏的每一维都能当分组，再加上「所在文件夹」。
  *  值与 index.html 里 #group-mode 的 option value 一一对应。
- *  「不分组」不再是一个依据——分不分组由视图切换器决定，这里只存依据。 */
+ *  本应用主区恒为分组视图，这里只存分组依据（不再有「不分组」这一档）。 */
 type GroupMode =
   | "folder"
   | "decision"
@@ -538,7 +489,6 @@ function loadGroupMode(): GroupMode {
   return "folder";
 }
 
-let viewMode: ViewMode = loadViewMode();
 let groupMode: GroupMode = loadGroupMode();
 /** 分组模式下，组 key → 该组 DOM 与计数。 */
 let groupMap: Map<string, { el: HTMLElement; body: HTMLElement; count: number }> | null = null;
@@ -798,14 +748,8 @@ const BLUR_THRESHOLD = 25;
 const OVEREXPOSED_THRESHOLD = 0.02;
 const UNDEREXPOSED_THRESHOLD = 0.25;
 
-/** 有没有人闭眼。闭眼是唯一「看着没事、其实废了」的硬伤，所以排在最前面。 */
-function blinkClosed(c: PairCard): boolean {
-  return is(c.eyeRatio) && (c.eyeRatio as number) < CLOSED_THRESHOLD;
-}
-
 /** 这张照片有没有机器能看出来的硬伤。没有就返回 null——不给人添标签。 */
 function qualityIssue(c: PairCard): string | null {
-  if (blinkClosed(c)) return "闭眼";
   if (is(c.sharpness) && (c.sharpness as number) < BLUR_THRESHOLD) return "糊";
   if (is(c.overexposed) && (c.overexposed as number) >= OVEREXPOSED_THRESHOLD) return "过曝";
   if (is(c.underexposed) && (c.underexposed as number) >= UNDEREXPOSED_THRESHOLD) return "欠曝";
@@ -815,11 +759,6 @@ function qualityIssue(c: PairCard): string | null {
 /** 徽标的悬停说明：把具体数值摆出来，阈值准不准一眼能判断。 */
 function qualityDetail(c: PairCard): string {
   const bits: string[] = [];
-  if (is(c.eyeRatio)) {
-    bits.push(
-      `${c.faces ?? 0} 张脸 · 最闭的眼睛 ${(c.eyeRatio as number).toFixed(2)}（低于 ${CLOSED_THRESHOLD} 判为闭眼）`,
-    );
-  }
   if (is(c.sharpness)) bits.push(`清晰度 ${Math.round(c.sharpness as number)}（低于 ${BLUR_THRESHOLD} 判为糊）`);
   if (is(c.overexposed)) bits.push(`高光溢出 ${((c.overexposed as number) * 100).toFixed(1)}%`);
   if (is(c.underexposed)) bits.push(`暗部死黑 ${((c.underexposed as number) * 100).toFixed(1)}%`);
@@ -906,8 +845,7 @@ function cardEl(c: PairCard): HTMLElement {
   const issue = qualityIssue(c);
   if (issue) {
     const badge = document.createElement("span");
-    badge.className =
-      issue === "闭眼" ? "card-badge card-badge--blink" : "card-badge card-badge--quality";
+    badge.className = "card-badge card-badge--quality";
     badge.textContent = issue;
     badge.title = qualityDetail(c);
     card.appendChild(badge);
@@ -955,15 +893,20 @@ async function hydrate(card: HTMLElement) {
   const ph = card.querySelector<HTMLElement>(".shot-placeholder");
   if (!img || !ph) return;
 
+  // 每趟取图领一个号。滚远时 unloadThumb 会把它作废，迟到的旧响应
+  // 就不会把刚释放掉的位图又挂回来（也不会盖掉新一轮的结果）。
+  const epoch = String(Number(card.dataset.epoch ?? "0") + 1);
+  card.dataset.epoch = epoch;
   card.dataset.state = "loading";
   try {
     const t = await loadThumb(id, 512);
     // 期间可能被滚远了（状态被改回 idle），那就不要白占内存
-    if (card.dataset.state !== "loading") return;
+    if (card.dataset.state !== "loading" || card.dataset.epoch !== epoch) return;
     img.src = t.dataUrl;
     img.hidden = false;
     ph.hidden = true;
     ph.classList.remove("shot-placeholder--error");
+    ph.onclick = null;
     if (t.sourceWidth) {
       img.title = `${t.sourceWidth}×${t.sourceHeight} 像素 · 来源：${
         ROUTE_LABEL[t.route] ?? t.route
@@ -971,25 +914,42 @@ async function hydrate(card: HTMLElement) {
     }
     card.dataset.state = "ready";
   } catch (e) {
-    if (card.dataset.state !== "loading") return;
+    if (card.dataset.state !== "loading" || card.dataset.epoch !== epoch) return;
     card.dataset.state = "error";
     ph.hidden = false;
     ph.classList.add("shot-placeholder--error");
-    ph.textContent = "预览提取失败";
-    ph.title = String(e);
+    ph.textContent = "预览提取失败 · 点此重试";
+    // 原因放在 title 里（悬停可见）；一次偶发失败不该让这张图永远空着，
+    // 而滚出去再滚回来也未必会重新触发取图，所以给一个明确的重试入口。
+    ph.title = `${String(e)}\n\n点击重新提取预览`;
+    ph.onclick = (ev) => {
+      ev.stopPropagation();
+      ph.onclick = null;
+      card.dataset.state = "idle";
+      void hydrate(card);
+    };
   }
 }
 
-/** 把已经解码好的位图还给系统（数据 URL 仍留在 JS 缓存里，回来时秒恢复）。 */
+/** 把已经解码好的位图还给系统（数据 URL 仍留在 JS 缓存里，回来时秒恢复）。
+ *  关键是**重新交给 nearObserver 盯着**：进视口时我们 unobserve 了一次，
+ *  如果卸载时不补回来，滚出去 2400px 再滚回，这张就永远是占位图了。
+ *  此刻卡片在 near 的 800px 范围之外，observe 不会立刻又触发一轮取图。 */
 function unloadThumb(card: HTMLElement) {
-  if (card.dataset.state !== "ready") return;
+  const state = card.dataset.state;
+  // loading 也要处理：取图途中被滚远，等响应回来时不能白占内存
+  if (state !== "ready" && state !== "loading") return;
   const img = card.querySelector<HTMLImageElement>(".shot-img");
   const ph = card.querySelector<HTMLElement>(".shot-placeholder");
   if (!img || !ph) return;
   img.removeAttribute("src");
   img.hidden = true;
   ph.hidden = false;
+  ph.classList.remove("shot-placeholder--error");
   card.dataset.state = "idle";
+  // 作废旧请求，避免它的 await 回来后把图又挂上
+  card.dataset.epoch = String(Number(card.dataset.epoch ?? "0") + 1);
+  nearObserver.observe(card);
 }
 
 // 近处：进入视口就取图（提前一屏，滚动时不会看到空白）
@@ -1109,11 +1069,9 @@ async function reload(opts?: { keepView?: boolean }) {
   nearObserver.disconnect();
   farObserver.disconnect();
   elGrid.innerHTML = "";
-  const grouped = viewMode === "group";
+  const grouped = true;
   elGrid.classList.toggle("is-grouped", grouped);
-  if (viewMode === "large") elGrid.dataset.density = "large";
-  else delete elGrid.dataset.density;
-  groupMap = grouped ? new Map() : null;
+  groupMap = new Map();
   elGrid.scrollTop = 0;
   updateCount();
   updateCullInfo();
@@ -1197,21 +1155,7 @@ async function loadMore(token: number) {
 }
 
 function appendCards(list: PairCard[]) {
-  if (viewMode === "group") {
-    appendGrouped(list);
-    return;
-  }
-  const frag = document.createDocumentFragment();
-  const cards: HTMLElement[] = [];
-  for (const c of list) {
-    itemById.set(c.id, c);
-    const card = cardEl(c);
-    frag.appendChild(card);
-    cards.push(card);
-  }
-  elGrid.appendChild(frag);
-  // 必须先入 DOM 再 observe，否则 IntersectionObserver 拿不到位置
-  for (const card of cards) observeCard(card);
+  appendGrouped(list);
 }
 
 /** 照片所在目录（父文件夹的绝对路径）。分组时一组对应一个这样的路径。 */
@@ -1249,6 +1193,10 @@ function ensureGroup(key: string, label: string, title?: string): { el: HTMLElem
   el.className = "group";
   const head = document.createElement("div");
   head.className = "group-head";
+  // 组名能点也能用键盘折：原来是个纯 div，键盘用户完全够不着
+  head.setAttribute("role", "button");
+  head.tabIndex = 0;
+  head.setAttribute("aria-expanded", "true");
   const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   caret.setAttribute("viewBox", "0 0 16 16");
   caret.setAttribute("class", "group-caret");
@@ -1264,8 +1212,17 @@ function ensureGroup(key: string, label: string, title?: string): { el: HTMLElem
   head.append(caret, name, count);
   const body = document.createElement("div");
   body.className = "group-grid";
-  if (elGrid.dataset.density) body.dataset.density = elGrid.dataset.density;
-  head.addEventListener("click", () => el.classList.toggle("is-collapsed"));
+  const toggleGroup = () => {
+    const collapsed = el.classList.toggle("is-collapsed");
+    head.setAttribute("aria-expanded", String(!collapsed));
+  };
+  head.addEventListener("click", toggleGroup);
+  head.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      toggleGroup();
+    }
+  });
   el.append(head, body);
   elGrid.appendChild(el);
   g = { el, body, count: 0 };
@@ -1298,16 +1255,14 @@ function bucketOf(v: number | null, buckets: typeof FOCAL_BUCKETS): { key: strin
   return buckets.find((b) => v >= b.lo && v < b.hi) ?? null;
 }
 
-/** 画面质量归档：优先级 闭眼 > 跑焦 > 过曝 > 欠曝 > 正常；还没分析过的归「未分析」。
- *  几个阈值与 src-tauri/src/{analyze,blink}.rs 保持一致（改动要两边同步）。 */
+/** 画面质量归档：优先级 跑焦 > 过曝 > 欠曝 > 正常；还没分析过的归「未分析」。 */
 function qualityOf(c: PairCard): { key: string; label: string } {
-  if (blinkClosed(c)) return { key: "blink", label: "疑似闭眼" };
   if (c.sharpness === null && c.overexposed === null && c.underexposed === null) {
     return { key: "pending", label: "未分析" };
   }
-  if (c.sharpness !== null && c.sharpness < 25) return { key: "blur", label: "疑似跑焦" };
-  if (c.overexposed !== null && c.overexposed >= 0.02) return { key: "over", label: "高光溢出" };
-  if (c.underexposed !== null && c.underexposed >= 0.25) return { key: "under", label: "暗部死黑" };
+  if (c.sharpness !== null && c.sharpness < BLUR_THRESHOLD) return { key: "blur", label: "疑似跑焦" };
+  if (c.overexposed !== null && c.overexposed >= OVEREXPOSED_THRESHOLD) return { key: "over", label: "高光溢出" };
+  if (c.underexposed !== null && c.underexposed >= UNDEREXPOSED_THRESHOLD) return { key: "under", label: "暗部死黑" };
   return { key: "ok", label: "正常" };
 }
 
@@ -1415,6 +1370,15 @@ function renderEmpty() {
     text.className = "empty-text";
     text.textContent = "当前筛选条件下没有结果。放宽一个条件再试试。";
     box.append(title, text);
+  }
+
+  // 彩蛋：空状态别只摆一句干巴巴的说明，给一句摄影名言
+  if (easterOn) {
+    const [quote, by] = easterQuote();
+    const q = document.createElement("div");
+    q.className = "easter-quote";
+    q.textContent = `「${quote}」 —— ${by}`;
+    box.appendChild(q);
   }
 
   elGrid.appendChild(box);
@@ -1787,8 +1751,14 @@ function renderFacetsEmpty() {
   elDaysNote.textContent = "";
 }
 
+/** 两类分面请求各自带序号：快速连点 / 连续标记时，慢的旧响应不能盖掉新值。 */
+let loadFacetsSeq = 0;
+let countFacetsSeq = 0;
+
 async function loadFacets() {
+  const seq = ++loadFacetsSeq;
   const f = await invoke<LibraryFacets>("library_facets", { roots: currentRoots() });
+  if (seq !== loadFacetsSeq) return;
   lastFacets = f;
   updateCullProgress(f);
 
@@ -1816,14 +1786,43 @@ async function loadFacets() {
  * 标记之后每次都要更新计数（「未标记」的数字要往下掉），但重新拉一遍
  * 整个列表会让网格闪一下、滚动位置也会丢——按 P 的时候那种顿挫就是它造成的。
  */
-async function refreshFacetCounts() {
+/** 连续过片时把侧栏计数合并成一次。
+ *  library_facets 要跑十几条全表 GROUP BY，还和所有写操作共用一把 SQLite 锁。
+ *  以前每按一次 P 就发一个，连按十几张这些查询排成一队，谁都别想拿到锁。
+ *  改成 trailing debounce：手停 200ms 才查一次，中间无论过多少片都只算一遍。 */
+let facetTimer: number | undefined;
+function refreshFacetCounts() {
+  window.clearTimeout(facetTimer);
+  facetTimer = window.setTimeout(() => {
+    // 等标记写队列清空再查：library_facets 是长查询，若插在写请求前面，
+    // 后面每一次 apply_decision 都得等它把锁让出来。
+    void markWriteTail.then(() => refreshFacetCountsNow());
+  }, 200);
+}
+
+async function refreshFacetCountsNow() {
+  const seq = ++countFacetsSeq;
   try {
     const f = await invoke<LibraryFacets>("library_facets", { roots: currentRoots() });
-    if (f.total === 0) return;
+    if (seq !== countFacetsSeq || f.total === 0) return;
     updateCullProgress(f);
     renderDecisionFacets(f);
     renderStarFacets(f);
     renderColorFacets(f);
+
+    // 彩蛋：这一批「未标记」归零了，给一句鼓励 + 一下极轻的页脚弹跳。
+    // 只在从「还有」变「没了」的那一次触发，别每次刷新都庆祝。
+    if (easterOn) {
+      const none = f.decisions.find((d) => d.key === "none")?.count ?? -1;
+      if (none === 0 && f.total > 0 && !celebrated) {
+        celebrated = true;
+        setHint("这一批全过完了。拍得好，选得也利落。");
+        document.body.classList.add("easter-cheer");
+        window.setTimeout(() => document.body.classList.remove("easter-cheer"), 1400);
+      } else if (none > 0) {
+        celebrated = false;
+      }
+    }
   } catch {
     /* 计数刷不上不影响标记本身 */
   }
@@ -1903,31 +1902,7 @@ elSort.addEventListener("change", () => {
   void reload();
 });
 
-// ── 视图切换器（网格 / 分组 / 大图） ────────────────────────────────────
-
-/** 把当前 viewMode 铺到界面上：密度、分组开关、分组依据选择器的显隐。 */
-function applyView() {
-  localStorage.setItem(VIEW_KEY, viewMode);
-  for (const b of elViewMode.querySelectorAll<HTMLButtonElement>("button[data-view]")) {
-    b.classList.toggle("is-active", b.dataset.view === viewMode);
-  }
-  // 分组依据选择器只在分组视图下有意义，其余视图藏掉免得占地方
-  elGroupMode.hidden = viewMode !== "group";
-  // 改了视图就重铺——密度和分组都影响网格结构
-  if (rootPath) void reload();
-  else {
-    // 没有图库时也要把密度落对，免得空状态下宽度跳一下
-    if (viewMode === "large") elGrid.dataset.density = "large";
-    else delete elGrid.dataset.density;
-  }
-}
-
-elViewMode.addEventListener("click", (e) => {
-  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-view]");
-  if (!btn?.dataset.view || btn.dataset.view === viewMode) return;
-  viewMode = btn.dataset.view as ViewMode;
-  applyView();
-});
+// ── 视图：本应用只提供分组视图，分组依据由 #group-mode 决定 ──────────────
 
 let searchTimer: number | undefined;
 elSearch.addEventListener("input", () => {
@@ -2165,6 +2140,18 @@ function fillIfNeeded() {
 }
 
 /**
+ * 标记写入串行化。过片现在是乐观的、不等 IPC，连按时会有多个写请求在飞；
+ * 排个队保证落库顺序与按键顺序一致，否则撤销栈里的次序会对不上用户看到的画面。
+ * 写本身只是单行 upsert，排队不会拖慢界面。
+ */
+let markWriteTail: Promise<unknown> = Promise.resolve();
+function queueMarkWrite<T>(fn: () => Promise<T>): Promise<T> {
+  const next = markWriteTail.then(fn, fn);
+  markWriteTail = next.catch(() => undefined);
+  return next;
+}
+
+/**
  * 应用一次标记。`patch` 里没给的项就不动——
  * 这样「只改星级」不会把已经做好的保留/淘汰决定冲掉。
  */
@@ -2199,16 +2186,88 @@ async function applyPatch(patch: Patch, idsOverride?: number[]) {
   }
   repaint(backup.map((b) => b.c.id));
 
+  // ---- 过片先于落库 ----
+  //
+  // 以前这段排在 await apply_decision 后面。后端所有命令共用一把
+  // Mutex<Connection>，而每次标记还会顺带发一次 library_facets（十几条
+  // 全表 GROUP BY）。连按 P 时这些慢查询排成一队，下一个写请求要等前面的
+  // 分面让出锁，一次几秒，连按十几张就攒成十几秒画面不动。
+  // 乐观更新已经把画面改对了，光标跟着走是安全的；真写失败下面会回滚数据。
+  // ---- 处理掉的照片该不该离开当前视图 ----
+  const gone = new Set<number>();
+  if (filterTracksMarks()) {
+    for (const b of backup) if (!stillMatches(b.c)) gone.add(b.c.id);
+  }
+  const dropped = dropFromView(gone);
+
+  // 批量标记：不动光标、不过片（本来也不是在看某一张），选择清掉收尾
+  if (bulk) {
+    selection.clear();
+    syncSelection();
+    setHint(`已${labelForPatch(patch, ids.length)} —— ⌘Z 可整批撤销`);
+  } else {
+    // ---- 自动前进 ----
+    // 保留/淘汰＝过片：一个键处理一张，手不离开键盘，这是选片真正的手感所在。
+    // 打星＝评价：**不前进**。按完 3 星还停在这张上，觉得该给 5 星就再按 5，
+    // 反悔了按 0——评价本来就要反复掂量，跳走了还谈什么调整。
+    const advance = patch.decision !== undefined;
+
+    if (inLoupe) {
+      if (dropped && current && gone.has(current.id)) {
+        // 当前这张被筛选拿掉了，同一个索引现在指的就是下一张
+        if (items.length === 0) closeLoupe();
+        else void openLoupe(Math.min(loupeIndex, items.length - 1));
+      } else if (advance) {
+        stepLoupe(1);
+      } else {
+        // 停在原地：刷新大图上的星级显示，按钮点亮状态跟着走
+        const c = items[loupeIndex];
+        if (c) paintLoupeMark(c);
+        setHint(
+          c && c.stars > 0
+            ? `${"★".repeat(c.stars)} —— 再按 1-5 可调整，按 0 清除`
+            : "已清除星级",
+        );
+      }
+    } else if (!advance) {
+      // 网格里打星同样不挪选中：停在这张上，随时按别的数字调整
+      syncSelection();
+      if (ids.length === 1) {
+        const c = itemById.get(ids[0]);
+        if (c) {
+          setHint(
+            c.stars > 0
+              ? `${"★".repeat(c.stars)} —— 再按 1-5 可调整，按 0 清除`
+              : "已清除星级",
+          );
+        }
+      }
+    } else {
+      const single = ids.length === 1;
+      const next = single ? (dropped ? anchorIdx : anchorIdx + 1) : -1;
+      selection.clear();
+      if (next >= 0 && next < items.length) {
+        selection.add(items[next].id);
+        selAnchor = items[next].id;
+        revealCard(items[next].id);
+      }
+      syncSelection();
+    }
+  }
+
+  // ---- 落库（后台，完全不挡上面的过片） ----
   try {
-    await invoke<number>("apply_decision", {
-      ids,
-      decision: patch.decision ?? null,
-      // 「清除标记」连星级一起清（界面上就是这么显示的），不写库的话重载后星级会冒回来
-      stars: patch.stars ?? (patch.decision === "none" ? 0 : null),
-      // 色标走不了「不传就不动」这条路：传 undefined 会被序列化丢掉，
-      // 前端 `patch.color` 为 undefined 时就是「别动」，所以这里显式给 null
-      color: patch.color ?? null,
-    });
+    await queueMarkWrite(() =>
+      invoke<number>("apply_decision", {
+        ids,
+        decision: patch.decision ?? null,
+        // 「清除标记」连星级一起清（界面上就是这么显示的），不写库的话重载后星级会冒回来
+        stars: patch.stars ?? (patch.decision === "none" ? 0 : null),
+        // 色标走不了「不传就不动」这条路：传 undefined 会被序列化丢掉，
+        // 前端 `patch.color` 为 undefined 时就是「别动」，所以这里显式给 null
+        color: patch.color ?? null,
+      }),
+    );
   } catch (e) {
     for (const b of backup) {
       b.c.decision = b.decision;
@@ -2231,81 +2290,11 @@ async function applyPatch(patch: Patch, idsOverride?: number[]) {
     })),
   );
 
-  // 侧栏计数要立刻跟着动——「未标记」少一张是最直接的进度反馈
-  void refreshFacetCounts();
-
-  // ---- 处理掉的照片该不该离开当前视图 ----
-  const gone = new Set<number>();
-  if (filterTracksMarks()) {
-    for (const b of backup) if (!stillMatches(b.c)) gone.add(b.c.id);
-  }
-  const dropped = dropFromView(gone);
+  // 侧栏计数跟着动。内部会合并连续过片，只查一次，不再排队抢锁。
+  refreshFacetCounts();
+  // 有卡片被筛选摘掉了，网格可能补不满——但必须等库写完再补页，
+  // 否则「只看未标记」会把刚标记的那张又从库里捞回来。
   if (dropped) fillIfNeeded();
-
-  // 批量标记：不动光标、不过片（本来也不是在看某一张），选择清掉收尾
-  if (bulk) {
-    selection.clear();
-    syncSelection();
-    setHint(`已${labelForPatch(patch, ids.length)} —— ⌘Z 可整批撤销`);
-    return;
-  }
-
-  // ---- 自动前进 ----
-  //
-  // 保留/淘汰＝过片：一个键处理一张，手不离开键盘，这是选片真正的手感所在。
-  // 打星＝评价：**不前进**。按完 3 星还停在这张上，觉得该给 5 星就再按 5，
-  // 反悔了按 0——评价本来就要反复掂量，跳走了还谈什么调整。
-  // 批量标记＝一次批处理：清掉选择，免得下一次误按又把整批重标一遍。
-  const advance = patch.decision !== undefined;
-
-  if (inLoupe) {
-    if (dropped && current && gone.has(current.id)) {
-      // 当前这张被筛选拿掉了，同一个索引现在指的就是下一张
-      if (items.length === 0) closeLoupe();
-      else void openLoupe(Math.min(loupeIndex, items.length - 1));
-      return;
-    }
-    if (advance) {
-      stepLoupe(1);
-    } else {
-      // 停在原地：刷新大图上的星级显示，按钮点亮状态跟着走
-      const c = items[loupeIndex];
-      if (c) paintLoupeMark(c);
-      setHint(
-        c && c.stars > 0
-          ? `${"★".repeat(c.stars)} —— 再按 1-5 可调整，按 0 清除`
-          : "已清除星级",
-      );
-    }
-    return;
-  }
-
-  if (!advance) {
-    // 网格里打星同样不挪选中：停在这张上，随时按别的数字调整
-    syncSelection();
-    if (ids.length === 1) {
-      const c = itemById.get(ids[0]);
-      if (c) {
-        setHint(
-          c.stars > 0
-            ? `${"★".repeat(c.stars)} —— 再按 1-5 可调整，按 0 清除`
-            : "已清除星级",
-        );
-      }
-    }
-    return;
-  }
-
-  const single = ids.length === 1;
-  const next = single ? (dropped ? anchorIdx : anchorIdx + 1) : -1;
-
-  selection.clear();
-  if (next >= 0 && next < items.length) {
-    selection.add(items[next].id);
-    selAnchor = items[next].id;
-    revealCard(items[next].id);
-  }
-  syncSelection();
 }
 
 function applyDecision(d: Decision) {
@@ -2502,7 +2491,7 @@ async function moveStack(from: UndoEntry[], to: UndoEntry[], verb: string) {
     if (it.color !== null) c.color = it.color;
   }
   repaint(entry.before.map((it) => it.id));
-  void refreshFacetCounts();
+  refreshFacetCounts();
 
   // 有卡片已经不在当前视图里（被筛选挪走了），重新按库里的状态铺一遍最省事
   if (missing) await reload({ keepView: true });
@@ -2634,7 +2623,8 @@ async function openExportDialog() {
   try {
     facets = await invoke<LibraryFacets>("library_facets", { roots: currentRoots() });
   } catch {
-    /* 拿不到计数就把选项留空，不挡住导出本身 */
+    // 选项还能用，但计数全空会让人以为「一张都没标」，得说一声
+    setHint("导出选项的张数没读到，选项仍可正常导出。", "warn");
   }
   const count = (key: string) => facets?.decisions.find((d) => d.key === key)?.count ?? 0;
   const fmt = (n: number) => `${n.toLocaleString()} 张`;
@@ -2696,10 +2686,16 @@ async function runExport() {
   const template = elExportTemplate.value.trim() || "{name}";
   if (!scope || !mode) return;
 
-  const dest = await open({ directory: true, multiple: false, title: "导出到哪个文件夹" });
-  if (typeof dest !== "string") return;
-
+  // 必须先禁用再弹目录框：open() 是异步的，等它返回才禁用的话，
+  // 连点两下会弹出两个目录框、跑两次导出。
+  if (elExportConfirm.disabled) return;
   elExportConfirm.disabled = true;
+  const dest = await open({ directory: true, multiple: false, title: "导出到哪个文件夹" });
+  if (typeof dest !== "string") {
+    elExportConfirm.disabled = false;
+    return;
+  }
+
   elExportProgress.hidden = false;
   elExportResult.hidden = true;
   elExportReveal.hidden = true;
@@ -2946,7 +2942,7 @@ async function pickInGroup(group: SimilarGroup, pickId: number) {
       if (m) m.decision = p.decision;
     }
     pushUndo(already ? "取消连拍选择" : `连拍选优 ${group.size} 张`, before);
-    void refreshFacetCounts();
+    refreshFacetCounts();
   } catch (e) {
     setHint(`标记没能保存：${String(e)}`, "error");
     void refreshSimilarGroups();
@@ -2964,15 +2960,6 @@ function closeCompareDialog() {
   void refreshSimilarGroups();
 }
 
-elBtnBlink.addEventListener("click", () => {
-  if (blinkRunning) {
-    void invoke("cancel_blink").catch(() => undefined);
-    setHint("正在停止闭眼检测…");
-    return;
-  }
-  void setBlink(!blinkOn);
-});
-
 elBtnSimilar.addEventListener("click", () => void openSimilarDialog());
 elBtnUndo.addEventListener("click", () => void undoLast());
 elBtnRedo.addEventListener("click", () => void redoLast());
@@ -2986,13 +2973,9 @@ elCompareModal.addEventListener("click", (e) => {
   if (e.target === elCompareModal) closeCompareDialog();
 });
 
-// 对比视图里 1–9 直接选第几张，Esc 关掉
+// 对比视图里 1–9 直接选第几张。Esc 交给全局监听统一关，别关两次。
 document.addEventListener("keydown", (e) => {
   if (elCompareModal.hidden) return;
-  if (e.key === "Escape") {
-    closeCompareDialog();
-    return;
-  }
   const n = Number(e.key);
   if (Number.isInteger(n) && n >= 1 && n <= 9 && compareGroup) {
     const m = compareGroup.members[n - 1];
@@ -3071,21 +3054,30 @@ function summaryText(r: ScanSummary): string {
 // 用户先看到前 N 张，剩下的在后台继续扫。批与批之间后端会释放数据库连接锁，
 // 所以前端插进来查询不会卡住扫描。
 let progressiveTimer: number | null = null;
+let progressiveGen = 0;
 function startProgressiveRefresh() {
   if (progressiveTimer !== null) return;
+  const gen = ++progressiveGen;
   const tick = async () => {
-    if (!scanning) return;
+    progressiveTimer = null;
+    if (!scanning || gen !== progressiveGen) return;
     try {
       // keepView：扫描中用户可能已经在翻、在选了，别把人弹回顶部
       await reload({ keepView: true });
     } catch {
       /* 扫描中途偶发读不到无所谓，下一拍再试 */
     }
-    if (scanning) progressiveTimer = window.setTimeout(tick, 400);
+    // 上一拍还没回来不排下一拍；停掉之后（gen 变了）也不许自我复活。
+    // 以前 stop 只能清掉「当前那个 timer」，正在 await reload 的这一拍
+    // 回来后会重新排一个，于是扫描结束了刷新还在继续。
+    if (scanning && gen === progressiveGen && progressiveTimer === null) {
+      progressiveTimer = window.setTimeout(tick, 600);
+    }
   };
   progressiveTimer = window.setTimeout(tick, 350);
 }
 function stopProgressiveRefresh() {
+  progressiveGen += 1;
   if (progressiveTimer !== null) {
     clearTimeout(progressiveTimer);
     progressiveTimer = null;
@@ -3251,118 +3243,10 @@ async function runAnalysis() {
         ? `画面分析完成（${r.analyzed.toLocaleString()} 张）：${bits.join(" · ")}，左侧「画面质量」可单独筛`
         : `画面分析完成（${r.analyzed.toLocaleString()} 张），没发现明显问题`,
     );
-
-    // 闭眼检测排在画面分析之后：它要解码 + 跑模型，慢得多，
-    // 让「糊不糊」这种便宜的结论先出来。
-    if (blinkOn) await runBlinkAnalysis();
   } catch {
     /* 分析失败不影响选片本身，静默跳过 */
   } finally {
     analyzing = false;
-  }
-}
-
-// ---- 闭眼检测 ----
-//
-// 默认关。要解码、要跑两个模型，几千张的量级是几分钟而不是几秒；
-// 拍风景、拍静物的人根本用不上，不该让他们等。
-// 开关存在后端库里（meta 表）：它决定的是这台机器上要不要做这件事，
-// 不是某个窗口的临时状态。
-
-const BLINK_LABEL = "闭眼检测";
-
-function paintBlinkToggle() {
-  elBtnBlink.classList.toggle("is-active", blinkOn);
-  elBtnBlink.title = blinkRunning
-    ? "闭眼检测：正在跑 —— 点一下停止（已经算完的会留着，剩下的下次接着算）"
-    : blinkOn
-      ? "闭眼检测：已开启 —— 扫描 / 分析之后会自动过一遍人脸模型（模型随应用打包，不联网）"
-      : "闭眼检测：已关闭 —— 开启后扫描会多跑一趟，标出有人眨眼的照片";
-}
-
-/** 跑起来时这个按钮变成「停止」。跑一趟要几分钟，不能让人只能干等。 */
-function setBlinkRunning(running: boolean) {
-  const text = elBtnBlink.querySelector<HTMLElement>(".btn-text");
-  if (text) text.textContent = running ? "停止检测" : BLINK_LABEL;
-  elBtnBlink.classList.toggle("is-busy", running);
-  paintBlinkToggle();
-}
-
-async function loadBlinkSetting() {
-  try {
-    blinkOn = await invoke<boolean>("blink_enabled");
-  } catch {
-    blinkOn = false;
-  }
-  paintBlinkToggle();
-}
-
-async function setBlink(on: boolean) {
-  blinkOn = on;
-  paintBlinkToggle();
-  try {
-    await invoke("set_blink_enabled", { on });
-  } catch (e) {
-    setHint(`闭眼检测的开关没能保存：${String(e)}`, "warn");
-    blinkOn = !on;
-    paintBlinkToggle();
-    return;
-  }
-  if (!on) {
-    setHint("已关闭闭眼检测：不再新增检测，已经标出来的结果保留。");
-    return;
-  }
-  setHint("已开启闭眼检测。");
-  if (rootPath) void runBlinkAnalysis();
-}
-
-/** 闭眼检测的进度：走底部那条进度条，跟扫描同一套视觉。
- *  只往 hint 里写字是不够的——页脚那行字太容易被忽略，
- *  而这一趟要跑几分钟，没有百分比就是「不知道死没死」。 */
-function showBlinkProgress(p: BlinkProgress) {
-  elProgress.hidden = false;
-  elProgressFill.classList.remove("is-indeterminate");
-  elProgressFill.style.width = `${Math.round((p.done / p.total) * 100)}%`;
-  const hit = p.closed > 0 ? ` · 已标出 ${p.closed.toLocaleString()} 张` : "";
-  elProgressText.textContent = `闭眼检测 ${p.done.toLocaleString()} / ${p.total.toLocaleString()}${hit}`;
-}
-
-async function runBlinkAnalysis() {
-  if (blinkRunning || !rootPath || !blinkOn) return;
-  blinkRunning = true;
-  setBlinkRunning(true);
-  elProgressFill.classList.remove("is-indeterminate");
-  elProgressFill.style.width = "0%";
-  elProgressText.textContent = "闭眼检测：准备中…";
-  elProgress.hidden = false;
-  try {
-    const r = await invoke<BlinkSummary>("analyze_blink", { roots: currentRoots() });
-    if (r.checked === 0) {
-      hideProgress();
-      return;
-    }
-    await loadFacets();
-    await refreshLibrary();
-    const secs = (r.elapsedMs / 1000).toFixed(1);
-    const rate = r.checked > 0 ? `每秒 ${(r.checked / (r.elapsedMs / 1000)).toFixed(1)} 张` : "";
-    if (r.stopped) {
-      setHint(
-        `闭眼检测已停止：这趟看了 ${r.checked.toLocaleString()} 张（${r.closed.toLocaleString()} 张疑似闭眼），还剩 ${r.remaining.toLocaleString()} 张没看——下次开启会接着算。`,
-        "warn",
-      );
-    } else if (r.closed > 0) {
-      setHint(
-        `闭眼检测完成（${r.checked.toLocaleString()} 张 / ${secs} 秒）：${r.closed.toLocaleString()} 张疑似有人闭眼，左侧「画面质量 → 疑似闭眼」可单独筛`,
-      );
-    } else {
-      setHint(`闭眼检测完成（${r.checked.toLocaleString()} 张 / ${secs} 秒${rate ? " · " + rate : ""}），没发现有人眨眼`);
-    }
-  } catch (e) {
-    setHint(`闭眼检测没跑起来：${String(e)}`, "warn");
-  } finally {
-    hideProgress();
-    blinkRunning = false;
-    setBlinkRunning(false);
   }
 }
 
@@ -4000,10 +3884,6 @@ interface PhotoDetail {
   stars: number;
   /** 色标：'' / red / … */
   color: string;
-  /** 闭眼检测：人脸数，null = 没检测过 */
-  faces: number | null;
-  /** 最闭的眼睛的 EAR */
-  eyeRatio: number | null;
   siblings: SiblingFile[];
 }
 
@@ -4243,20 +4123,14 @@ function renderDetail(d: PhotoDetail) {
       d.sharpness === null && d.overexposed === null && d.underexposed === null
         ? [detailRow("状态", "还没分析（后台分析还没轮到它，或这个格式算不出来）")]
         : [
-            detailRow("清晰度", d.sharpness === null ? "" : `${Math.round(d.sharpness)} 分（< 25 判跑焦）`),
+            detailRow("清晰度", d.sharpness === null ? "" : `${Math.round(d.sharpness)} 分（< ${BLUR_THRESHOLD} 判跑焦）`),
             detailRow(
               "高光溢出",
-              d.overexposed === null ? "" : `${(d.overexposed * 100).toFixed(1)}%（≥ 2% 判溢出）`,
+              d.overexposed === null ? "" : `${(d.overexposed * 100).toFixed(1)}%（≥ ${OVEREXPOSED_THRESHOLD * 100}% 判溢出）`,
             ),
             detailRow(
               "暗部死黑",
-              d.underexposed === null ? "" : `${(d.underexposed * 100).toFixed(1)}%（≥ 25% 判死黑）`,
-            ),
-            detailRow(
-              "闭眼检测",
-              d.eyeRatio === null
-                ? "还没检测（顶栏开关打开后才会跑）"
-                : `${d.faces ?? 0} 张脸 · 最闭的眼睛 ${d.eyeRatio.toFixed(2)}（< ${CLOSED_THRESHOLD} 判闭眼）${d.eyeRatio < CLOSED_THRESHOLD ? " ⚠ 疑似闭眼" : ""}`,
+              d.underexposed === null ? "" : `${(d.underexposed * 100).toFixed(1)}%（≥ ${UNDEREXPOSED_THRESHOLD * 100}% 判死黑）`,
             ),
           ],
     ),
@@ -4425,47 +4299,6 @@ function setAf(on: boolean) {
 elLoupeAfToggle.addEventListener("click", () => setAf(!showAf));
 elLoupeAfToggle.classList.toggle("is-active", showAf);
 
-// ---- 单张现算闭眼 ----
-//
-// 整库跑一遍要几分钟；但「这一张到底有没有人眨眼」是看大图时才会问的问题，
-// 按一下就出答案，比等后台跑完有用得多。
-
-/** 把某张卡片上的质量徽标按最新数据重画一次（不重建卡片，缩略图不掉）。 */
-function repaintQualityBadge(c: PairCard) {
-  const card = elGrid.querySelector<HTMLElement>(`.card[data-id="${c.id}"]`);
-  if (!card) return;
-  card.querySelector(".card-badge--blink, .card-badge--quality")?.remove();
-  const issue = qualityIssue(c);
-  if (!issue) return;
-  const badge = document.createElement("span");
-  badge.className =
-    issue === "闭眼" ? "card-badge card-badge--blink" : "card-badge card-badge--quality";
-  badge.textContent = issue;
-  badge.title = qualityDetail(c);
-  card.appendChild(badge);
-}
-
-async function checkBlinkHere() {
-  const c = items[loupeIndex];
-  if (!c) return;
-  setHint("正在检测这张有没有人闭眼…");
-  try {
-    const r = await invoke<BlinkReport>("photo_blink", { id: c.id });
-    c.faces = r.faces;
-    c.eyeRatio = r.ratio;
-    repaintQualityBadge(c);
-    if (r.faces === 0) {
-      setHint("这张没找到人脸：侧脸太偏、人太小、戴墨镜都会漏。", "warn");
-    } else if (r.closed) {
-      setHint(`疑似有人闭眼：${r.faces} 张脸，最闭的眼睛 ${(r.ratio ?? 0).toFixed(2)}（低于 ${CLOSED_THRESHOLD} 判为闭眼）`, "warn");
-    } else {
-      setHint(`${r.faces} 张脸都睁着眼（最闭的 ${(r.ratio ?? 0).toFixed(2)}）`);
-    }
-  } catch (err) {
-    setHint(`这张没检测成：${String(err)}`, "warn");
-  }
-}
-
 function closeLoupe() {
   loupeIndex = -1;
   elLoupe.hidden = true;
@@ -4494,6 +4327,56 @@ elLoupe.addEventListener("click", (e) => {
 });
 
 /** 正在输入框里打字时，字母键不该被当成快捷键抢走。 */
+// ---- 弹窗焦点管理 ----
+//
+// 6 个 .modal 的开关散落在各自的 open/close 里，逐个补 focus() 必漏。
+// 统一监听 hidden 属性：从「全关」变「有开」时把焦点送进去，全关时还给
+// 打开前的那个元素。对比弹窗是从连拍弹窗里叠着开的，所以按「有没有开着」
+// 判断而不是「哪一个」，免得两层互相抢焦点。
+let lastFocusBeforeModal: HTMLElement | null = null;
+let hadOpenModal = false;
+const modalFocusObserver = new MutationObserver(() => {
+  const openModals = Array.from(document.querySelectorAll<HTMLElement>(".modal:not([hidden])"));
+  const top = openModals[openModals.length - 1];
+  if (top && !hadOpenModal) {
+    const prev = document.activeElement;
+    if (prev instanceof HTMLElement) lastFocusBeforeModal = prev;
+    const first = top.querySelector<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    );
+    if (!top.hasAttribute("tabindex")) top.tabIndex = -1;
+    (first ?? top).focus();
+  } else if (!top && hadOpenModal && lastFocusBeforeModal) {
+    if (lastFocusBeforeModal.isConnected) lastFocusBeforeModal.focus();
+    lastFocusBeforeModal = null;
+  }
+  hadOpenModal = Boolean(top);
+});
+for (const m of document.querySelectorAll<HTMLElement>(".modal")) {
+  m.setAttribute("role", "dialog");
+  m.setAttribute("aria-modal", "true");
+  modalFocusObserver.observe(m, { attributes: true, attributeFilter: ["hidden"] });
+}
+
+/** Tab 别跑出弹窗：打开时把焦点圈在最上面那一层里。 */
+function trapModalTab(e: KeyboardEvent, modal: HTMLElement) {
+  const focusables = Array.from(
+    modal.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((el) => el.offsetParent !== null);
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (e.shiftKey && (document.activeElement === first || document.activeElement === modal)) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
 function typingInField(e: KeyboardEvent): boolean {
   const t = e.target as HTMLElement | null;
   if (!t) return false;
@@ -4511,9 +4394,12 @@ function onWidget(e: KeyboardEvent): boolean {
   return !!t && (t.tagName === "BUTTON" || t.tagName === "A");
 }
 
-/** 网格当前是几列。方向键要按视觉上的上下左右移动，就得知道这个。 */
+/** 分组视图里真正的网格容器是 .group-grid；#grid 只是 display:block 的分组外壳，
+ *  读它的 gridTemplateColumns 永远拿到 none，↑↓ 会退化成逐张移动。 */
 function gridColumns(): number {
-  const tracks = getComputedStyle(elGrid).gridTemplateColumns;
+  const grid = elGrid.querySelector<HTMLElement>(".group-grid") ?? elGrid;
+  const tracks = getComputedStyle(grid).gridTemplateColumns;
+  if (!tracks || tracks === "none") return 1;
   return Math.max(1, tracks.split(" ").filter(Boolean).length);
 }
 
@@ -4530,20 +4416,25 @@ window.addEventListener("keydown", (e) => {
   const meta = e.metaKey || e.ctrlKey;
   const key = e.key;
 
-  // 导出对话框打开时，它才是当前的焦点
-  if (!elExportModal.hidden) {
+  // 任意弹窗打开时，它才是当前的焦点：只认 Esc，其余快捷键一律不穿透到网格。
+  // 以前只挡了「导出」和「清理」两个，对比 / 连拍 / 时间校正 / 范围选择会漏——
+  // 在弹窗里按 1 会顺手给背景的照片打上一星。
+  const modals: Array<[HTMLElement, () => void]> = [
+    [elExportModal, closeExportDialog],
+    [elCacheModal, closeCacheDialog],
+    [elSimilarModal, closeSimilarDialog],
+    [elCompareModal, closeCompareDialog],
+    [elScopeModal, closeScopeModal],
+    [elOffsetModal, () => { elOffsetModal.hidden = true; }],
+  ];
+  const openModal = modals.find(([el]) => !el.hidden);
+  if (openModal) {
     if (key === "Escape") {
       e.preventDefault();
-      closeExportDialog();
-    }
-    return;
-  }
-
-  // 清理对话框同理
-  if (!elCacheModal.hidden) {
-    if (key === "Escape") {
-      e.preventDefault();
-      closeCacheDialog();
+      openModal[1]();
+    } else if (key === "Tab") {
+      const top = Array.from(document.querySelectorAll<HTMLElement>(".modal:not([hidden])")).pop();
+      if (top) trapModalTab(e, top);
     }
     return;
   }
@@ -4595,7 +4486,8 @@ window.addEventListener("keydown", (e) => {
       return;
     }
 
-    // 缩放：+ 放大、- 缩小、⇧F 复位、A 到 1:1、F 全屏（在前面统一处理）。
+    // 缩放：+ 放大、_ 或 [ 缩小、⇧F 复位、A 到 1:1、F 全屏（在前面统一处理）。
+    // `-` 归紫色色标（见 COLORS，它就在 0 右边），不能被缩放抢先 return 掉。
     // 0 已经被「清除星级」占了，所以复位不用 0。
     const lower = key.toLowerCase();
     if (key === "+" || key === "=") {
@@ -4603,7 +4495,7 @@ window.addEventListener("keydown", (e) => {
       zoomBy(1.4);
       return;
     }
-    if (key === "-" || key === "_") {
+    if (key === "_" || key === "[") {
       e.preventDefault();
       zoomBy(1 / 1.4);
       return;
@@ -4616,11 +4508,6 @@ window.addEventListener("keydown", (e) => {
     if (lower === "o") {
       e.preventDefault();
       setAf(!showAf);
-      return;
-    }
-    if (lower === "b") {
-      e.preventDefault();
-      void checkBlinkHere();
       return;
     }
     if (lower === "i") {
@@ -4720,25 +4607,108 @@ window.addEventListener("keydown", (e) => {
 // 启动
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 彩蛋（默认关，完全不参与选片逻辑）
+//
+// 连点顶栏 logo 5 次开关总闸。开了之后才有：空状态摄影名言、一批过完的
+// 轻庆祝、⇧D 暗房安全灯、Konami 胶片边框。只写 localStorage，不碰数据库、
+// 不碰标记与导出。暗房刻意不做持久化——重启就恢复正常色彩，
+// 免得哪天开着它去判断白平衡。
+// ---------------------------------------------------------------------------
+
+const EASTER_KEY = "sp:easter";
+let easterOn = localStorage.getItem(EASTER_KEY) === "1";
+let darkroomOn = false;
+let celebrated = false;
+
+/** 中文意译，不冒充逐字原文；出处标在后面。 */
+const PHOTO_QUOTES: Array<[string, string]> = [
+  ["你不是「拍」下一张照片，而是「做」出一张照片。", "安塞尔·亚当斯 · 意译"],
+  ["如果你的照片不够好，是因为你离得不够近。", "罗伯特·卡帕 · 意译"],
+  ["底片是乐谱，照片是演奏。", "安塞尔·亚当斯 · 意译"],
+  ["拍照要同时用上眼睛、头脑和心，缺一样都不成。", "亨利·卡蒂埃-布列松 · 意译"],
+];
+const easterQuote = (): [string, string] =>
+  PHOTO_QUOTES[Math.floor(Math.random() * PHOTO_QUOTES.length)];
+
+function setDarkroom(on: boolean) {
+  darkroomOn = on;
+  document.documentElement.classList.toggle("is-darkroom", on);
+  setHint(
+    on
+      ? "暗房安全灯已开：仅用于夜间浏览，别用它判断照片色彩。再按 ⇧D 关掉。"
+      : "暗房安全灯已关，颜色恢复正常。",
+    on ? "warn" : "ok",
+  );
+}
+
+function setEaster(on: boolean) {
+  easterOn = on;
+  localStorage.setItem(EASTER_KEY, on ? "1" : "0");
+  if (!on) {
+    if (darkroomOn) setDarkroom(false);
+    document.body.classList.remove("easter-film");
+  }
+  setHint(
+    on
+      ? "彩蛋已开启：⇧D 暗房安全灯 · ↑↑↓↓←→←→BA 胶片边框 · 选完一批有小惊喜。再连点 5 次 logo 可关。"
+      : "彩蛋已关闭。",
+  );
+}
+
+// 连点 logo 5 次（1.5 秒内）开关总闸
+let brandClicks = 0;
+let brandClickAt = 0;
+document.querySelector<HTMLElement>(".brand")?.addEventListener("click", () => {
+  const now = Date.now();
+  brandClicks = now - brandClickAt < 1500 ? brandClicks + 1 : 1;
+  brandClickAt = now;
+  if (brandClicks >= 5) {
+    brandClicks = 0;
+    setEaster(!easterOn);
+  }
+});
+
+// ⇧D 暗房 + Konami 胶片边框，只在总闸打开时响应
+const KONAMI = [
+  "ArrowUp", "ArrowUp", "ArrowDown", "ArrowDown",
+  "ArrowLeft", "ArrowRight", "ArrowLeft", "ArrowRight", "b", "a",
+];
+let konamiAt = 0;
+window.addEventListener("keydown", (e) => {
+  if (!easterOn || typingInField(e)) {
+    konamiAt = 0;
+    return;
+  }
+  if (e.shiftKey && e.key.toLowerCase() === "d") {
+    e.preventDefault();
+    setDarkroom(!darkroomOn);
+    return;
+  }
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (key !== KONAMI[konamiAt]) {
+    konamiAt = key === KONAMI[0] ? 1 : 0;
+    return;
+  }
+  konamiAt += 1;
+  if (konamiAt === KONAMI.length) {
+    konamiAt = 0;
+    const on = document.body.classList.toggle("easter-film");
+    setHint(on ? "胶片边框上好了，慢慢看。" : "胶片边框收起来了。");
+  }
+});
+
 async function boot() {
   applyTheme(savedTheme());
 
-  // 同步视图切换器与分组依据的初始状态（applyView 里不 reload，首屏加载自己会铺）
+  // 分组依据选择器：本应用只有分组视图，始终显示
   elGroupMode.value = groupMode;
-  for (const b of elViewMode.querySelectorAll<HTMLButtonElement>("button[data-view]")) {
-    b.classList.toggle("is-active", b.dataset.view === viewMode);
-  }
-  elGroupMode.hidden = viewMode !== "group";
-  if (viewMode === "large") elGrid.dataset.density = "large";
+  elGroupMode.hidden = false;
   updateUndoRedo();
 
   await listen<ScanProgress>("scan://progress", (e) => showProgress(e.payload));
   await listen<ExportProgress>("export://progress", (e) => showExportProgress(e.payload));
-  // 闭眼检测一趟要几分钟：走底部进度条，报张数 + 已经揪出几张
-  await listen<BlinkProgress>("blink://progress", (e) => showBlinkProgress(e.payload));
   await showStartupError();
-  // 闭眼检测的开关在后端库里，启动先读一次把按钮画对
-  await loadBlinkSetting();
 
   updateCullInfo();
 

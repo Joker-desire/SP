@@ -314,8 +314,10 @@ fn user_comment(exif: &exif::Exif) -> Option<String> {
     // 前 8 字节是编码标记，认不出来就整段当 ASCII 试试
     let body = if raw.len() > 8 { &raw[8..] } else { &raw[..] };
     let s: String = match &raw[..8.min(raw.len())] {
+        // chunks_exact 会丢掉凑不成一对的尾字节：以前用 chunks(2) 时，
+        // 奇数长度的正文会在 c[1] 上直接 panic（某些机身写的 UserComment 就是这样）。
         b"UNICODE\0" => body
-            .chunks(2)
+            .chunks_exact(2)
             .map(|c| u16::from_be_bytes([c[0], c[1]]) as u32)
             .filter_map(char::from_u32)
             .collect(),

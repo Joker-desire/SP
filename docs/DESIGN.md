@@ -29,11 +29,11 @@
    ↓
 索引层        格式识别 · NEF/JPG 配对 · EXIF · 快速指纹 · SQLite 增量索引
    ↓
-缩略图缓存    160 / 512 / 1600 三级，每个配对只生成一份
+缩略图缓存    160 / 512 / 1600 / 4096 四档，按需生成
    ↓
 智能分析      清晰度 · 曝光过欠 · 连拍相似分组（按机身隔离）
    ↓
-选片交互      配对聚合显示 · 网格 / 单张 / 对比视图 · 全键盘操作
+选片交互      分组视图 · 全键盘操作
    ↓
 集合与导出    筛选成集 · 选择导出 RAW / JPG / 两者 · XMP 兼容
 ```
@@ -55,19 +55,20 @@
 
 ### 2. 缩略图缓存（Thumbnailer）
 
-三级缓存，对应三种使用场景：
+四档**按需生成**（不是预先批量生成），常规浏览只会碰到前两档：
 
-| 级别 | 尺寸 | 用途 | 单张体积 |
-|---|---|---|---|
-| micro | 160px | 网格视图缩略图墙 | ~15 KB |
-| grid | 512px | 网格放大、快速浏览 | ~90 KB |
-| preview | 1600px | 单张查看、大致构图判断 | ~500 KB |
+| 级别 | 尺寸 | 用途 |
+|---|---|---|
+| micro | 160px | 分组视图缩略图墙 |
+| grid | 512px | 网格卡片；请求时顺带把 micro 一起建了，一次解码出两档 |
+| loupe | 1600px | 单张查看 |
+| preview | 4096px | 放大到 100% 才按需生成，用于判断合焦 |
 
-- 缓存文件按哈希前两位分桶存放（如 `thumbs/a3/a3f9...jpg`），避免单目录塞进几万个文件导致文件系统变慢。
-- **核心技巧**：直接提取 RAW 内嵌的 JPEG 预览来生成缩略图，比完整解码 RAW 快 10-30 倍，且色彩是相机原味（尼康的 Picture Control 会体现在内嵌 JPEG 里）。只有在需要 100% 查看对焦时才做完整解码。
-- **配对后缩略图只生成一份**（优先用 JPG，解码最快）。所以 RAW+JPG 双格式**不会**让缓存体积翻倍。
-- 并行生成，后台持续补齐，**可中断、可续做**（几千张一次跑不完很正常，关掉应用再打开应该从断点继续）。
-- 缓存是纯派生数据，删除后可重建；提供「清空缓存」按钮和可配置的体积上限。
+- 缓存文件按「指纹 + 尺寸」哈希、取前两位分桶存放（如 `thumbs/a3/a3f9...-512.jpg`），避免单目录塞进几万个文件导致文件系统变慢。
+- **核心技巧**：直接提取 RAW 内嵌的 JPEG 预览生成缩略图，比完整解码 RAW 快 10-30 倍，且色彩是相机原味（尼康的 Picture Control 会体现在内嵌 JPEG 里）。降级链是 `内嵌/文件 JPEG → 标准位图解码 → 完整 RAW 解码 → 代码画的占位图`，最后一级保证链路不会抛错。
+- **并发写入必须各自用唯一的临时文件名**：同一张照片被多个线程同时请求是常态，固定 `xxx.jpg.tmp` 会被后来的 `create` 截断，前一个 `rename` 移走之后，后一个 `rename` 拿到 ENOENT，整条请求就失败。现在用「进程号 + 原子序号」命名，`rename` 撞上别人已写好的同一份缓存视为成功；0 字节半成品不算命中，会重新生成。
+- 解码放在 Rust 侧阻塞线程池，4 路并发闸门限流；前端只拿 base64 数据 URL，不做重解码。
+- 缓存是纯派生数据，删除后可重建；提供「清空缓存」按钮，并按 LRU 自动淘汰（默认上限 2GB，清到 80% 水位，最多一分钟扫一次）。
 
 ### 3. 智能分析层（Analyzer）
 
@@ -77,14 +78,13 @@
 - **曝光分析**：读直方图，统计过曝（高光溢出）和欠曝（暗部死黑）像素占比。
 - **连拍相似分组**：`同一机身 + 拍摄时间邻近 + pHash 距离 + 内容向量相似度` 多条件聚类。这是选片系统最核心的省力功能——把同一场景的 12 张连拍归成一组，你只需要在一组里选 1-2 张。**必须按机身序列号隔离**，否则两台机身同时拍摄时会把不相干的照片并到一起。
 - **语义标签**（可选，Phase 2）：CLIP 零样本分类，之后可以按「猫」「日落」「人像」「夜景」直接搜。
-- **闭眼检测**（可选，Phase 2）：人脸关键点，专治合影里总有人眨眼。
 - **美学评分**（可选，Phase 3）：NIMA 类模型给构图/色彩打分，仅作排序参考，不作为决策依据。
 
 ### 4. 选片交互层（UI）
 
-三种视图：
+浏览视图（主区）：
 
-- **网格视图**：缩略图墙，可调列数（3-10 列）。支持按拍摄时间、机身、镜头分组显示。**按配对聚合**——一次快门显示一张卡片，不是两张。
+- **分组视图**（默认且唯一）：缩略图按分组依据（机身 / 镜头 / 拍摄日期 / 所在文件夹等）分段展示，组内是缩略图墙，缩略图大小可调。**按配对聚合**——一次快门显示一张卡片，不是两张。
 - **单张视图（Loupe）**：大图预览，`Z` 键一键切到 100% 看真实对焦。
 - **对比视图**：2-4 张并排，专门用于连拍组内选优。这是区分「能用」和「好用」的关键功能。
 
@@ -144,7 +144,7 @@
 | 键 | 动作 |
 |---|---|
 | `←` `→` | 上一张 / 下一张 |
-| `↑` `↓` | 上一行 / 下一行（网格视图） |
+| `↑` `↓` | 上一行 / 下一行（分组视图） |
 | `1`-`5` | 打 1-5 星 |
 | `0` | 清除星级 |
 | `P` | 标记 Pick |
@@ -152,8 +152,7 @@
 | `U` | 取消标记 |
 | `6`-`9` | 色标（红黄绿蓝） |
 | `Z` | 切换 100% / 适应窗口 |
-| `空格` | 网格 ↔ 单张视图切换 |
-| `G` | 回到网格视图 |
+| `空格` | 打开 / 关闭单张大图（Loupe） |
 | `C` | 进入对比视图（选中 2-4 张时） |
 | `Tab` | 折叠 / 展开连拍分组 |
 | `F` | 全屏 |
@@ -361,7 +360,7 @@
 
 ### 6. 大素材量对界面的额外要求
 
-- 网格必须**真虚拟化**：DOM 节点数恒定，只渲染可视区 + 上下各一屏。三千张和三十万张的滚动性能应该一样。
+- 网格必须**分页加载 + 视口外卸载位图**（当前实现）：DOM 节点仍会随已加载页数增长，但滚远的卡片会释放解码后的位图，内存不随总张数涨。真虚拟化（DOM 节点数恒定）仍是后续目标。
 - 键盘快速扫图时缩略图必须**命中磁盘缓存**，所以导入完成后要有「预生成邻接预览」的后台任务。
 - 提供**时间线侧边栏**：按日期 / 时段分段跳转，否则几千张里定位到某个场景要靠一直按方向键。
 - **配对状态要一眼可见**：卡片角标显示 `NEF+JPG` / `仅 NEF` / `仅 JPG`，并能按此筛选。
@@ -371,89 +370,80 @@
 
 ## 八、数据模型（SQLite）
 
+> 以下是**当前实现**，以 `src-tauri/src/db.rs` 的 `SCHEMA_TABLES` / `SCHEMA_INDEXES` 为准。
+> 早期设计稿里的 `ratings` / `analysis` / `groups` / `collections` / `tags` 表和
+> `nef_compression` / `shutter_count` / `gps_*` 等列**都没有落地**，不要照着旧稿写代码。
+
 ```sql
--- 照片主表（每个文件一行；配对通过 pair_key 聚合）
+-- 照片主表：每个文件一行，配对通过 pair_key 聚合
 photos (
   id INTEGER PRIMARY KEY,
-  path TEXT UNIQUE,             -- 绝对路径（规范化后）
-  fingerprint TEXT,             -- 快速指纹：size + mtime + 前1MB哈希
-  content_hash TEXT,            -- 全文件 blake3，按需计算，仅用于查重复
-  phash TEXT,                   -- 感知哈希，相似检测
-  pair_key TEXT,                -- 配对键：规范化目录 + 主文件名（均小写）
-  file_kind TEXT,               -- raw / jpeg / heic / tiff / png
-  is_primary INTEGER,           -- 该配对中的主文件（RAW 优先），缩略图/1:1 取自它
-  decode_path TEXT,             -- 实际走通的解码级别：rawler/system/embedded/placeholder
-  nef_compression TEXT,         -- 未压缩 / 无损 / 有损 / HE / HE*
-  file_size INTEGER,
-  mtime INTEGER,
+  path TEXT NOT NULL UNIQUE,       -- 绝对路径
+  fingerprint TEXT NOT NULL,       -- size + mtime + 前 1MB 哈希（不做全文件哈希）
+  content_hash TEXT,               -- 按需计算，仅用于查重复
+  phash TEXT,                      -- 感知哈希
+  pair_key TEXT NOT NULL,          -- 规范化目录 + 主文件名（均小写）
+  file_kind TEXT NOT NULL,         -- raw / jpeg / other
+  is_primary INTEGER NOT NULL,     -- 该配对的主文件（RAW 优先）
+  decode_path TEXT,                -- 实际走通的解码级别
+  file_size INTEGER, mtime INTEGER,
   width INTEGER, height INTEGER,
-  taken_at INTEGER,             -- 原始 EXIF 拍摄时间（epoch）
-  taken_at_corrected INTEGER,   -- 应用机身时间偏移后的时间（排序/分组用这个）
-  camera_model TEXT,
-  camera_serial TEXT,           -- 多机身的关键：区分是哪台机身
-  lens TEXT,
-  focal_len REAL, aperture REAL,
-  shutter TEXT, iso INTEGER,
-  shutter_count INTEGER,        -- 尼康 MakerNote 里的快门数
+  taken_at INTEGER,                -- 原始 EXIF 拍摄时间（epoch）
+  taken_at_corrected INTEGER,      -- 应用机身时间偏移后（排序 / 分组用）
+  camera_model TEXT, camera_serial TEXT,
+  lens TEXT, focal_len REAL, aperture REAL, shutter TEXT, iso INTEGER,
   orientation INTEGER,
-  gps_lat REAL, gps_lon REAL,
-  indexed_at INTEGER
-)
-CREATE INDEX idx_photos_pair ON photos(pair_key);
-CREATE INDEX idx_photos_time ON photos(taken_at_corrected);
+  exif_ok INTEGER NOT NULL DEFAULT 0,
+  indexed_at INTEGER NOT NULL,
+  -- 画面分析：扫描之后的后台趟，见 analyze.rs
+  sharpness REAL, overexposed REAL, underexposed REAL,
+  analyze_failed INTEGER NOT NULL DEFAULT 0  -- 试过但取不到预览，不再反复重算
+);
+
+-- 选片结果。主键必须是 pair_key，不能是 photo_id：
+-- 重新扫描时 photos 会删掉重建、自增 id 会变，挂 photo_id 的外键会被连带清空，
+-- 用户一晚上的标记就没了。pair_key 由路径推导，文件不动就不变。
+decisions (
+  pair_key   TEXT PRIMARY KEY,
+  decision   TEXT NOT NULL DEFAULT 'none',  -- none / keep / reject
+  stars      INTEGER NOT NULL DEFAULT 0,    -- 0–5
+  color      TEXT NOT NULL DEFAULT '',      -- '' / red / yellow / green / blue / purple
+  updated_at INTEGER NOT NULL
+);
 
 -- 机身登记表（时间偏移校正）
 camera_bodies (
   serial TEXT PRIMARY KEY,
   model TEXT,
-  time_offset_seconds INTEGER DEFAULT 0,   -- 时钟校正偏移，可为负
+  time_offset_seconds INTEGER NOT NULL DEFAULT 0,  -- 可为负
   first_seen_at INTEGER,
   note TEXT
-)
+);
 
--- 评分（与照片分离，便于重建索引时不丢评分）
--- 打分时按 pair_key 广播：一次快门的两份记录写入相同评分
-ratings (
-  photo_id INTEGER PRIMARY KEY,
-  pair_key TEXT,                -- 冗余字段，便于按配对查询与聚合
-  stars INTEGER DEFAULT 0,      -- 0-5
-  flag TEXT,                    -- pick / reject / null
-  color_label TEXT,             -- red/yellow/green/blue/purple
-  updated_at INTEGER
-)
-CREATE INDEX idx_ratings_pair ON ratings(pair_key);
-
--- 分析结果（按配对记录，因为分析基于缩略图，一个配对只有一份）
-analysis (
-  pair_key TEXT PRIMARY KEY,
-  sharpness REAL,               -- 清晰度分数
-  overexposed_ratio REAL,       -- 过曝像素占比
-  underexposed_ratio REAL,
-  aesthetic_score REAL,
-  has_closed_eyes INTEGER,
-  face_count INTEGER
-)
-
--- 相似分组
-groups (id INTEGER PRIMARY KEY, camera_serial TEXT, created_at INTEGER, cover_pair_key TEXT)
-group_members (group_id INTEGER, pair_key TEXT, similarity REAL)
-
--- 集合
-collections (id INTEGER PRIMARY KEY, name TEXT, type TEXT, filter_json TEXT, created_at INTEGER)
-collection_pairs (collection_id INTEGER, pair_key TEXT, added_at INTEGER)
-
--- 标签
-tags (id INTEGER PRIMARY KEY, name TEXT)
-pair_tags (pair_key TEXT, tag_id INTEGER, source TEXT)  -- source: manual / auto
+meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ```
+
+索引建在**补完新列之后**，单条失败只提示、不让库打不开：
+
+```sql
+photos(pair_key) / photos(taken_at_corrected) / photos(file_kind)
+photos(is_primary, COALESCE(taken_at_corrected, mtime))  -- 默认排序的表达式索引
+photos(camera_serial) / photos(lens) / photos(iso) / photos(focal_len)
+photos(is_primary, sharpness) / photos(is_primary, sharpness, analyze_failed)
+decisions(decision) / decisions(color) / decisions(stars)
+```
+
+**升级兼容**：后加的列由 `add_missing_columns` 逐条 `ALTER TABLE` 补齐，老库不会因缺列打不开。
+早期版本闭眼检测留下的 `faces` / `eye_ratio` 两列只是从「待补列清单」里移除、没有
+`DROP COLUMN`——它们会一直躺在老库里，不再被读写，无害。
 
 **三个关键设计**：
 
 1. **`photos` 每文件一行 + `pair_key` 聚合**。这比「一个配对一行、两个路径字段」更灵活——天然支持「只拍了 JPG」「只拍了 RAW」的混合情况，不需要特例代码。配对逻辑只存在于查询和界面层。
-2. **`ratings` 与 `photos` 分表**。即使照片换了盘、挪了目录、重建了索引，你辛苦打的分也不会丢——重建时用 `fingerprint` 重新关联即可。
+2. **`decisions` 与 `photos` 分表、以 `pair_key` 为主键**。即使照片换了盘、挪了目录、重建了索引，你辛苦打的标记也不会丢。画面分析的结果则直接放在 `photos` 上（跟文件走，重扫会重算）。
 3. **`camera_bodies` 独立成表**。机身时间偏移是「一次性配置、长期生效」的数据，换素材、重建索引都不该丢。所有照片的 `taken_at_corrected` 由 `taken_at + 该机身的 offset` 派生。
 
-**注意 `analysis` 和集合/标签都以 `pair_key` 为主键**——因为对用户而言「一次快门」才是最小单位，分析和归类都该按这个单位走。
+集合、标签、语义分组这些「按配对归类」的表还在规划里，尚未落地。
 
 ---
 
@@ -466,16 +456,16 @@ pair_tags (pair_key TEXT, tag_id INTEGER, source TEXT)  -- source: manual / auto
 | 单张缩略图生成 | < 150 ms | 解码内嵌 JPEG / JPG 副本，不做 demosaic |
 | 3000 次快门 micro + grid | < 4 分钟 | 配对后只生成一份 + 并行 + 可中断续做 |
 | 配对计算 | < 1 秒 | 按 pair_key 分组，O(n) |
-| 网格滚动 | 稳定 60 fps | 真虚拟化，DOM 节点数恒定 |
+| 网格滚动 | 稳定 60 fps | 分页加载 + 滚远释放位图，DOM 节点数随已加载页数增长 |
 | 大图切换 | < 100 ms | 预取相邻 3 张 preview |
 | 相似分组（3000 次快门） | < 5 秒 | 按时间窗口聚类，O(n log n) |
 
 其他要点：
 
 - SQLite 开 WAL 模式，批量写入用事务包裹（单条提交会让索引慢 100 倍）。
-- 缩略图缓存加 LRU 淘汰，上限可配（默认 20GB）。
-- 前端图片解码放 Web Worker，避免主线程卡顿。
-- 导入是**可中断、可续做**的后台任务，不是一次性阻塞流程。
+- 缩略图缓存加 LRU 淘汰（默认上限 2GB，清到 80% 水位）。
+- 图片解码在 Rust 侧阻塞线程池完成，4 路并发闸门限流，前端不解码大图。
+- 导入是**可取消**的后台任务：解析在独立线程 + 有界 channel 背压，新任务启动会先取消旧任务，不抢同一把写锁。
 
 ---
 
@@ -541,7 +531,8 @@ SP/
 - [ ] 生成 micro + grid 两级缩略图，分桶缓存，可中断续做
 
 **界面**
-- [ ] 网格视图 + 真虚拟化（3000 张不卡），按配对聚合显示
+- [x] 分组视图（按配对聚合显示，可折叠、依据可选）
+- [ ] 网格真虚拟化（当前是分页 + 视口卸载，DOM 仍会随已加载页数增长）
 - [ ] 配对状态角标（`NEF+JPG` / `仅 NEF` / `仅 JPG`）
 - [ ] 时间线侧边栏（按日期跳转）
 - [ ] 单张视图 + `Z` 键 100% 对焦查看
@@ -575,7 +566,6 @@ SP/
 
 ### Phase 2 — AI 辅助
 
-- [ ] 闭眼检测
 - [ ] CLIP 语义标签 + 语义搜索
 - [ ] 人脸分组（同一人自动归组）
 - [ ] 美学评分排序
@@ -601,9 +591,9 @@ SP/
 | 两台尼康文件名撞名、互相覆盖 | 以「指纹 + 机身序列号」为身份，导出一律重命名 |
 | **存储卡拷贝不完整，事后才发现缺文件** | 孤立文件筛选（只有 NEF 没有 JPG 或反之），一眼看出漏拷 |
 | 全文件哈希拖垮首次导入 | 只用「size + mtime + 前 1MB」快速指纹；全哈希仅按需后台算 |
-| 缩略图缓存吃满磁盘 | 上限可配（默认 20GB）+ LRU + 一键清空；缓存可重建 |
-| 大图库内存爆掉 | 虚拟滚动 + 磁盘缓存，前端不持有全量位图 |
-| AI 模型依赖体积大、装不上 | 分阶段引入，核心功能（索引/缩略图/评分）不依赖任何 AI 模型 |
+| 缩略图缓存吃满磁盘 | 默认上限 2GB 的 LRU 淘汰 + 一键清空；缓存可重建 |
+| 大图库内存爆掉 | IntersectionObserver 就近加载 + 滚远卸载位图 + 磁盘缓存，前端不持有全量位图 |
+| AI 模型依赖体积大、装不上 | 当前版本不打包任何模型文件：选片只靠内嵌 JPEG 预览 + 元数据 |
 | 误标、误删 | 删除只进回收站；评分支持撤销；数据库自动备份 |
 | 照片目录是外接硬盘，盘符变化 | 用 `fingerprint` 关联评分，而不是路径 |
 | 一旦开始用就离不开，成了关键工具 | 评分必须能导出为 XMP，数据不被锁死 |

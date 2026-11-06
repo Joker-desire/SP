@@ -84,18 +84,6 @@
 
         <button
           class="btn btn-ghost"
-          id="btn-blink"
-          title="闭眼检测：扫描后在本机跑一遍人脸模型，标出有人眨眼的照片（模型随应用打包，不联网）"
-        >
-          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M1.4 8s2.4-3.6 6.6-3.6S14.6 8 14.6 8s-2.4 3.6-6.6 3.6S1.4 8 1.4 8Z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
-            <circle cx="8" cy="8" r="1.9" fill="none" stroke="currentColor" stroke-width="1.3"/>
-          </svg>
-          <span class="btn-text">闭眼检测</span>
-        </button>
-
-        <button
-          class="btn btn-ghost"
           id="btn-similar"
           title="把连着拍的照片按时间分组，一次挑出最好的一张"
         >
@@ -271,36 +259,6 @@
             <option value="sizeDesc">文件大小 · 大 → 小</option>
           </select>
 
-          <div class="segmented" id="view-mode" role="group" aria-label="视图">
-            <button type="button" data-view="grid" title="网格视图">
-              <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
-                <rect x="1.5" y="1.5" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
-                <rect x="6.05" y="1.5" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
-                <rect x="10.6" y="1.5" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
-                <rect x="1.5" y="6.05" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
-                <rect x="6.05" y="6.05" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
-                <rect x="10.6" y="6.05" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
-                <rect x="1.5" y="10.6" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
-                <rect x="6.05" y="10.6" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
-                <rect x="10.6" y="10.6" width="3.9" height="3.9" rx="0.8" fill="currentColor"/>
-              </svg>
-            </button>
-            <button type="button" data-view="group" title="分组视图（依据用旁边的选择器定）">
-              <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
-                <rect x="1.5" y="2" width="13" height="5.2" rx="1" fill="currentColor"/>
-                <rect x="1.5" y="9.4" width="3.9" height="4.4" rx="0.8" fill="currentColor"/>
-                <rect x="6.05" y="9.4" width="3.9" height="4.4" rx="0.8" fill="currentColor"/>
-                <rect x="10.6" y="9.4" width="3.9" height="4.4" rx="0.8" fill="currentColor"/>
-              </svg>
-            </button>
-            <button type="button" data-view="large" title="大图视图">
-              <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
-                <rect x="1.8" y="2.2" width="5.6" height="11.6" rx="1" fill="currentColor"/>
-                <rect x="8.6" y="2.2" width="5.6" height="11.6" rx="1" fill="currentColor"/>
-              </svg>
-            </button>
-          </div>
-
           <button class="btn btn-ghost" id="btn-clear" hidden>清除筛选</button>
 
           <span class="toolbar-count" id="count"></span>
@@ -470,7 +428,7 @@
           <span class="loupe-name" id="loupe-name"></span>
           <span class="loupe-exif" id="loupe-exif"></span>
           <span class="loupe-pos" id="loupe-pos"></span>
-          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · 0 清星 · 6-9 与 - 色标 · I 详情 · O 对焦点 · B 闭眼 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
+          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · 0 清星 · 6-9 与 - 色标 · I 详情 · O 对焦点 · + 放大 / _ 缩小 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
           <button class="btn btn-ghost loupe-close" id="loupe-close">关闭</button>
         </div>
       </div>

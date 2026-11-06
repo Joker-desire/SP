@@ -13,6 +13,7 @@
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::thumb;
@@ -42,8 +43,20 @@ pub struct Metrics {
 
 /// 算一张照片的画面指标。算不出来返回 Err——调用方记下来跳过，不重试。
 pub fn metrics_for(path: &Path) -> Result<Metrics> {
-    let (bytes, _) = thumb::best_jpeg_from_file(path)
-        .with_context(|| format!("取不到预览：{}", path.display()))?;
+    // 指标只在一张 256px 见方的小图上算，没必要把 RAW 里 5568px 的全尺寸
+    // 预览解出来再缩。fitting_jpeg 挑「够用的最小那张」；rayon 满核并行时，
+    // 这一步直接决定内存峰值（原来是核数 × 上百 MB 的解码缓冲）。
+    let bytes = match thumb::fitting_jpeg_from_file(path, WORK_SIZE) {
+        Ok((b, _)) => b,
+        // 老机身可能只有一张比 WORK_SIZE 还小的预览，退回最大的那张照样能量
+        Err(_) => {
+            thumb::best_jpeg_from_file(path)
+                .with_context(|| format!("取不到预览：{}", path.display()))?
+                .0
+        }
+    };
+    // 和缩略图共用一道并发闸门，别让满核的解码把内存吃光
+    let _permit = thumb::global_limiter().acquire();
     let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
         .with_context(|| format!("预览解码失败：{}", path.display()))?;
     Ok(measure(&img))
@@ -143,10 +156,37 @@ pub struct AnalyzeSummary {
 ///
 /// `roots` 用来把范围限定在当前文件夹——换文件夹时旧照片留在库里（标记要复用），
 /// 但分析不该顺带去算那些现在看不到的。
+/// 不带取消开关的入口，主要给测试用；正式命令走 `_cancel` 版。
+#[allow(dead_code)]
 pub fn analyze_pending<F>(
     roots: &[std::path::PathBuf],
     db: &Arc<Mutex<Connection>>,
     on_progress: F,
+) -> Result<AnalyzeSummary>
+where
+    F: Fn(AnalyzeProgress) + Send + Sync,
+{
+    analyze_pending_impl(roots, db, on_progress, None)
+}
+
+/// 带取消开关的版本：换文件夹或重新扫描时，上一趟分析在批次边界退出。
+pub fn analyze_pending_cancel<F>(
+    roots: &[std::path::PathBuf],
+    db: &Arc<Mutex<Connection>>,
+    on_progress: F,
+    cancel: Arc<AtomicBool>,
+) -> Result<AnalyzeSummary>
+where
+    F: Fn(AnalyzeProgress) + Send + Sync,
+{
+    analyze_pending_impl(roots, db, on_progress, Some(cancel))
+}
+
+fn analyze_pending_impl<F>(
+    roots: &[std::path::PathBuf],
+    db: &Arc<Mutex<Connection>>,
+    on_progress: F,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<AnalyzeSummary>
 where
     F: Fn(AnalyzeProgress) + Send + Sync,
@@ -159,6 +199,7 @@ where
         let mut stmt = conn.prepare(
             "SELECT p.id, p.path FROM photos p
              WHERE p.is_primary = 1 AND p.sharpness IS NULL
+               AND p.analyze_failed = 0
              ORDER BY p.id",
         )?;
         let rows = stmt
@@ -195,6 +236,9 @@ where
     // 分批写库：每批结束就放锁，前端该查还是能查
     const BATCH: usize = 100;
     for chunk in targets.chunks(BATCH) {
+        if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+            break;
+        }
         let results: Vec<(i64, Option<Metrics>)> = chunk
             .par_iter()
             .map(|(id, path)| {
@@ -212,20 +256,28 @@ where
             let tx = conn.transaction()?;
             {
                 let mut up = tx.prepare(
-                    "UPDATE photos SET sharpness = ?1, overexposed = ?2, underexposed = ?3
+                    "UPDATE photos SET sharpness = ?1, overexposed = ?2, underexposed = ?3,
+                                      analyze_failed = 0
                      WHERE id = ?4",
                 )?;
+                let mut failed_up =
+                    tx.prepare("UPDATE photos SET analyze_failed = 1 WHERE id = ?1")?;
                 for (id, m) in &results {
-                    let m = match m {
-                        Some(m) => *m,
-                        None => continue,
-                    };
-                    up.execute(rusqlite::params![
-                        m.sharpness,
-                        m.overexposed,
-                        m.underexposed,
-                        id
-                    ])?;
+                    match m {
+                        Some(m) => {
+                            up.execute(rusqlite::params![
+                                m.sharpness,
+                                m.overexposed,
+                                m.underexposed,
+                                id
+                            ])?;
+                        }
+                        // 取不到预览就记一笔：不然下一趟又把它捞出来白算，
+                        // 「还剩 N 张」永远归不了零，每次启动都重跑一遍。
+                        None => {
+                            failed_up.execute([id])?;
+                        }
+                    }
                 }
             }
             tx.commit()?;
@@ -240,7 +292,8 @@ where
     let remaining = {
         let conn = db.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
         conn.query_row(
-            "SELECT COUNT(*) FROM photos WHERE is_primary = 1 AND sharpness IS NULL",
+            "SELECT COUNT(*) FROM photos
+             WHERE is_primary = 1 AND sharpness IS NULL AND analyze_failed = 0",
             [],
             |r| r.get::<_, i64>(0),
         )? as usize

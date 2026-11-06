@@ -6,7 +6,6 @@
 
 mod af;
 mod analyze;
-mod blink;
 mod db;
 mod exif_detail;
 mod indexer;
@@ -17,6 +16,7 @@ mod thumb;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
@@ -24,6 +24,21 @@ pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
     /// 启动时数据库没打开成功的话，这里记着原因，前端会把它显示成一条醒目的提示。
     pub startup_error: Option<String>,
+}
+
+/// 当前后台任务（扫描 / 画面分析）的取消开关。
+/// 启动新任务时先把旧的置 true，旧任务会在文件 / 批次边界自行退出——
+/// 不然换文件夹、关窗口之后它还会跑到底，并和下一次任务抢同一把写锁。
+static ACTIVE_JOB_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+
+fn begin_background_job() -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    let mut slot = ACTIVE_JOB_CANCEL.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(previous) = slot.take() {
+        previous.store(true, Ordering::Relaxed);
+    }
+    *slot = Some(flag.clone());
+    flag
 }
 
 /// 启动是否出了问题。前端一进来就问一次。
@@ -63,8 +78,9 @@ async fn scan_folder(
         Some(_) => (vec![PathBuf::from(&path)], Some(1)),
         None => (vec![PathBuf::from(&path)], None),
     };
+    let cancel = begin_background_job();
     tauri::async_runtime::spawn_blocking(move || {
-        indexer::scan_with_progress(
+        indexer::scan_with_progress_cancel(
             &roots,
             &db,
             |p| {
@@ -72,6 +88,7 @@ async fn scan_folder(
                 let _ = app.emit("scan://progress", &p);
             },
             max_depth,
+            cancel,
         )
         .map_err(|e| format!("{e:#}"))
     })
@@ -95,116 +112,17 @@ async fn analyze_library(
         .into_iter()
         .map(PathBuf::from)
         .collect();
+    let cancel = begin_background_job();
     tauri::async_runtime::spawn_blocking(move || {
-        analyze::analyze_pending(&roots, &db, |p| {
-            let _ = app.emit("analyze://progress", &p);
-        })
+        analyze::analyze_pending_cancel(
+            &roots,
+            &db,
+            |p| {
+                let _ = app.emit("analyze://progress", &p);
+            },
+            cancel,
+        )
         .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// 闭眼检测的总开关存在库里（meta 表），不在前端。
-///
-/// 存库里的理由：它决定的是「扫描之后要不要多跑一趟」，属于这台机器上的
-/// 持久偏好，跟窗口大小那种界面状态不是一回事——换台机器不该被带过去。
-const BLINK_KEY: &str = "blink_enabled";
-
-#[tauri::command]
-async fn blink_enabled(state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(|e| e.to_string())?;
-        Ok(db::meta_get(&conn, BLINK_KEY)
-            .map_err(|e| format!("{e:#}"))?
-            .map(|v| v == "1")
-            .unwrap_or(false))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-async fn set_blink_enabled(state: tauri::State<'_, AppState>, on: bool) -> Result<(), String> {
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = db.lock().map_err(|e| e.to_string())?;
-        db::meta_set(&conn, BLINK_KEY, if on { "1" } else { "0" }).map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// 把「还没检测过」的照片挨个找一遍有没有人闭眼。
-///
-/// 和画面分析一样是后台趟：分批、可中断、算过的不再算。
-/// 开关关着时前端不会调它——几千张的解码 + 推理不是免费的。
-#[tauri::command]
-async fn analyze_blink(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-    roots: Option<Vec<String>>,
-) -> Result<blink::BlinkSummary, String> {
-    let db = state.db.clone();
-    let roots: Vec<PathBuf> = roots
-        .unwrap_or_default()
-        .into_iter()
-        .map(PathBuf::from)
-        .collect();
-    tauri::async_runtime::spawn_blocking(move || {
-        blink::analyze_pending(&roots, &db, |p| {
-            let _ = app.emit("blink://progress", &p);
-        })
-        .map_err(|e| format!("{e:#}"))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// 中途喊停闭眼检测。已经算完的照常留着，剩下的下次接着算。
-#[tauri::command]
-fn cancel_blink() {
-    blink::cancel();
-}
-
-/// 单张现算：大图里按一下就出结果，不用等整库跑完。
-///
-/// 算完顺手写回库里——下次批量检测会跳过它，批量跑到一半被打断也不会白算。
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BlinkReport {
-    faces: usize,
-    ratio: Option<f64>,
-    closed: bool,
-}
-
-#[tauri::command]
-async fn photo_blink(state: tauri::State<'_, AppState>, id: i64) -> Result<BlinkReport, String> {
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let path: String = {
-            let conn = db.lock().map_err(|e| e.to_string())?;
-            conn.query_row("SELECT path FROM photos WHERE id = ?1", [id], |r| r.get(0))
-                .map_err(|e| format!("这张照片已经不在库里了：{e}"))?
-        };
-
-        let report = blink::eyes_for(Path::new(&path)).map_err(|e| format!("{e:#}"))?;
-
-        {
-            let conn = db.lock().map_err(|e| e.to_string())?;
-            conn.execute(
-                "UPDATE photos SET faces = ?1, eye_ratio = ?2 WHERE id = ?3",
-                rusqlite::params![report.faces as i64, report.ratio, id],
-            )
-            .map_err(|e| format!("写回检测结果失败：{e}"))?;
-        }
-
-        Ok(BlinkReport {
-            faces: report.faces,
-            ratio: report.ratio,
-            closed: report.closed(),
-        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -441,10 +359,6 @@ struct PairCard {
     overexposed: Option<f64>,
     /// 暗部死黑像素占比 0–1
     underexposed: Option<f64>,
-    /// 检出的人脸数。NULL = 还没检测过（闭眼检测默认关，多数时候就是 NULL）。
-    faces: Option<i64>,
-    /// 最闭的那只眼睛的 EAR；NULL = 没测出关键点（包括压根没脸的情况）。
-    eye_ratio: Option<f64>,
 }
 
 /// 一页照片 + 满足条件的总数（前端据此显示「共 N 张」和决定还要不要继续加载）。
@@ -662,11 +576,6 @@ fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
             "p.underexposed IS NOT NULL AND p.underexposed >= {}",
             analyze::UNDEREXPOSED_THRESHOLD
         )),
-        // 疑似闭眼。同理：没检测过的一律不算有嫌疑。
-        Some("blink") => conds.push(format!(
-            "p.eye_ratio IS NOT NULL AND p.eye_ratio < {}",
-            blink::CLOSED_THRESHOLD
-        )),
         _ => {}
     }
 
@@ -756,7 +665,7 @@ fn query_pairs(
                 p.lens, p.focal_len, p.aperture, p.shutter, p.iso,
                 p.file_size, p.decode_path,
                 {DECISION}, {STARS}, {COLOR},
-                p.sharpness, p.overexposed, p.underexposed, p.faces, p.eye_ratio
+                p.sharpness, p.overexposed, p.underexposed
          {FROM_PHOTOS}
          WHERE {where_sql}
          {}
@@ -799,8 +708,6 @@ fn query_pairs(
             sharpness: r.get(20)?,
             overexposed: r.get(21)?,
             underexposed: r.get(22)?,
-            faces: r.get(23)?,
-            eye_ratio: r.get(24)?,
         })
     })?;
 
@@ -889,10 +796,6 @@ struct PhotoDetail {
     stars: i64,
     /// 色标：'' / red / yellow / green / blue / purple
     color: String,
-    /// 闭眼检测：检出的人脸数，NULL = 还没检测过
-    faces: Option<i64>,
-    /// 最闭的那只眼睛的 EAR
-    eye_ratio: Option<f64>,
     siblings: Vec<SiblingFile>,
 }
 
@@ -907,7 +810,7 @@ fn photo_detail_of(conn: &Connection, id: i64) -> anyhow::Result<PhotoDetail> {
                 strftime('%Y-%m-%d %H:%M:%S', p.indexed_at, 'unixepoch', 'localtime'),
                 p.sharpness, p.overexposed, p.underexposed, p.decode_path,
                 p.fingerprint, p.content_hash, p.phash,
-                {DECISION}, {STARS}, {COLOR}, p.faces, p.eye_ratio
+                {DECISION}, {STARS}, {COLOR}
          {FROM_PHOTOS} WHERE p.id = ?1"
     );
 
@@ -943,8 +846,6 @@ fn photo_detail_of(conn: &Connection, id: i64) -> anyhow::Result<PhotoDetail> {
             decision: r.get(26)?,
             stars: r.get(27)?,
             color: r.get(28)?,
-            faces: r.get(29)?,
-            eye_ratio: r.get(30)?,
             file_name: String::new(),
             dir: String::new(),
             siblings: Vec::new(),
@@ -1325,28 +1226,24 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         }
     }
 
-    // 画面质量：四档一次数完。没分析过的（NULL）不算进来，
+    // 画面质量：三档一次数完。没分析过的（NULL）不算进来，
     // 否则刚扫完就显示「几千张糊了」——那是还没算，不是糊。
-    // 「疑似闭眼」同理：检测默认关着，没跑过就是 0，不是「没人眨眼」。
     let quality = {
         let sql = format!(
             "SELECT
                 COALESCE(SUM(CASE WHEN p.sharpness    IS NOT NULL AND p.sharpness    <  {} THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN p.overexposed  IS NOT NULL AND p.overexposed  >= {} THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.underexposed IS NOT NULL AND p.underexposed >= {} THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN p.eye_ratio    IS NOT NULL AND p.eye_ratio    <  {} THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN p.underexposed IS NOT NULL AND p.underexposed >= {} THEN 1 ELSE 0 END), 0)
              {FROM_PHOTOS} WHERE p.is_primary = 1{scope}",
             analyze::BLUR_THRESHOLD,
             analyze::OVEREXPOSED_THRESHOLD,
             analyze::UNDEREXPOSED_THRESHOLD,
-            blink::CLOSED_THRESHOLD,
         );
-        let (blur, over, under, blink) = conn.query_row(&sql, sp(), |r| {
+        let (blur, over, under) = conn.query_row(&sql, sp(), |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, i64>(2)?,
-                r.get::<_, i64>(3)?,
             ))
         })?;
         vec![
@@ -1364,11 +1261,6 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
                 key: "under".into(),
                 label: "暗部死黑".into(),
                 count: under,
-            },
-            Facet {
-                key: "blink".into(),
-                label: "疑似闭眼".into(),
-                count: blink,
             },
         ]
     };
@@ -1798,6 +1690,28 @@ struct ExportProgress {
 ///
 /// 两种模式都写清单。清单才是这个功能的底线——即使一个文件都没复制，
 /// 它也把「留下了哪些、淘汰了哪些」变成了一份可以交给别人、可以留档的东西。
+/// 导出目标目录的合法性检查。
+///
+/// 前端走的是系统目录选择框，正常路径一定合规；这里挡的是 command 被别处
+/// 传了个任意字符串。没有这层，dest 可以让应用在磁盘任意位置建目录、写文件
+/// （csp 没开时，WebView 里被注入的脚本也能调到命令）。
+fn validate_export_dest(raw: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(raw.trim());
+    if !p.is_absolute() {
+        return Err("导出目录必须是绝对路径".into());
+    }
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("导出目录不能包含 ..".into());
+    }
+    // 根目录 / 盘符根不能当目标：会往系统顶层撒一堆照片和清单
+    if p.parent().is_none() {
+        return Err("请选一个具体的导出文件夹，不要用磁盘根目录".into());
+    }
+    Ok(p)
+}
+
 #[tauri::command]
 async fn export_selection(
     app: tauri::AppHandle,
@@ -1811,6 +1725,7 @@ async fn export_selection(
     template: Option<String>,
 ) -> Result<ExportSummary, String> {
     let db = state.db.clone();
+    let dest = validate_export_dest(&dest)?;
     let filter = filter.unwrap_or_default();
     let scope = FileScope::parse(scope.as_deref().unwrap_or("both"));
     let template = template
@@ -1825,7 +1740,7 @@ async fn export_selection(
         export_rows(
             &conn,
             &filter,
-            Path::new(&dest),
+            &dest,
             copy_files,
             scope,
             &template,
@@ -2025,8 +1940,20 @@ fn split_datetime(text: Option<&str>) -> (String, String) {
     if s.len() < 19 {
         return (String::new(), String::new());
     }
-    let date: String = s[..10].chars().filter(|c| c.is_ascii_digit()).collect();
-    let time: String = s[11..19].chars().filter(|c| c.is_ascii_digit()).collect();
+    // 用 get 而不是 [..10]：字节切片落在多字节字符中间会 panic，
+    // 而 EXIF 里偶尔会混进全角数字之类的怪值。切不开就当没有，不值得崩。
+    let date: String = s
+        .get(..10)
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    let time: String = s
+        .get(11..19)
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
     (date, time)
 }
 
@@ -2214,17 +2141,30 @@ async fn photo_thumbnail(
         let _permit = thumb::global_limiter().acquire();
 
         let root = paths::thumbs_dir().map_err(|e| format!("{e:#}"))?;
-        let (infos, _) = thumb::ensure(&root, &fingerprint, Path::new(&path), &sizes, orientation)
-            .map_err(|e| format!("{e:#}"))?;
+        let (mut infos, _) =
+            thumb::ensure(&root, &fingerprint, Path::new(&path), &sizes, orientation)
+                .map_err(|e| format!("{e:#}"))?;
 
         // 刚写过新文件，顺手看看缓存是不是该瘦身了（内部限流，不会每次都扫）
         thumb::enforce_if_needed(&root);
 
-        let info = &infos[0];
         debug_assert_eq!(infos.len(), sizes.len());
 
-        let bytes = std::fs::read(&info.path)
-            .map_err(|e| format!("缩略图读取失败（{}）：{e}", info.path.display()))?;
+        // 缓存文件可能被并发请求踩掉、被 LRU 淘汰，或是上次留下的 0 字节半成品。
+        // 删掉重生成一次就好，不必让用户看到「预览提取失败」再手动滚回去重试。
+        let mut bytes = std::fs::read(&infos[0].path).unwrap_or_default();
+        if bytes.is_empty() {
+            let _ = std::fs::remove_file(&infos[0].path);
+            infos = thumb::ensure(&root, &fingerprint, Path::new(&path), &sizes, orientation)
+                .map_err(|e| format!("{e:#}"))?
+                .0;
+            bytes = std::fs::read(&infos[0].path)
+                .map_err(|e| format!("缩略图读取失败（{}）：{e}", infos[0].path.display()))?;
+        }
+        if bytes.is_empty() {
+            return Err(format!("缩略图为空（{}）", infos[0].path.display()));
+        }
+        let info = &infos[0];
         let data_url = format!(
             "data:image/jpeg;base64,{}",
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
@@ -2775,14 +2715,6 @@ pub fn run() {
             db: Arc::new(Mutex::new(conn)),
             startup_error,
         })
-        // 闭眼检测的模型在哪里，交给打包后的资源目录说了算。
-        // 开发态这个目录里没有模型，`blink.rs` 会自己退回仓库里的那一份。
-        .setup(|app| {
-            if let Ok(dir) = app.path().resource_dir() {
-                blink::set_model_dir(dir);
-            }
-            Ok(())
-        })
         .invoke_handler(tauri::generate_handler![
             startup_status,
             scan_folder,
@@ -2795,11 +2727,6 @@ pub fn run() {
             list_pair_ids,
             photo_exif,
             photo_af,
-            photo_blink,
-            blink_enabled,
-            set_blink_enabled,
-            analyze_blink,
-            cancel_blink,
             photo_detail,
             apply_decision,
             similar_groups,

@@ -226,10 +226,7 @@ fn add_missing_columns(conn: &Connection) {
         ("photos", "sharpness", "REAL"),
         ("photos", "overexposed", "REAL"),
         ("photos", "underexposed", "REAL"),
-        // 闭眼检测（见 blink.rs）。faces = 检出的人脸数，eye_ratio = 最闭的那只眼的 EAR。
-        // 两个都是 NULL 表示还没轮到这张；faces = 0 表示查过了、画面里没有脸。
-        ("photos", "faces", "INTEGER"),
-        ("photos", "eye_ratio", "REAL"),
+        ("photos", "analyze_failed", "INTEGER NOT NULL DEFAULT 0"),
         // 色标。空串表示没标。老库升级上来的人以前的保留 / 星级一个都不会少。
         ("decisions", "color", "TEXT NOT NULL DEFAULT ''"),
     ];
@@ -325,13 +322,13 @@ CREATE TABLE IF NOT EXISTS photos (
   orientation        INTEGER,
   exif_ok            INTEGER NOT NULL DEFAULT 0,
   indexed_at         INTEGER NOT NULL DEFAULT 0,
-  -- 画面分析（后台算，见 analyze.rs）。NULL = 还没轮到它 / 这张算不出来。
+  -- 画面分析（后台算，见 analyze.rs）。NULL = 还没轮到它。
+  -- analyze_failed：试过但取不到预览。没这个哨兵的话，失败的照片每趟都会被
+  -- 重新捞出来算一遍，「还剩 N 张」永远归不了零，每次启动都白跑一趟。
   sharpness          REAL,
   overexposed        REAL,
   underexposed       REAL,
-  -- 闭眼检测（后台算，见 blink.rs）。faces = 人脸数，eye_ratio = 最闭的眼睛的 EAR。
-  faces              INTEGER,
-  eye_ratio          REAL
+  analyze_failed     INTEGER NOT NULL DEFAULT 0
 );
 
 -- 注意：索引不写在这里，见下方 SCHEMA_INDEXES —— 它们必须排在新列补齐之后。
@@ -374,6 +371,18 @@ const SCHEMA_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_photos_kind ON photos(file_kind)",
     "CREATE INDEX IF NOT EXISTS idx_decisions_decision ON decisions(decision)",
     "CREATE INDEX IF NOT EXISTS idx_decisions_color ON decisions(color)",
+    // 默认/时间排序走的是 COALESCE(taken_at_corrected, mtime) 这个表达式，
+    // 普通列索引用不上；几千张翻页时每页都要全表排序，得靠表达式索引。
+    "CREATE INDEX IF NOT EXISTS idx_photos_order ON photos(is_primary, COALESCE(taken_at_corrected, mtime))",
+    // 侧栏筛选、排序与分面 GROUP BY 的常客。都是全表扫描热点，纯增量成本。
+    "CREATE INDEX IF NOT EXISTS idx_photos_camera ON photos(camera_serial)",
+    "CREATE INDEX IF NOT EXISTS idx_photos_lens ON photos(lens)",
+    "CREATE INDEX IF NOT EXISTS idx_photos_iso ON photos(iso)",
+    "CREATE INDEX IF NOT EXISTS idx_photos_focal ON photos(focal_len)",
+    "CREATE INDEX IF NOT EXISTS idx_photos_sharpness ON photos(is_primary, sharpness)",
+    "CREATE INDEX IF NOT EXISTS idx_decisions_stars ON decisions(stars)",
+    // 后台分析的待办队列：每趟都要挑 is_primary=1 且还没算过的那些
+    "CREATE INDEX IF NOT EXISTS idx_photos_pending ON photos(is_primary, sharpness, analyze_failed)",
 ];
 
 /// 内存库。测试用；同时是「库文件打不开」时让应用还能起来的兜底。
