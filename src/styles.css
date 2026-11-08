@@ -20,6 +20,7 @@
   --topbar-h: 52px;
   --footer-h: 30px;
   --sidebar-w: 236px;
+  --sidebar-rail-w: 44px;
 
   /* 圆角梯度：控件小而紧、容器大而松 */
   --radius-xs: 7px;
@@ -368,7 +369,89 @@ select {
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
   display: flex;
+  flex-direction: column;
   min-height: 0;
+  transition: flex-basis var(--dur) var(--ease), width var(--dur) var(--ease);
+}
+
+/* 顶上的折叠把手。展开时是标题行，收起后整个侧栏只剩这一条竖着的窄轨，
+   激活中的筛选条件数会留在上面，免得收起后忘了自己还筛着东西。 */
+.sidebar-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  width: 100%;
+  height: 34px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-mute);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.sidebar-toggle:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.sidebar-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.sidebar-toggle-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  transition: transform var(--dur) var(--ease);
+}
+.sidebar-toggle-text {
+  flex: 1 1 auto;
+  text-align: left;
+}
+.sidebar-filter-count {
+  flex: 0 0 auto;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 17px;
+  text-align: center;
+  letter-spacing: 0;
+}
+
+.sidebar.is-collapsed {
+  flex-basis: var(--sidebar-rail-w);
+  width: var(--sidebar-rail-w);
+}
+.sidebar.is-collapsed .sidebar-scroll {
+  display: none;
+}
+.sidebar.is-collapsed .sidebar-toggle {
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  height: auto;
+  padding: 12px 0;
+  justify-content: flex-start;
+}
+.sidebar.is-collapsed .sidebar-toggle-text {
+  flex: 0 0 auto;
+  writing-mode: vertical-rl;
+  letter-spacing: 0.2em;
+}
+.sidebar.is-collapsed .sidebar-toggle-icon {
+  width: 16px;
+  height: 16px;
+  transform: rotate(180deg);
 }
 
 .sidebar-scroll {
@@ -394,6 +477,64 @@ select {
   letter-spacing: 0.08em;
   color: var(--text-mute);
   text-transform: uppercase;
+}
+
+/* 分组也能各自收起：日期、ISO 这些平时不看的一栏折起来，常用的留在视野里。
+   标题是 JS 加的 role=button，键盘 Enter / 空格同样能折。 */
+.facet-title--toggle {
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-xs);
+  transition: color var(--dur) var(--ease);
+}
+.facet-title--toggle:hover {
+  color: var(--text);
+}
+.facet-title--toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.facet-caret {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  align-self: center;
+  margin-right: -2px;
+  transition: transform var(--dur) var(--ease);
+}
+.facet-group.is-collapsed .facet-caret {
+  transform: rotate(-90deg);
+}
+.facet-group.is-collapsed .facet-list,
+.facet-group.is-collapsed .facet-more {
+  display: none;
+}
+.facet-group.is-collapsed {
+  padding-bottom: 3px;
+}
+
+/* 镜头一多就收起尾巴，别让侧栏变成几十行长列表 */
+.facet-more {
+  display: block;
+  width: calc(100% - 20px);
+  margin: 4px 10px 2px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-mute);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.facet-more:hover {
+  color: var(--accent);
+  background: var(--bg-hover);
+}
+.facet-more:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .facet-title-note {
@@ -508,6 +649,17 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 镜头型号动辄三十来个字符，单行省略会把 180-600 和 100-400 截成一个样。
+   只有这一栏允许折两行，计数仍钉在右侧；再长就交给 title 悬停看全称。 */
+#facets-lens .facet-label {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 .facet--none {

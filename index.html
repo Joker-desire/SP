@@ -162,26 +162,41 @@
 
     <!-- ── 主体：左侧筛选栏 + 右侧网格 ────────────────────────────────── -->
     <div class="workspace">
-      <aside class="sidebar">
-        <div class="sidebar-scroll">
+      <aside class="sidebar" id="sidebar">
+        <button
+          class="sidebar-toggle"
+          id="btn-sidebar"
+          type="button"
+          aria-controls="sidebar-scroll"
+          aria-expanded="true"
+          title="收起侧栏（快捷键 \）"
+        >
+          <svg class="icon sidebar-toggle-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span class="sidebar-toggle-text">筛选</span>
+          <span class="sidebar-filter-count" id="sidebar-filter-count" hidden>0</span>
+        </button>
+
+        <div class="sidebar-scroll" id="sidebar-scroll">
           <!-- 选片状态排在最前：这是每天真正要用的那一栏，
                文件类型 / 日期 / 机身是「怎么找到这批照片」，它是「怎么处理这批照片」。 -->
-          <section class="facet-group facet-group--lead">
+          <section class="facet-group facet-group--lead" data-group="decision">
             <h3 class="facet-title">选片状态</h3>
             <div class="facet-list" id="facets-decision"></div>
           </section>
 
-          <section class="facet-group">
+          <section class="facet-group" data-group="stars">
             <h3 class="facet-title">星级</h3>
             <div class="facet-list facet-list--stars" id="facets-stars"></div>
           </section>
 
-          <section class="facet-group">
+          <section class="facet-group" data-group="colors">
             <h3 class="facet-title">色标</h3>
             <div class="facet-list facet-list--colors" id="facets-colors"></div>
           </section>
 
-          <section class="facet-group" id="group-quality" hidden>
+          <section class="facet-group" id="group-quality" data-group="quality" hidden>
             <h3 class="facet-title">
               画面质量
               <span class="facet-title-note" id="quality-note"></span>
@@ -189,12 +204,12 @@
             <div class="facet-list" id="facets-quality"></div>
           </section>
 
-          <section class="facet-group">
+          <section class="facet-group" data-group="pair">
             <h3 class="facet-title">文件类型</h3>
             <div class="facet-list" id="facets-pair"></div>
           </section>
 
-          <section class="facet-group">
+          <section class="facet-group" data-group="days">
             <h3 class="facet-title">
               拍摄日期
               <span class="facet-title-note" id="days-note"></span>
@@ -202,17 +217,17 @@
             <div class="facet-list facet-list--days" id="facets-days"></div>
           </section>
 
-          <section class="facet-group" id="group-params" hidden>
+          <section class="facet-group" id="group-params" data-group="focal" hidden>
             <h3 class="facet-title">焦段</h3>
             <div class="facet-list" id="facets-focal"></div>
           </section>
 
-          <section class="facet-group" id="group-iso" hidden>
+          <section class="facet-group" id="group-iso" data-group="iso" hidden>
             <h3 class="facet-title">ISO</h3>
             <div class="facet-list" id="facets-iso"></div>
           </section>
 
-          <section class="facet-group">
+          <section class="facet-group" data-group="cameras">
             <h3 class="facet-title">
               机身
               <button class="facet-link" id="btn-time-offset" hidden title="两台机身时钟不同步时，在这里校正">时间校正</button>
@@ -220,9 +235,14 @@
             <div class="facet-list" id="facets-cameras"></div>
           </section>
 
-          <section class="facet-group" id="group-lens" hidden>
-            <h3 class="facet-title">镜头</h3>
+          <section class="facet-group" id="group-lens" data-group="lens" hidden>
+            <h3 class="facet-title">
+              镜头
+              <span class="facet-title-note" id="lens-note"></span>
+              <button class="facet-link" id="btn-lens-clear" hidden title="取消镜头筛选">清除</button>
+            </h3>
             <div class="facet-list" id="facets-lens"></div>
+            <button class="facet-more" id="btn-lens-more" hidden></button>
           </section>
         </div>
       </aside>

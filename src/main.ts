@@ -305,6 +305,22 @@ const elFacetsDays = $<HTMLElement>("#facets-days");
 const elFacetsCameras = $<HTMLElement>("#facets-cameras");
 const elDaysNote = $<HTMLElement>("#days-note");
 
+const elSidebar = $<HTMLElement>("#sidebar");
+const elSidebarToggle = $<HTMLButtonElement>("#btn-sidebar");
+const elSidebarCount = $<HTMLElement>("#sidebar-filter-count");
+const elLensNote = $<HTMLElement>("#lens-note");
+const elLensClear = $<HTMLButtonElement>("#btn-lens-clear");
+const elLensMore = $<HTMLButtonElement>("#btn-lens-more");
+
+const SIDEBAR_KEY = "sp:sidebar";
+const FACET_COLLAPSE_KEY = "sp:facet-collapse";
+/** 镜头超过这个数就先收起尾巴，用户点过「显示全部」才摊开。 */
+const LENS_PREVIEW = 6;
+
+let sidebarCollapsed = localStorage.getItem(SIDEBAR_KEY) === "1";
+let lensExpanded = false;
+const collapsedGroups = new Set<string>(loadCollapsedGroups());
+
 const elSearch = $<HTMLInputElement>("#search");const elSearchClear = $<HTMLButtonElement>("#search-clear");
 const elSort = $<HTMLSelectElement>("#sort");
 const elClear = $<HTMLButtonElement>("#btn-clear");
@@ -1317,6 +1333,7 @@ function appendGrouped(list: PairCard[]) {
 
 function updateCount() {
   elClear.hidden = !isFiltered();
+  updateSidebarBadge();
   // 图库空的时候，一整条选片操作栏只是噪声——它要操作的东西还不存在
   elCullbar.hidden = total === 0 && items.length === 0;
 
@@ -1497,11 +1514,23 @@ function renderBucketFacets(host: HTMLElement, group: HTMLElement, items: Facet[
 
 function renderLensFacets(f: LibraryFacets) {
   elFacetsLens.innerHTML = "";
-  // 只有一种镜头（或全都没读到）时这一栏没有信息量，反而占地方
-  const useful = f.lenses.filter((it) => it.count > 0).length > 1;
-  elGroupLens.hidden = !useful;
-  if (!useful) return;
-  for (const it of f.lenses) {
+  const items = f.lenses.filter((it) => it.count > 0);
+
+  // 以前要求「至少两种镜头」才显示，只有一支镜头、或者 EXIF 全读不到的图库
+  // 就永远看不到这一栏——可「未知镜头」本身也值得能单独筛掉。所以只要有照片
+  // 就给出来；正在筛的镜头即使这一批里没有了，也要留着，好让人取消条件。
+  elGroupLens.hidden = items.length === 0 && filter.lens === null;
+  elLensNote.textContent = items.length > 0 ? `${items.length} 支` : "";
+  elLensClear.hidden = filter.lens === null;
+  if (elGroupLens.hidden) {
+    elLensMore.hidden = true;
+    return;
+  }
+
+  // 选中的镜头排在折叠区时直接展开，别让它藏在「显示全部」后面
+  const activeBeyond = items.findIndex((it) => it.key === filter.lens) >= LENS_PREVIEW;
+  const showAll = lensExpanded || activeBeyond || items.length <= LENS_PREVIEW;
+  for (const it of showAll ? items : items.slice(0, LENS_PREVIEW)) {
     elFacetsLens.appendChild(
       facetButton({
         facet: "lens",
@@ -1512,6 +1541,10 @@ function renderLensFacets(f: LibraryFacets) {
       })
     );
   }
+
+  elLensMore.hidden = items.length <= LENS_PREVIEW;
+  elLensMore.textContent = showAll ? "收起" : `显示全部 ${items.length} 支`;
+  elLensMore.setAttribute("aria-expanded", String(showAll));
 }
 
 function renderDecisionFacets(f: LibraryFacets) {
@@ -1744,6 +1777,9 @@ function renderFacetsEmpty() {
   elGroupLens.hidden = true;
   elGroupParams.hidden = true;
   elGroupIso.hidden = true;
+  elLensNote.textContent = "";
+  elLensClear.hidden = true;
+  elLensMore.hidden = true;
   const none = document.createElement("div");
   none.className = "facet facet--none";
   none.textContent = "图库还没有照片";
@@ -1778,6 +1814,7 @@ async function loadFacets() {
   renderLensFacets(f);
   renderBucketFacets(elFacetsFocal, elGroupParams, f.focals, "focal", filter.focal);
   renderBucketFacets(elFacetsIso, elGroupIso, f.isos, "iso", filter.iso);
+  revealActiveGroups();
 }
 
 /**
@@ -1896,6 +1933,151 @@ elClear.addEventListener("click", () => {
   resetFilter();
   void applyFilterChange();
 });
+
+// ---------------------------------------------------------------------------
+// 侧栏折叠：整栏收起 + 每个分面组各自收起
+//
+// 两个状态都只写 localStorage，不碰索引库。整栏收起后网格会变宽，CSS grid
+// 自己重排，不需要重建卡片（几万张时重建一次比省下的那点宽度贵多了）。
+// ---------------------------------------------------------------------------
+
+function loadCollapsedGroups(): string[] {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(FACET_COLLAPSE_KEY) ?? "[]");
+    return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCollapsedGroups() {
+  localStorage.setItem(FACET_COLLAPSE_KEY, JSON.stringify([...collapsedGroups]));
+}
+
+/** 收起侧栏时最容易犯的错是「忘了自己还筛着东西」，所以留一个数字在窄轨上。 */
+function activeFilterCount(): number {
+  return (
+    Number(filter.pairState !== "all") +
+    Number(filter.cameraSerial !== null) +
+    Number(filter.day !== null) +
+    Number(filter.decision !== "all") +
+    Number(filter.stars !== null) +
+    Number(filter.color !== null) +
+    Number(filter.quality !== null) +
+    Number(filter.lens !== null) +
+    Number(filter.focal !== null) +
+    Number(filter.iso !== null) +
+    Number(filter.search.trim() !== "")
+  );
+}
+
+function updateSidebarBadge() {
+  const n = activeFilterCount();
+  elSidebarCount.hidden = n === 0;
+  elSidebarCount.textContent = String(n);
+  elSidebarCount.title = `${n} 个筛选条件生效`;
+  elSidebarToggle.setAttribute(
+    "aria-label",
+    `${sidebarCollapsed ? "展开" : "收起"}侧栏（${n} 个筛选条件生效）`
+  );
+}
+
+function applySidebarState() {
+  elSidebar.classList.toggle("is-collapsed", sidebarCollapsed);
+  elSidebarToggle.setAttribute("aria-expanded", String(!sidebarCollapsed));
+  elSidebarToggle.title = sidebarCollapsed ? "展开侧栏（快捷键 \\）" : "收起侧栏（快捷键 \\）";
+  updateSidebarBadge();
+}
+
+function toggleSidebar(force?: boolean) {
+  sidebarCollapsed = force ?? !sidebarCollapsed;
+  localStorage.setItem(SIDEBAR_KEY, sidebarCollapsed ? "1" : "0");
+  applySidebarState();
+}
+
+/** 把每组的标题变成可点的折叠开关，状态和 aria 都由 DOM 自己说了算。 */
+function initFacetGroups() {
+  document.querySelectorAll<HTMLElement>(".facet-group").forEach((section) => {
+    const key = section.dataset.group ?? section.id;
+    const title = section.querySelector<HTMLElement>(".facet-title");
+    if (!key || !title) return;
+
+    const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    caret.setAttribute("viewBox", "0 0 16 16");
+    caret.setAttribute("class", "facet-caret");
+    caret.setAttribute("aria-hidden", "true");
+    caret.innerHTML =
+      '<path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>';
+    title.prepend(caret);
+    title.classList.add("facet-title--toggle");
+    title.setAttribute("role", "button");
+    title.tabIndex = 0;
+
+    const setCollapsed = (collapsed: boolean, persist = true) => {
+      section.classList.toggle("is-collapsed", collapsed);
+      title.setAttribute("aria-expanded", String(!collapsed));
+      if (collapsed) collapsedGroups.add(key);
+      else collapsedGroups.delete(key);
+      if (persist) saveCollapsedGroups();
+    };
+    setCollapsed(collapsedGroups.has(key), false);
+
+    title.addEventListener("click", (e) => {
+      // 标题里的「时间校正」「清除」各有自己的活，别顺手把这一栏折了
+      if ((e.target as HTMLElement).closest("button")) return;
+      setCollapsed(!section.classList.contains("is-collapsed"));
+    });
+    title.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        // 不拦住的话会冒泡到全局键盘处理：空格会顺手打开大图
+        e.stopPropagation();
+        setCollapsed(!section.classList.contains("is-collapsed"));
+      }
+    });
+  });
+}
+
+/** 每一栏对应哪个筛选条件。别用 DOM 上的 .is-active 反推——「全部」这类
+ *  默认项也带 active，会把用户刚折起来的组每次都强行弹开。 */
+const GROUP_HAS_FILTER: Record<string, () => boolean> = {
+  decision: () => filter.decision !== "all",
+  stars: () => filter.stars !== null,
+  colors: () => filter.color !== null,
+  quality: () => filter.quality !== null,
+  pair: () => filter.pairState !== "all",
+  days: () => filter.day !== null,
+  focal: () => filter.focal !== null,
+  iso: () => filter.iso !== null,
+  cameras: () => filter.cameraSerial !== null,
+  lens: () => filter.lens !== null,
+};
+
+/** 有筛选生效的那一栏必须露出来，否则会出现「结果变少了却找不到在哪筛的」。
+ *  只改 DOM 不改存过的偏好：这次筛选清掉后，仍按用户原来的折叠习惯走。 */
+function revealActiveGroups() {
+  document.querySelectorAll<HTMLElement>(".facet-group.is-collapsed").forEach((section) => {
+    const hasFilter = GROUP_HAS_FILTER[section.dataset.group ?? ""];
+    if (!hasFilter?.()) return;
+    section.classList.remove("is-collapsed");
+    section.querySelector(".facet-title")?.setAttribute("aria-expanded", "true");
+  });
+}
+
+function initSidebar() {
+  elSidebarToggle.addEventListener("click", () => toggleSidebar());
+  elLensClear.addEventListener("click", () => {
+    if (filter.lens === null) return;
+    filter.lens = null;
+    void applyFilterChange();
+  });
+  elLensMore.addEventListener("click", () => {
+    lensExpanded = !lensExpanded;
+    if (lastFacets) renderLensFacets(lastFacets);
+  });
+  initFacetGroups();
+  applySidebarState();
+}
 
 elSort.addEventListener("change", () => {
   filter.sort = elSort.value;
@@ -4569,6 +4751,13 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
+  if (key === "\\") {
+    if (typingInField(e)) return;
+    e.preventDefault();
+    toggleSidebar();
+    return;
+  }
+
   if (key === "/") {
     e.preventDefault();
     elSearch.focus();
@@ -4700,6 +4889,7 @@ window.addEventListener("keydown", (e) => {
 
 async function boot() {
   applyTheme(savedTheme());
+  initSidebar();
 
   // 分组依据选择器：本应用只有分组视图，始终显示
   elGroupMode.value = groupMode;
