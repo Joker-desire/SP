@@ -319,6 +319,33 @@ struct PairFilter {
     /// ISO 分档：low / mid / high / veryHigh
     #[serde(default)]
     iso: Option<String>,
+
+    // ---- 多选（v0.4）----------------------------------------------------
+    //
+    // 同一维度可以同时选好几个值（比如两支镜头、好几天），彼此是**并集**；
+    // 不同维度之间仍然是**交集**。上面那些单选字段故意留着：导出、连拍分组等
+    // 老调用方和既有测试都还在用，build_where 会把两边的值合并成一组。
+    // 前端只发复数形式，所以这里的单选字段实际是给「一次只要一个值」的场合用的。
+    #[serde(default)]
+    pair_states: Vec<String>,
+    #[serde(default)]
+    camera_serials: Vec<String>,
+    #[serde(default)]
+    days: Vec<String>,
+    #[serde(default)]
+    decisions: Vec<String>,
+    #[serde(default)]
+    stars_in: Vec<i64>,
+    #[serde(default)]
+    colors: Vec<String>,
+    #[serde(default)]
+    qualities: Vec<String>,
+    #[serde(default)]
+    lenses: Vec<String>,
+    #[serde(default)]
+    focals: Vec<String>,
+    #[serde(default)]
+    isos: Vec<String>,
 }
 
 /// 网格用的照片卡片。以「一次快门」为单位，而不是以文件为单位。
@@ -466,11 +493,75 @@ fn scope_where(roots: Option<&[String]>) -> (String, Vec<rusqlite::types::Value>
     }
 }
 
+/// 单选字段 + 多选字段合成一组去重后的取值。空串一律丢掉。
+///
+/// 保留单选字段是为了不破坏既有调用方；两边给同一个值时也只留一份，
+/// 免得 `IN (?,?)` 里出现重复项、参数顺序还要多想一层。
+fn merged_strings<'a>(single: Option<&'a str>, many: &'a [String]) -> Vec<&'a str> {
+    let mut out: Vec<&str> = Vec::new();
+    for s in single
+        .into_iter()
+        .chain(many.iter().map(String::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// 把一组 OR 分支合成一个带括号的条件，参数按 SQL 里 `?` 的出现顺序收齐。
+///
+/// 这一步是整个多选改造最容易写错的地方：条件按顺序拼、参数却按别的顺序 push，
+/// SQLite 不会报错，只会安静地筛出完全不对的结果。所以参数跟着条件一起走。
+fn any_of(
+    parts: Vec<(String, Vec<rusqlite::types::Value>)>,
+) -> Option<(String, Vec<rusqlite::types::Value>)> {
+    if parts.is_empty() {
+        return None;
+    }
+    let mut sql = Vec::with_capacity(parts.len());
+    let mut args = Vec::new();
+    for (cond, cond_args) in parts {
+        sql.push(cond);
+        args.extend(cond_args);
+    }
+    Some((format!("({})", sql.join(" OR ")), args))
+}
+
+/// 「这一列等于这些值中的任意一个」的 OR 分支。
+/// NONE_KEY 单独翻译成 IS NULL —— SQL 的 `IN` 永远匹配不到 NULL。
+fn in_parts(col: &str, values: &[&str]) -> Vec<(String, Vec<rusqlite::types::Value>)> {
+    use rusqlite::types::Value;
+
+    let mut out = Vec::new();
+    if values.contains(&NONE_KEY) {
+        out.push((format!("{col} IS NULL"), Vec::new()));
+    }
+    let real: Vec<&str> = values.iter().copied().filter(|v| *v != NONE_KEY).collect();
+    if !real.is_empty() {
+        let holders = vec!["?"; real.len()].join(",");
+        let args = real.iter().map(|v| Value::Text((*v).to_string())).collect();
+        out.push((format!("{col} IN ({holders})"), args));
+    }
+    out
+}
+
 fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
     use rusqlite::types::Value;
 
     let mut conds: Vec<String> = vec!["p.is_primary = 1".to_string()];
     let mut args: Vec<Value> = Vec::new();
+
+    /// 一个维度有值就挂一条 OR 条件，没值就整条不加（＝不筛这一维）。
+    fn push_any(parts: Vec<(String, Vec<Value>)>, conds: &mut Vec<String>, args: &mut Vec<Value>) {
+        if let Some((sql, part_args)) = any_of(parts) {
+            conds.push(sql);
+            args.extend(part_args);
+        }
+    }
 
     // 显式指定的一组照片，优先级最高：勾了什么就是什么，不再叠加目录范围之外的判断
     if let Some(ids) = f.ids.as_deref().filter(|v| !v.is_empty()) {
@@ -489,95 +580,173 @@ fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
         args.extend(scope_args);
     }
 
-    match f.pair_state.as_deref().unwrap_or("all") {
-        "both" => conds.push(format!("({HAS_RAW} AND {HAS_JPG})")),
-        "rawOnly" => conds.push(format!("({HAS_RAW} AND NOT {HAS_JPG})")),
-        "jpgOnly" => conds.push(format!("(NOT {HAS_RAW} AND {HAS_JPG})")),
-        "orphan" => conds.push(format!("NOT ({HAS_RAW} AND {HAS_JPG})")),
-        _ => {}
-    }
+    // 文件类型。取值是白名单——「all」和笔误都当「不筛」，免得条件被悄悄丢掉后
+    // 界面看起来「筛了但没生效」。
+    let states = merged_strings(f.pair_state.as_deref(), &f.pair_states);
+    push_any(
+        states
+            .iter()
+            .filter_map(|s| match *s {
+                "both" => Some((format!("({HAS_RAW} AND {HAS_JPG})"), Vec::new())),
+                "rawOnly" => Some((format!("({HAS_RAW} AND NOT {HAS_JPG})"), Vec::new())),
+                "jpgOnly" => Some((format!("(NOT {HAS_RAW} AND {HAS_JPG})"), Vec::new())),
+                "orphan" => Some((format!("NOT ({HAS_RAW} AND {HAS_JPG})"), Vec::new())),
+                _ => None,
+            })
+            .collect(),
+        &mut conds,
+        &mut args,
+    );
 
-    if let Some(cam) = f.camera_serial.as_deref().filter(|s| !s.is_empty()) {
-        if cam == NONE_KEY {
-            conds.push("p.camera_serial IS NULL".to_string());
-        } else {
-            conds.push("p.camera_serial = ?".to_string());
-            args.push(Value::Text(cam.to_string()));
-        }
-    }
-
-    if let Some(day) = f.day.as_deref().filter(|s| !s.is_empty()) {
-        if day == NONE_KEY {
-            conds.push(format!("({DAY_KEY}) IS NULL"));
-        } else {
-            conds.push(format!("({DAY_KEY}) = ?"));
-            args.push(Value::Text(day.to_string()));
-        }
-    }
+    push_any(
+        in_parts(
+            "p.camera_serial",
+            &merged_strings(f.camera_serial.as_deref(), &f.camera_serials),
+        ),
+        &mut conds,
+        &mut args,
+    );
+    push_any(
+        in_parts(
+            &format!("({DAY_KEY})"),
+            &merged_strings(f.day.as_deref(), &f.days),
+        ),
+        &mut conds,
+        &mut args,
+    );
 
     if let Some(q) = f.search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         conds.push("p.path LIKE ? ESCAPE '\\'".to_string());
         args.push(Value::Text(format!("%{}%", escape_like(q))));
     }
 
-    // 选片状态。这里的取值是白名单——别的字符串一律当「不筛」，
-    // 免得前端传个笔误就把条件悄悄丢掉（结果看起来「筛了但没生效」）。
-    match f.decision.as_deref() {
-        Some("none") => conds.push(format!("{DECISION} = 'none'")),
-        Some("keep") => conds.push(format!("{DECISION} = 'keep'")),
-        Some("reject") => conds.push(format!("{DECISION} = 'reject'")),
-        Some("marked") => conds.push(format!("{DECISION} <> 'none'")),
-        _ => {}
-    }
+    // 选片状态
+    let decisions = merged_strings(f.decision.as_deref(), &f.decisions);
+    push_any(
+        decisions
+            .iter()
+            .filter_map(|d| match *d {
+                "none" | "keep" | "reject" => Some((
+                    format!("{DECISION} = ?"),
+                    vec![Value::Text((*d).to_string())],
+                )),
+                "marked" => Some((format!("{DECISION} <> 'none'"), Vec::new())),
+                _ => None,
+            })
+            .collect(),
+        &mut conds,
+        &mut args,
+    );
 
+    // 星级。0 是「没打星」的有效取值，不能当成「不筛」；越界的直接忽略。
+    let mut star_vals: Vec<i64> = Vec::new();
     if let Some(s) = f.stars {
-        conds.push(format!("{STARS} = ?"));
-        args.push(Value::Integer(s.clamp(0, 5)));
+        star_vals.push(s.clamp(0, 5));
     }
-
-    // 色标。认不出来的值按「不筛」处理，理由同 decision：
-    // 传错一个字符串导致条件被悄悄丢掉，比明确报错更难查。
-    if let Some(c) = normalize_color(f.color.as_deref()) {
-        conds.push(format!("{COLOR} = ?"));
-        args.push(Value::Text(c));
-    }
-
-    if let Some(l) = f.lens.as_deref().filter(|s| !s.is_empty()) {
-        if l == NONE_KEY {
-            conds.push("p.lens IS NULL".to_string());
-        } else {
-            conds.push("p.lens = ?".to_string());
-            args.push(Value::Text(l.to_string()));
+    for s in &f.stars_in {
+        if (0..=5).contains(s) && !star_vals.contains(s) {
+            star_vals.push(*s);
         }
     }
-    if let Some((lo, hi)) = focal_range(f.focal.as_deref()) {
-        conds.push("p.focal_len >= ? AND p.focal_len < ?".to_string());
-        args.push(Value::Real(lo));
-        args.push(Value::Real(hi));
+    if !star_vals.is_empty() {
+        let holders = vec!["?"; star_vals.len()].join(",");
+        conds.push(format!("{STARS} IN ({holders})"));
+        args.extend(star_vals.into_iter().map(Value::Integer));
     }
-    if let Some((lo, hi)) = iso_range(f.iso.as_deref()) {
-        conds.push("p.iso >= ? AND p.iso < ?".to_string());
-        args.push(Value::Integer(lo));
-        args.push(Value::Integer(hi));
+
+    // 色标。认不出来的值按「不筛」处理，理由同 decision。
+    let mut color_vals: Vec<String> = Vec::new();
+    for c in f
+        .color
+        .as_deref()
+        .into_iter()
+        .chain(f.colors.iter().map(String::as_str))
+    {
+        if let Some(c) = normalize_color(Some(c)) {
+            if !color_vals.contains(&c) {
+                color_vals.push(c);
+            }
+        }
     }
+    if !color_vals.is_empty() {
+        let holders = vec!["?"; color_vals.len()].join(",");
+        conds.push(format!("{COLOR} IN ({holders})"));
+        args.extend(color_vals.into_iter().map(Value::Text));
+    }
+
+    push_any(
+        in_parts("p.lens", &merged_strings(f.lens.as_deref(), &f.lenses)),
+        &mut conds,
+        &mut args,
+    );
+
+    let focals = merged_strings(f.focal.as_deref(), &f.focals);
+    push_any(
+        focals
+            .iter()
+            .filter_map(|k| {
+                focal_range(Some(*k)).map(|(lo, hi)| {
+                    (
+                        "(p.focal_len >= ? AND p.focal_len < ?)".to_string(),
+                        vec![Value::Real(lo), Value::Real(hi)],
+                    )
+                })
+            })
+            .collect(),
+        &mut conds,
+        &mut args,
+    );
+
+    let isos = merged_strings(f.iso.as_deref(), &f.isos);
+    push_any(
+        isos.iter()
+            .filter_map(|k| {
+                iso_range(Some(*k)).map(|(lo, hi)| {
+                    (
+                        "(p.iso >= ? AND p.iso < ?)".to_string(),
+                        vec![Value::Integer(lo), Value::Integer(hi)],
+                    )
+                })
+            })
+            .collect(),
+        &mut conds,
+        &mut args,
+    );
 
     // 画面质量。没分析过的照片（sharpness IS NULL）一律不算「有问题」——
     // 分析是后台跑的，刚扫完就筛会把还没轮到的照片全列进「糊了」，那是误报。
-    match f.quality.as_deref() {
-        Some("blur") => conds.push(format!(
-            "p.sharpness IS NOT NULL AND p.sharpness < {}",
-            analyze::BLUR_THRESHOLD
-        )),
-        Some("over") => conds.push(format!(
-            "p.overexposed IS NOT NULL AND p.overexposed >= {}",
-            analyze::OVEREXPOSED_THRESHOLD
-        )),
-        Some("under") => conds.push(format!(
-            "p.underexposed IS NOT NULL AND p.underexposed >= {}",
-            analyze::UNDEREXPOSED_THRESHOLD
-        )),
-        _ => {}
-    }
+    let qualities = merged_strings(f.quality.as_deref(), &f.qualities);
+    push_any(
+        qualities
+            .iter()
+            .filter_map(|q| match *q {
+                "blur" => Some((
+                    format!(
+                        "p.sharpness IS NOT NULL AND p.sharpness < {}",
+                        analyze::BLUR_THRESHOLD
+                    ),
+                    Vec::new(),
+                )),
+                "over" => Some((
+                    format!(
+                        "p.overexposed IS NOT NULL AND p.overexposed >= {}",
+                        analyze::OVEREXPOSED_THRESHOLD
+                    ),
+                    Vec::new(),
+                )),
+                "under" => Some((
+                    format!(
+                        "p.underexposed IS NOT NULL AND p.underexposed >= {}",
+                        analyze::UNDEREXPOSED_THRESHOLD
+                    ),
+                    Vec::new(),
+                )),
+                _ => None,
+            })
+            .collect(),
+        &mut conds,
+        &mut args,
+    );
 
     (conds.join(" AND "), args)
 }
@@ -2886,6 +3055,210 @@ mod tests {
         let f = facets_of(&db.lock().unwrap(), Some(&[a_str])).unwrap();
         assert_eq!(f.total, 2);
         assert_eq!(facets_of(&db.lock().unwrap(), None).unwrap().total, 3);
+    }
+
+    /// 多选：同一维度是并集，不同维度是交集；旧的单选字段与新数组可以混用。
+    #[test]
+    fn multi_select_ors_within_a_dimension_and_ands_across_dimensions() {
+        let (dir, db) = seeded("multifacet");
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch(
+                "UPDATE photos SET lens = CASE
+                     WHEN path LIKE '%0001%' THEN 'NIKKOR Z 180-600'
+                     WHEN path LIKE '%0002%' THEN 'NIKKOR Z 100-400'
+                     ELSE NULL END;
+                 UPDATE photos SET camera_serial = CASE
+                     WHEN path LIKE '%0001%' THEN 'BODY-A'
+                     ELSE 'BODY-B' END;",
+            )
+            .unwrap();
+        }
+
+        let with_lenses = |lenses: Vec<&str>| PairFilter {
+            lenses: lenses.into_iter().map(String::from).collect(),
+            ..Default::default()
+        };
+
+        assert_eq!(count(&db, with_lenses(vec!["NIKKOR Z 180-600"])), 1);
+        assert_eq!(
+            count(
+                &db,
+                with_lenses(vec!["NIKKOR Z 180-600", "NIKKOR Z 100-400"])
+            ),
+            2,
+            "两支镜头取并集"
+        );
+        assert_eq!(
+            count(&db, with_lenses(vec![NONE_KEY])),
+            1,
+            "「未知镜头」只能靠 IS NULL 命中，IN 匹配不到 NULL"
+        );
+        assert_eq!(
+            count(&db, with_lenses(vec!["NIKKOR Z 180-600", NONE_KEY])),
+            2,
+            "真实值与 NULL 哨兵可以一起选"
+        );
+        assert_eq!(count(&db, with_lenses(vec![])), 3, "清空这一维就是不筛");
+
+        // 跨维度仍然是交集
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    lenses: vec!["NIKKOR Z 180-600".into(), "NIKKOR Z 100-400".into()],
+                    camera_serials: vec!["BODY-A".into()],
+                    ..Default::default()
+                }
+            ),
+            1
+        );
+
+        // 单选字段与多选数组合并，重复值只算一次（参数个数不能多出来）
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    lens: Some("NIKKOR Z 180-600".into()),
+                    lenses: vec!["NIKKOR Z 180-600".into(), "NIKKOR Z 100-400".into()],
+                    ..Default::default()
+                }
+            ),
+            2
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 每个维度都吃复数数组，且「全部」和脏值不会把条件悄悄丢掉或放大。
+    #[test]
+    fn multi_select_covers_every_facet_dimension() {
+        let (dir, db) = seeded("multi-all");
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch(
+                "UPDATE photos SET focal_len = 20.0, iso = 100 WHERE path LIKE '%0001%';
+                 UPDATE photos SET focal_len = 200.0, iso = 3200 WHERE path LIKE '%0002%';",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    pair_states: vec!["both".into(), "rawOnly".into()],
+                    ..Default::default()
+                }
+            ),
+            3,
+            "both + 仅 NEF = 全部三张"
+        );
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    pair_states: vec!["all".into(), "both".into()],
+                    ..Default::default()
+                }
+            ),
+            2,
+            "「全部」不能把后面的有效值一起抹掉"
+        );
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    decisions: vec!["none".into(), "keep".into()],
+                    ..Default::default()
+                }
+            ),
+            3
+        );
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    stars_in: vec![0, 5],
+                    ..Default::default()
+                }
+            ),
+            3,
+            "0 是「未打星」，不是「不筛」"
+        );
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    colors: vec!["red".into(), "blue".into()],
+                    ..Default::default()
+                }
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    focals: vec!["wide".into(), "super".into()],
+                    ..Default::default()
+                }
+            ),
+            2,
+            "两个焦段区间取并集"
+        );
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    isos: vec!["low".into(), "high".into()],
+                    ..Default::default()
+                }
+            ),
+            2,
+            "两个 ISO 区间取并集"
+        );
+        assert_eq!(
+            count(
+                &db,
+                PairFilter {
+                    qualities: vec!["blur".into(), "over".into()],
+                    ..Default::default()
+                }
+            ),
+            0,
+            "没分析过的照片不能被算成有问题"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 前端发的是 camelCase 复数数组；这条同时兜住「条件里的 ? 和参数个数必须相等」。
+    #[test]
+    fn plural_payload_deserializes_and_keeps_sql_args_aligned() {
+        let f: PairFilter = serde_json::from_str(
+            r#"{"pairStates":["both"],"cameraSerials":["X"],"days":["2026-11-08"],
+                 "decisions":["keep"],"starsIn":[1,5],"colors":["red"],
+                 "qualities":["blur","over"],"lenses":["A","B","__none__"],
+                 "focals":["tele","super"],"isos":["low"],"search":"DSC",
+                 "sort":"takenDesc"}"#,
+        )
+        .unwrap();
+        assert_eq!(f.lenses, vec!["A", "B", "__none__"]);
+        assert_eq!(f.stars_in, vec![1, 5]);
+
+        let (sql, args) = build_where(&f);
+        assert_eq!(
+            sql.matches('?').count(),
+            args.len(),
+            "SQL: {sql}\n参数个数: {}",
+            args.len()
+        );
+        assert!(sql.contains("p.camera_serial IN (?)"));
+        assert!(sql.contains("p.lens IN (?,?)"));
+        assert!(sql.contains("p.lens IS NULL"));
+        assert!(sql.contains(" OR "));
+        assert!(sql.contains(" AND "));
     }
 
     #[test]

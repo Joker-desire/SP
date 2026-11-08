@@ -179,6 +179,18 @@
         </button>
 
         <div class="sidebar-scroll" id="sidebar-scroll">
+          <!-- 已选条件置顶：多选之后最容易忘的就是「我到底筛了什么」。
+               一枚 chip 对应一个值，可单独摘掉；「全部清除」一次清空。 -->
+          <section class="active-filters" id="active-filters" aria-label="已选筛选条件" hidden>
+            <div class="active-filters-head">
+              <span class="active-filters-title">
+                已选条件 <span class="active-filters-count" id="active-filters-count">0</span>
+              </span>
+              <button class="facet-link" id="btn-clear-all" type="button" title="清除全部筛选条件">全部清除</button>
+            </div>
+            <div class="active-filters-list" id="active-filters-list"></div>
+          </section>
+
           <!-- 选片状态排在最前：这是每天真正要用的那一栏，
                文件类型 / 日期 / 机身是「怎么找到这批照片」，它是「怎么处理这批照片」。 -->
           <section class="facet-group facet-group--lead" data-group="decision">

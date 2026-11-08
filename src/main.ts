@@ -224,26 +224,88 @@ interface ExportProgress {
   total: number;
 }
 
+/**
+ * 每一维都是一组值：**同一维内是并集，不同维之间是交集**。
+ * 空集合＝这一维不筛。以前每维只存一个标量，选第二支镜头会把第一支顶掉；
+ * 用 Set 之后「点一下加进来、再点一下拿掉」是自然语义，去重也不用自己管。
+ *
+ * 星级特意存字符串："0" 是「没打星」这个有效取值，不能和「不筛」混为一谈。
+ */
 interface FilterState {
-  pairState: string;
-  cameraSerial: string | null;
-  day: string | null;
+  pairState: Set<string>;
+  cameraSerial: Set<string>;
+  day: Set<string>;
   /** all / none / keep / reject / marked */
-  decision: string;
-  /** null＝不筛。注意和 0（只要没打星的）是两码事。 */
-  stars: number | null;
-  /** 色标：null＝不筛；'' 是「只要没标色的」，同样和 null 两码事。 */
-  color: string | null;
-  /** 画面质量：null / blur / over / under */
-  quality: string | null;
-  /** 镜头型号，null＝不筛 */
-  lens: string | null;
-  /** 焦段分档：null / wide / normal / tele / super */
-  focal: string | null;
-  /** ISO 分档：null / low / mid / high / veryHigh */
-  iso: string | null;
+  decision: Set<string>;
+  stars: Set<string>;
+  color: Set<string>;
+  /** blur / over / under */
+  quality: Set<string>;
+  /** 镜头型号 */
+  lens: Set<string>;
+  /** wide / normal / tele / super */
+  focal: Set<string>;
+  /** low / mid / high / veryHigh */
+  iso: Set<string>;
   search: string;
   sort: string;
+}
+
+/** 分面值 → 显示名。顶部「已选条件」要用，但分面计数是全库口径，选中的值
+ *  可能刚好不在当前列表里；所以渲染分面时和点击时都顺手记一份，永不断档。 */
+const facetLabels = new Map<string, string>();
+const labelKey = (facet: string, key: string) => `${facet}\u0000${key}`;
+function rememberFacetLabel(facet: string, key: string, label: string) {
+  facetLabels.set(labelKey(facet, key), label);
+}
+function facetLabel(facet: string, key: string): string {
+  return facetLabels.get(labelKey(facet, key)) ?? (key === NONE_KEY ? "未知" : key);
+}
+
+/** 分面按钮的 dataset.facet → 对应的那一组选中值。 */
+function setForFacet(facet: string): Set<string> | null {
+  switch (facet) {
+    case "pairState": return filter.pairState;
+    case "camera": return filter.cameraSerial;
+    case "day": return filter.day;
+    case "decision": return filter.decision;
+    case "stars": return filter.stars;
+    case "color": return filter.color;
+    case "quality": return filter.quality;
+    case "lens": return filter.lens;
+    case "focal": return filter.focal;
+    case "iso": return filter.iso;
+    default: return null;
+  }
+}
+
+interface ActiveChip {
+  facet: string;
+  key: string;
+  group: string;
+  label: string;
+}
+
+/** 当前生效的每一条筛选（一个值一枚 chip）。搜索算一条，不能单独移除某个值。 */
+function activeChips(): ActiveChip[] {
+  const out: ActiveChip[] = [];
+  const add = (facet: string, group: string, values: Set<string>) => {
+    for (const key of values) out.push({ facet, key, group, label: facetLabel(facet, key) });
+  };
+  add("decision", "状态", filter.decision);
+  add("stars", "星级", filter.stars);
+  add("color", "色标", filter.color);
+  add("quality", "质量", filter.quality);
+  add("pairState", "文件", filter.pairState);
+  add("day", "日期", filter.day);
+  add("focal", "焦段", filter.focal);
+  add("iso", "ISO", filter.iso);
+  add("camera", "机身", filter.cameraSerial);
+  add("lens", "镜头", filter.lens);
+  if (filter.search.trim() !== "") {
+    out.push({ facet: "search", key: "", group: "搜索", label: `“${filter.search.trim()}”` });
+  }
+  return out;
 }
 
 const NONE_KEY = "__none__";
@@ -324,6 +386,10 @@ const collapsedGroups = new Set<string>(loadCollapsedGroups());
 const elSearch = $<HTMLInputElement>("#search");const elSearchClear = $<HTMLButtonElement>("#search-clear");
 const elSort = $<HTMLSelectElement>("#sort");
 const elClear = $<HTMLButtonElement>("#btn-clear");
+const elActiveFilters = $<HTMLElement>("#active-filters");
+const elActiveCount = $<HTMLElement>("#active-filters-count");
+const elActiveList = $<HTMLElement>("#active-filters-list");
+const elClearAll = $<HTMLButtonElement>("#btn-clear-all");
 const elCount = $<HTMLElement>("#count");
 const elGrid = $<HTMLElement>("#grid");
 const elProgress = $<HTMLElement>("#progress");
@@ -541,16 +607,16 @@ const redoStack: UndoEntry[] = [];
 let renderToken = 0;
 
 const filter: FilterState = {
-  pairState: "all",
-  cameraSerial: null,
-  day: null,
-  decision: "all",
-  stars: null,
-  color: null,
-  quality: null,
-  lens: null,
-  focal: null,
-  iso: null,
+  pairState: new Set(),
+  cameraSerial: new Set(),
+  day: new Set(),
+  decision: new Set(),
+  stars: new Set(),
+  color: new Set(),
+  quality: new Set(),
+  lens: new Set(),
+  focal: new Set(),
+  iso: new Set(),
   search: "",
   sort: "takenDesc",
 };
@@ -1017,18 +1083,18 @@ function currentRoots(): string[] | null {
 }
 
 function currentFilterPayload() {
+  // 后端 PairFilter 的复数数组字段：同一维 OR、跨维 AND。空数组＝不筛这一维。
   return {
-    pairState: filter.pairState,
-    cameraSerial: filter.cameraSerial,
-    day: filter.day,
-    // 「全部」在后端是不筛，用一个空值表达最清楚
-    decision: filter.decision === "all" ? null : filter.decision,
-    stars: filter.stars,
-    color: filter.color,
-    quality: filter.quality,
-    lens: filter.lens,
-    focal: filter.focal,
-    iso: filter.iso,
+    pairStates: [...filter.pairState],
+    cameraSerials: [...filter.cameraSerial],
+    days: [...filter.day],
+    decisions: [...filter.decision],
+    starsIn: [...filter.stars].map(Number),
+    colors: [...filter.color],
+    qualities: [...filter.quality],
+    lenses: [...filter.lens],
+    focals: [...filter.focal],
+    isos: [...filter.iso],
     search: filter.search,
     sort: filter.sort,
     roots: currentRoots(),
@@ -1037,19 +1103,7 @@ function currentFilterPayload() {
 
 /** 有没有任何一个筛选条件在生效。决定「清除筛选」按钮显不显示。 */
 function isFiltered(): boolean {
-  return (
-    filter.pairState !== "all" ||
-    filter.cameraSerial !== null ||
-    filter.day !== null ||
-    filter.decision !== "all" ||
-    filter.stars !== null ||
-    filter.color !== null ||
-    filter.quality !== null ||
-    filter.lens !== null ||
-    filter.focal !== null ||
-    filter.iso !== null ||
-    filter.search.trim() !== ""
-  );
+  return activeChips().length > 0;
 }
 
 /**
@@ -1059,7 +1113,7 @@ function isFiltered(): boolean {
  * 一屏一屏地清空）。没有依赖时就不动它，免得照片毫无理由地跳走。
  */
 function filterTracksMarks(): boolean {
-  return filter.decision !== "all" || filter.stars !== null || filter.color !== null;
+  return filter.decision.size > 0 || filter.stars.size > 0 || filter.color.size > 0;
 }
 
 /**
@@ -1333,6 +1387,7 @@ function appendGrouped(list: PairCard[]) {
 
 function updateCount() {
   elClear.hidden = !isFiltered();
+  renderActiveFilters();
   updateSidebarBadge();
   // 图库空的时候，一整条选片操作栏只是噪声——它要操作的东西还不存在
   elCullbar.hidden = total === 0 && items.length === 0;
@@ -1463,7 +1518,7 @@ function renderPairFacets(f: LibraryFacets) {
         key: it.key,
         label: it.label,
         count: it.count,
-        active: filter.pairState === it.key,
+        active: it.key === "all" ? filter.pairState.size === 0 : filter.pairState.has(it.key),
         warn: it.key === "orphan" && it.count > 0,
       })
     );
@@ -1489,7 +1544,7 @@ function renderQualityFacets(f: LibraryFacets) {
         key: it.key,
         label: it.label,
         count: it.count,
-        active: filter.quality === it.key,
+        active: filter.quality.has(it.key),
       })
     );
   }
@@ -1500,14 +1555,14 @@ function renderQualityFacets(f: LibraryFacets) {
  * 焦段 / ISO：档位是固定的，所以整组里只要有任何一档有照片就显示，
  * 计数为 0 的档也留着——位置固定，眼睛不用重新找。
  */
-function renderBucketFacets(host: HTMLElement, group: HTMLElement, items: Facet[], facet: string, current: string | null) {
+function renderBucketFacets(host: HTMLElement, group: HTMLElement, items: Facet[], facet: string, current: Set<string>) {
   host.innerHTML = "";
-  const any = items.some((it) => it.count > 0);
+  const any = items.some((it) => it.count > 0) || current.size > 0;
   group.hidden = !any;
   if (!any) return;
   for (const it of items) {
     host.appendChild(
-      facetButton({ facet, key: it.key, label: it.label, count: it.count, active: current === it.key })
+      facetButton({ facet, key: it.key, label: it.label, count: it.count, active: current.has(it.key) })
     );
   }
 }
@@ -1519,16 +1574,16 @@ function renderLensFacets(f: LibraryFacets) {
   // 以前要求「至少两种镜头」才显示，只有一支镜头、或者 EXIF 全读不到的图库
   // 就永远看不到这一栏——可「未知镜头」本身也值得能单独筛掉。所以只要有照片
   // 就给出来；正在筛的镜头即使这一批里没有了，也要留着，好让人取消条件。
-  elGroupLens.hidden = items.length === 0 && filter.lens === null;
+  elGroupLens.hidden = items.length === 0 && filter.lens.size === 0;
   elLensNote.textContent = items.length > 0 ? `${items.length} 支` : "";
-  elLensClear.hidden = filter.lens === null;
+  elLensClear.hidden = filter.lens.size === 0;
   if (elGroupLens.hidden) {
     elLensMore.hidden = true;
     return;
   }
 
   // 选中的镜头排在折叠区时直接展开，别让它藏在「显示全部」后面
-  const activeBeyond = items.findIndex((it) => it.key === filter.lens) >= LENS_PREVIEW;
+  const activeBeyond = items.some((it, i) => i >= LENS_PREVIEW && filter.lens.has(it.key));
   const showAll = lensExpanded || activeBeyond || items.length <= LENS_PREVIEW;
   for (const it of showAll ? items : items.slice(0, LENS_PREVIEW)) {
     elFacetsLens.appendChild(
@@ -1537,7 +1592,7 @@ function renderLensFacets(f: LibraryFacets) {
         key: it.key,
         label: it.label,
         count: it.count,
-        active: filter.lens === it.key,
+        active: filter.lens.has(it.key),
       })
     );
   }
@@ -1556,7 +1611,7 @@ function renderDecisionFacets(f: LibraryFacets) {
         key: it.key,
         label: it.label,
         count: it.count,
-        active: filter.decision === it.key,
+        active: it.key === "all" ? filter.decision.size === 0 : filter.decision.has(it.key),
       })
     );
   }
@@ -1574,7 +1629,7 @@ function renderColorFacets(f: LibraryFacets) {
         key: it.key,
         label: it.label,
         count: it.count,
-        active: filter.color === it.key,
+        active: filter.color.has(it.key),
         extra: swatch,
       })
     );
@@ -1590,7 +1645,7 @@ function renderStarFacets(f: LibraryFacets) {
         key: it.key,
         label: it.label,
         count: it.count,
-        active: filter.stars === Number(it.key),
+        active: filter.stars.has(it.key),
       })
     );
   }
@@ -1616,7 +1671,7 @@ function renderCameraFacets(f: LibraryFacets) {
       key: "",
       label: "全部机身",
       count: f.total,
-      active: filter.cameraSerial === null,
+      active: filter.cameraSerial.size === 0,
     })
   );
 
@@ -1627,7 +1682,7 @@ function renderCameraFacets(f: LibraryFacets) {
         key: c.key,
         label: c.label,
         count: c.count,
-        active: filter.cameraSerial === c.key,
+        active: filter.cameraSerial.has(c.key),
       })
     );
   }
@@ -1643,7 +1698,7 @@ function renderDayFacets(f: LibraryFacets) {
       key: "",
       label: "全部日期",
       count: f.total,
-      active: filter.day === null,
+      active: filter.day.size === 0,
     })
   );
 
@@ -1664,7 +1719,7 @@ function renderDayFacets(f: LibraryFacets) {
     // 默认只展开最近两个月，其余折叠——侧栏一屏放不下几百天。
     // 用户手动展开过的月份记在 monthChoice 里，重新渲染时不会被默认值盖掉。
     const collapsed = monthChoice.get(ym) ?? monthIndex >= 2;
-    const holdsActive = filter.day !== null && filter.day.startsWith(ym);
+    const holdsActive = [...filter.day].some((d) => d.startsWith(ym));
 
     const head = document.createElement("button");
     head.type = "button";
@@ -1699,7 +1754,7 @@ function renderDayFacets(f: LibraryFacets) {
         key: d.key,
         label: text,
         count: d.count,
-        active: filter.day === d.key,
+        active: filter.day.has(d.key),
         extra: wd,
       });
       btn.classList.add("facet--day");
@@ -1715,10 +1770,10 @@ function renderDayFacets(f: LibraryFacets) {
       facetButton({
         facet: "day",
         key: NONE_KEY,
-        label: "无时间信息",
-        count: d.count,
-        active: filter.day === NONE_KEY,
-        warn: true,
+      label: "无时间信息",
+      count: d.count,
+      active: filter.day.has(NONE_KEY),
+      warn: true,
       })
     );
   }
@@ -1798,6 +1853,27 @@ async function loadFacets() {
   lastFacets = f;
   updateCullProgress(f);
 
+  // 记下每个分面值的显示名，顶部「已选条件」的 chip 要用。
+  // 日期在后端只是 YYYY-MM-DD，前端拼出来的「09-16 周三」才适合给人看。
+  const groups: [string, Facet[]][] = [
+    ["pairState", f.pairStates],
+    ["stars", f.stars],
+    ["color", f.colors],
+    ["quality", f.quality],
+    ["camera", f.cameras],
+    ["day", f.days],
+    ["decision", f.decisions],
+    ["lens", f.lenses],
+    ["focal", f.focals],
+    ["iso", f.isos],
+  ];
+  for (const [facet, list] of groups) {
+    for (const it of list) {
+      const label = facet === "day" && it.key !== NONE_KEY ? dayParts(it.key).text : it.label;
+      rememberFacetLabel(facet, it.key, label);
+    }
+  }
+
   if (f.total === 0) {
     // 图库空的时候别摆一排 0，一句话说清就够了
     renderFacetsEmpty();
@@ -1815,6 +1891,7 @@ async function loadFacets() {
   renderBucketFacets(elFacetsFocal, elGroupParams, f.focals, "focal", filter.focal);
   renderBucketFacets(elFacetsIso, elGroupIso, f.isos, "iso", filter.iso);
   revealActiveGroups();
+  renderActiveFilters();
 }
 
 /**
@@ -1876,32 +1953,19 @@ document.querySelector(".sidebar")?.addEventListener("click", (e) => {
 
   const facet = btn.dataset.facet;
   const key = btn.dataset.key;
+  const set = setForFacet(facet);
+  if (!set) return;
 
-  if (facet === "pairState") {
-    filter.pairState = key;
-  } else if (facet === "camera") {
-    // 再点一次当前项＝取消这个条件，省得每次都跑去找「全部」
-    filter.cameraSerial = key === "" || key === filter.cameraSerial ? null : key;
-  } else if (facet === "day") {
-    filter.day = key === "" || key === filter.day ? null : key;
-  } else if (facet === "decision") {
-    // 和上面几维一样的规矩：再点一次当前项就回到「全部」
-    filter.decision = key === "all" || key === filter.decision ? "all" : key;
-  } else if (facet === "stars") {
-    const n = Number(key);
-    filter.stars = filter.stars === n ? null : n;
-  } else if (facet === "color") {
-    // 色标这一栏点两次也回到「不限」——没有单独的「全部」按钮，只能靠再点一次
-    filter.color = key === filter.color ? null : key;
-  } else if (facet === "quality") {
-    filter.quality = key === filter.quality ? null : key;
-  } else if (facet === "lens") {
-    filter.lens = key === filter.lens ? null : key;
-  } else if (facet === "focal") {
-    filter.focal = key === filter.focal ? null : key;
-  } else if (facet === "iso") {
-    filter.iso = key === filter.iso ? null : key;
-  }
+  // 「全部」项（日期 / 机身用空 key，其余用 all）＝把这一维整个清空。
+  // 其余项点一下加进来、再点一下拿掉；不用再跑去找「全部」按钮。
+  if (key === "" || key === "all") set.clear();
+  else if (set.has(key)) set.delete(key);
+  else set.add(key);
+
+  // 侧栏计数是全库口径，选中的值可能不在这一批里；先把名字存下来，
+  // 顶部 chip 才不会退化成 “2026-11-08” 或者一长串机身序列号。
+  const label = btn.querySelector<HTMLElement>(".facet-label")?.textContent;
+  if (label && key !== "") rememberFacetLabel(facet, key, label);
 
   void applyFilterChange();
 });
@@ -1914,22 +1978,101 @@ async function applyFilterChange() {
 /** 把所有筛选条件拨回「全部」，搜索框也清空。只改状态不重查——
  *  查询由调用方决定（按钮点完要 applyFilterChange，清空图库时不用查）。 */
 function resetFilter() {
-  filter.pairState = "all";
-  filter.cameraSerial = null;
-  filter.day = null;
-  filter.decision = "all";
-  filter.stars = null;
-  filter.color = null;
-  filter.quality = null;
-  filter.lens = null;
-  filter.focal = null;
-  filter.iso = null;
+  for (const set of [
+    filter.pairState,
+    filter.cameraSerial,
+    filter.day,
+    filter.decision,
+    filter.stars,
+    filter.color,
+    filter.quality,
+    filter.lens,
+    filter.focal,
+    filter.iso,
+  ]) {
+    set.clear();
+  }
   filter.search = "";
   elSearch.value = "";
   elSearchClear.hidden = true;
 }
 
 elClear.addEventListener("click", () => {
+  resetFilter();
+  void applyFilterChange();
+});
+
+// ---------------------------------------------------------------------------
+// 已选条件区：侧栏最上面的一块
+//
+// 多选之后「我到底筛了什么」很难靠一栏栏翻回去找，所以每个选中的值都摆一枚
+// chip，点一下单独摘掉；「全部清除」和顶栏那个清除按钮走同一套 resetFilter。
+// ---------------------------------------------------------------------------
+
+/** 条件没变就别重建 DOM：updateCount 每翻一页都调一次，读 scrollHeight 会强制重排。 */
+let lastChipSignature = "";
+
+function renderActiveFilters() {
+  const chips = activeChips();
+  const signature = chips.map((c) => `${c.facet}:${c.key}:${c.label}`).join("|");
+  if (signature === lastChipSignature) return;
+  lastChipSignature = signature;
+
+  elActiveFilters.hidden = chips.length === 0;
+  elActiveCount.textContent = String(chips.length);
+  elClearAll.title = `清除全部 ${chips.length} 个筛选条件`;
+  elActiveList.replaceChildren();
+
+  for (const chip of chips) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "filter-chip";
+    b.dataset.facet = chip.facet;
+    b.dataset.key = chip.key;
+    const text = `${chip.group} · ${chip.label}`;
+    b.title = `${text}（点击移除）`;
+    b.setAttribute("aria-label", `移除筛选条件：${text}`);
+
+    const g = document.createElement("span");
+    g.className = "filter-chip-group";
+    g.textContent = chip.group;
+
+    const v = document.createElement("span");
+    v.className = "filter-chip-value";
+    v.textContent = chip.label;
+
+    const x = document.createElement("span");
+    x.className = "filter-chip-x";
+    x.setAttribute("aria-hidden", "true");
+    x.textContent = "×";
+
+    b.append(g, v, x);
+    elActiveList.appendChild(b);
+  }
+
+  // 选得多的时候底部渐隐，别让半枚 chip 看起来像渲染错误
+  elActiveList.classList.toggle(
+    "is-overflowing",
+    elActiveList.scrollHeight > elActiveList.clientHeight + 2
+  );
+}
+
+elActiveList.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest<HTMLElement>(".filter-chip");
+  if (!btn) return;
+  const facet = btn.dataset.facet ?? "";
+  const key = btn.dataset.key ?? "";
+  if (facet === "search") {
+    filter.search = "";
+    elSearch.value = "";
+    elSearchClear.hidden = true;
+  } else {
+    setForFacet(facet)?.delete(key);
+  }
+  void applyFilterChange();
+});
+
+elClearAll.addEventListener("click", () => {
   resetFilter();
   void applyFilterChange();
 });
@@ -1956,19 +2099,7 @@ function saveCollapsedGroups() {
 
 /** 收起侧栏时最容易犯的错是「忘了自己还筛着东西」，所以留一个数字在窄轨上。 */
 function activeFilterCount(): number {
-  return (
-    Number(filter.pairState !== "all") +
-    Number(filter.cameraSerial !== null) +
-    Number(filter.day !== null) +
-    Number(filter.decision !== "all") +
-    Number(filter.stars !== null) +
-    Number(filter.color !== null) +
-    Number(filter.quality !== null) +
-    Number(filter.lens !== null) +
-    Number(filter.focal !== null) +
-    Number(filter.iso !== null) +
-    Number(filter.search.trim() !== "")
-  );
+  return activeChips().length;
 }
 
 function updateSidebarBadge() {
@@ -2041,16 +2172,16 @@ function initFacetGroups() {
 /** 每一栏对应哪个筛选条件。别用 DOM 上的 .is-active 反推——「全部」这类
  *  默认项也带 active，会把用户刚折起来的组每次都强行弹开。 */
 const GROUP_HAS_FILTER: Record<string, () => boolean> = {
-  decision: () => filter.decision !== "all",
-  stars: () => filter.stars !== null,
-  colors: () => filter.color !== null,
-  quality: () => filter.quality !== null,
-  pair: () => filter.pairState !== "all",
-  days: () => filter.day !== null,
-  focal: () => filter.focal !== null,
-  iso: () => filter.iso !== null,
-  cameras: () => filter.cameraSerial !== null,
-  lens: () => filter.lens !== null,
+  decision: () => filter.decision.size > 0,
+  stars: () => filter.stars.size > 0,
+  colors: () => filter.color.size > 0,
+  quality: () => filter.quality.size > 0,
+  pair: () => filter.pairState.size > 0,
+  days: () => filter.day.size > 0,
+  focal: () => filter.focal.size > 0,
+  iso: () => filter.iso.size > 0,
+  cameras: () => filter.cameraSerial.size > 0,
+  lens: () => filter.lens.size > 0,
 };
 
 /** 有筛选生效的那一栏必须露出来，否则会出现「结果变少了却找不到在哪筛的」。
@@ -2067,8 +2198,8 @@ function revealActiveGroups() {
 function initSidebar() {
   elSidebarToggle.addEventListener("click", () => toggleSidebar());
   elLensClear.addEventListener("click", () => {
-    if (filter.lens === null) return;
-    filter.lens = null;
+    if (filter.lens.size === 0) return;
+    filter.lens.clear();
     void applyFilterChange();
   });
   elLensMore.addEventListener("click", () => {
@@ -2255,13 +2386,14 @@ function markTargets(): number[] {
 
 /** 一张卡片在当前筛选下还应该出现吗。只在筛选涉及选片状态时才需要问。 */
 function stillMatches(c: PairCard): boolean {
-  if (filter.decision === "marked") {
-    if (c.decision === "none") return false;
-  } else if (filter.decision !== "all" && c.decision !== filter.decision) {
-    return false;
+  if (filter.decision.size > 0) {
+    const ok = [...filter.decision].some((d) =>
+      d === "marked" ? c.decision !== "none" : c.decision === d
+    );
+    if (!ok) return false;
   }
-  if (filter.stars !== null && c.stars !== filter.stars) return false;
-  if (filter.color !== null && c.color !== filter.color) return false;
+  if (filter.stars.size > 0 && !filter.stars.has(String(c.stars))) return false;
+  if (filter.color.size > 0 && !filter.color.has(c.color)) return false;
   return true;
 }
 
@@ -2887,13 +3019,13 @@ async function runExport() {
 
   // 「当前选中的」是显式的一串 id，不掺筛选条件——勾了什么就导出什么。
   // 其余范围沿用原来的口径：日期、机身、搜索这些条件继续生效，
-  // 「把这一天的保留都导出」是最常用的组合。scope 为 "all" 时后端认不出这个
-  // 取值，于是不按选片状态筛，正好是我们要的意思。
+  // 「把这一天的保留都导出」是最常用的组合。导出范围要覆盖侧栏的选片状态
+  // 选择，所以这里用 decisions 数组整个替换掉；"all" 就是空数组＝不筛。
   const onlyIds = scope === "selected" ? Array.from(selection).filter((id) => itemById.has(id)) : null;
   const filter =
     onlyIds && onlyIds.length > 0
-      ? { ...currentFilterPayload(), decision: null, ids: onlyIds }
-      : { ...currentFilterPayload(), decision: scope };
+      ? { ...currentFilterPayload(), decisions: [], ids: onlyIds }
+      : { ...currentFilterPayload(), decisions: scope === "all" ? [] : [scope] };
 
   try {
     const summary = await invoke<ExportSummary>("export_selection", {
