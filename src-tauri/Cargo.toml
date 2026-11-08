@@ -1,6 +1,6 @@
 [package]
 name = "sp"
-version = "0.3.0"
+version = "0.4.0"
 description = "S·P —— 本地摄影选片工具"
 authors = ["Joker-desire"]
 license = "MIT"
@@ -31,6 +31,9 @@ kamadak-exif = "0.6.1"
 blake3 = "1.8.7"
 anyhow = "1.0.104"
 tauri-plugin-dialog = "2.7.3"
+# 自动更新：签名验证由 Tauri 强制要求，公钥写死在 tauri.conf.json
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "tiff"] }
 # RAW 完整解码——降级链的第三级。只有内嵌预览抠不出来时才轮到它，
 # 慢但覆盖面广（尼康 NEF、佳能 CR3、索尼 ARW 等）。

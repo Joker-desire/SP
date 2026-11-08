@@ -1,7 +1,7 @@
 {
   "name": "sp",
   "description": "S·P —— 本地摄影选片工具：几千张里挑出值得留下的那几张",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "MIT",
   "author": "Joker-desire",
   "homepage": "https://github.com/Joker-desire/SP",
@@ -24,7 +24,9 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.3",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-updater": "^2",
+    "@tauri-apps/plugin-process": "^2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

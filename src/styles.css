@@ -353,6 +353,109 @@ select {
   display: none;
 }
 
+/* =========== 自动更新提示 =========== */
+
+#btn-update {
+  position: relative;
+}
+
+.update-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 0 2px var(--bg-panel);
+  pointer-events: none;
+}
+
+.update-panel {
+  position: fixed;
+  top: calc(var(--topbar-h) + 10px);
+  right: 14px;
+  z-index: 70;
+  width: 290px;
+  padding: 14px 14px 12px;
+  border-radius: var(--radius);
+  background: var(--glass-strong);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(160%);
+  backdrop-filter: blur(var(--blur)) saturate(160%);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-lg);
+  animation: update-in var(--dur) var(--ease);
+}
+
+@keyframes update-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.update-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.update-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.update-close {
+  border: 0;
+  background: transparent;
+  color: var(--text-mute);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.update-close:hover { color: var(--text); }
+
+.update-notes {
+  margin: 8px 0 0;
+  max-height: 76px;
+  overflow-y: auto;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+}
+
+.update-progress {
+  margin-top: 10px;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+
+.update-progress span {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent-grad);
+  transition: width 0.2s var(--ease);
+}
+
+.update-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-panel { animation: none; }
+  .update-progress span { transition: none; }
+}
+
 /* =========== 主体布局 =========== */
 
 .workspace {

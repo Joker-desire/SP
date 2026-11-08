@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import * as zoomMath from "./zoom";
 import type { Box } from "./zoom";
 
@@ -5018,6 +5020,126 @@ window.addEventListener("keydown", (e) => {
     setHint(on ? "胶片边框上好了，慢慢看。" : "胶片边框收起来了。");
   }
 });
+
+// ---------------------------------------------------------------------------
+// 自动更新
+//
+// 启动后静默查一次、顶栏按钮手动查、查到后由用户决定装不装。不做后台轮询：
+// 静态 latest.json 一次 GET 就够，轮询只会撞 GitHub 限流。失败一律静默降级，
+// 断网时也该能正常选片；绝不自动重启——用户可能正在连续打标签。
+// ---------------------------------------------------------------------------
+
+const elBtnUpdate = $<HTMLButtonElement>("#btn-update");
+const elUpdateDot = $<HTMLElement>("#update-dot");
+const elUpdatePanel = $<HTMLElement>("#update-panel");
+const elUpdateTitle = $<HTMLElement>("#update-title");
+const elUpdateNotes = $<HTMLElement>("#update-notes");
+const elUpdateProgress = $<HTMLElement>("#update-progress");
+const elUpdateProgressBar = $<HTMLElement>("#update-progress-bar");
+const elUpdateNow = $<HTMLButtonElement>("#update-now");
+const elUpdateLater = $<HTMLButtonElement>("#update-later");
+const elUpdateClose = $<HTMLButtonElement>("#update-close");
+
+let pendingUpdate: Update | null = null;
+let updateBusy = false;
+
+function showUpdatePanel() {
+  if (!pendingUpdate) return;
+  elUpdateTitle.textContent = `发现新版本 ${pendingUpdate.version}`;
+  const notes = (pendingUpdate.body ?? "").trim();
+  elUpdateNotes.textContent = notes || "修复与改进，可到 Release 页查看完整说明。";
+  elUpdateProgress.hidden = true;
+  elUpdateProgressBar.style.width = "0%";
+  elUpdateNow.disabled = false;
+  elUpdateNow.textContent = "立即更新";
+  elUpdateLater.hidden = false;
+  elUpdateClose.hidden = false;
+  elUpdatePanel.hidden = false;
+}
+
+function dismissUpdatePanel() {
+  if (updateBusy) return; // 下载中不让误关
+  elUpdatePanel.hidden = true;
+}
+
+function setUpdateProgress(downloaded: number, total: number) {
+  elUpdateProgress.hidden = false;
+  const pct = total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
+  elUpdateProgressBar.style.width = `${pct}%`;
+  elUpdateNow.textContent = total > 0 ? `下载中 ${pct}%` : "下载中…";
+}
+
+async function checkForUpdate(silent: boolean) {
+  if (updateBusy) return;
+  // 之前查到过就直接把面板叫回来，别再打一次网络请求
+  if (pendingUpdate && !silent) {
+    showUpdatePanel();
+    return;
+  }
+  updateBusy = true;
+  elBtnUpdate.disabled = true;
+  try {
+    const update = await check({ timeout: 15000 });
+    if (update) {
+      pendingUpdate = update;
+      elUpdateDot.hidden = false;
+      showUpdatePanel();
+    } else if (!silent) {
+      setHint("已是最新版本");
+    }
+  } catch (e) {
+    console.warn("[updater] 检查更新失败", e);
+    if (!silent) setHint("检查更新失败，可到 Release 页手动下载", "warn");
+  } finally {
+    updateBusy = false;
+    elBtnUpdate.disabled = false;
+  }
+}
+
+async function installUpdate() {
+  const update = pendingUpdate;
+  if (!update || updateBusy) return;
+  updateBusy = true;
+  elBtnUpdate.disabled = true;
+  elUpdateNow.disabled = true;
+  elUpdateLater.hidden = true;
+  elUpdateClose.hidden = true;
+  setUpdateProgress(0, 0);
+  let downloaded = 0;
+  let total = 0;
+  try {
+    await update.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        total = event.data.contentLength ?? 0;
+      } else if (event.event === "Progress") {
+        downloaded += event.data.chunkLength ?? 0;
+        setUpdateProgress(downloaded, total);
+      }
+    });
+    setHint("更新已安装，正在重启…");
+    await relaunch();
+  } catch (e) {
+    console.error("[updater] 安装失败", e);
+    setHint(`更新失败：${String(e)}，可到 Release 页手动下载`, "error");
+    elUpdateProgress.hidden = true;
+    elUpdateNow.disabled = false;
+    elUpdateNow.textContent = "重试更新";
+    elUpdateLater.hidden = false;
+    elUpdateClose.hidden = false;
+  } finally {
+    updateBusy = false;
+    elBtnUpdate.disabled = false;
+  }
+}
+
+elBtnUpdate.addEventListener("click", () => void checkForUpdate(false));
+elUpdateNow.addEventListener("click", () => void installUpdate());
+elUpdateLater.addEventListener("click", dismissUpdatePanel);
+elUpdateClose.addEventListener("click", dismissUpdatePanel);
+
+// 首屏铺完再查，别和扫描 / 分面统计抢网络与主线程。
+// 放在顶层而不是 boot() 里：哪怕初始化失败，顶栏按钮也仍能手动重试。
+setTimeout(() => void checkForUpdate(true), 8000);
 
 async function boot() {
   applyTheme(savedTheme());

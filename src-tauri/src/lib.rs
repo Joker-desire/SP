@@ -2868,6 +2868,9 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 自动更新：公钥在 tauri.conf.json，签名验证由插件强制做，前端只需 check()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         // 窗口大小与位置记下来，下次打开回到上次的样子。
         // 默认保存尺寸 / 位置 / 最大化，状态文件落在应用数据目录里。
         .plugin(tauri_plugin_window_state::Builder::default().build())

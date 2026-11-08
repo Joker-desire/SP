@@ -69,6 +69,10 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tauri 在打包时读这两个变量，为 updater 产物生成 .sig 签名。
+          # 缺了它们不会报错，但产出的更新包无法被客户端验签，等于自动更新失效。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # 故意不传 tagName：让 tauri-action 只负责构建，
           # Release 由下面统一创建并上传改名后的产物，避免出现两份同内容不同名的文件
@@ -92,6 +96,37 @@ jobs:
             \( -name '*.dmg' -o -name '*.msi' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) \
             -exec sh -c 'cp "$1" "out/SP_${v}_${os}_${arch}.${1##*.}"' _ {} \;
           ls -lh out
+
+      # updater 要的是 Tauri 原始产出的 .app.tar.gz / .msi 和各自的 .sig，
+      # 不是上面改过名的安装包。签名验的是文件内容，这里统一改成 ASCII 名，
+      # 免得产品名里的「·」在上传环节被换成点，latest.json 的 URL 对不上。
+      - name: 收集更新产物
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          arch="${{ matrix.arch }}"
+          export v arch
+          mkdir -p out-update
+          tgz=$(find src-tauri/target -name '*.app.tar.gz' -type f | head -1)
+          if [ -n "$tgz" ]; then
+            cp "$tgz" "out-update/SP_${v}_macos_${arch}.app.tar.gz"
+            cp "${tgz}.sig" "out-update/SP_${v}_macos_${arch}.app.tar.gz.sig"
+          fi
+          msi=$(find src-tauri/target -name '*.msi' -type f | head -1)
+          if [ -n "$msi" ]; then
+            cp "$msi" "out-update/SP_${v}_windows_x64.msi"
+            cp "${msi}.sig" "out-update/SP_${v}_windows_x64.msi.sig"
+          fi
+          ls -lh out-update
+
+      - name: 上传更新产物（供汇总 job 生成清单）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-${{ matrix.arch }}
+          path: out-update/*
+          if-no-files-found: error
 
       - name: 建 Release 并上传（仅打 tag 时）
         if: startsWith(github.ref, 'refs/tags/')
@@ -117,3 +152,36 @@ jobs:
           name: S·P-${{ matrix.os }}-${{ matrix.arch }}
           path: out/*
           if-no-files-found: error
+
+  # 三个平台并行出包，latest.json 必须等所有签名都齐了才能生成：
+  # Tauri 会先校验整份 JSON，任一平台缺项会让所有客户端检查失败。
+  # needs: build 也保证 Release 此时已由上面的步骤创建好。
+  updater-json:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: update-*
+          path: out-update
+          merge-multiple: true
+
+      - name: 生成 latest.json
+        env:
+          SP_TAG: ${{ github.ref_name }}
+        run: node scripts/build-updater-json.mjs
+
+      - name: 上传清单与更新包
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SP_TAG: ${{ github.ref_name }}
+        run: gh release upload "$SP_TAG" out-update/* latest.json --clobber
