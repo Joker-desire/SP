@@ -386,6 +386,10 @@ writeFileSync("latest.json", JSON.stringify({
 
 **代码改进（v0.4.3 起生效）**：`installUpdate()` 失败时在更新面板内显示分类后的中文原因（网络 / 验签 / 权限 / 其它）与原始错误摘要，不再只塞进状态栏；「重试更新」旁边能直接看到该换网络还是该手动装。
 
+**同一波故障也打到了 CI**：v0.4.3 首次发布 run `42570127599` 里，Windows job 编译与 WiX（`.msi`）都成功，随后下载 NSIS 工具链 `nsis-3.11.zip` 时返回 `http status: 504`，`failed to bundle project`；`updater-json` 因 `needs: build` 被跳过，Release 只剩两个 mac dmg、没有 `latest.json`。这是 GitHub Release 下载域名的临时故障，不是代码回归 —— 用 `POST /repos/Joker-desire/SP/actions/runs/{run_id}/rerun-failed-jobs` 重跑失败 job（HTTP 201，attempt 2）后四个 job 全绿、10 个资产齐全。**遇到 Windows 打包报 `http status: 504` 先重跑，不要改代码或重打 tag**（重打 tag 会重建 Release、打乱下载计数）。
+
+另注意：`latest.json` 这类小文件直连很快恢复 200，但 7–9 MB 的 `.app.tar.gz` 在同一时刻仍是 504 —— 客户端会「检查得到新版、下载必失败」。这种状态下**应用内自动更新暂时不可用**，直接手动装 dmg 最稳。
+
 ---
 
 ## 7. 最终采用的选择

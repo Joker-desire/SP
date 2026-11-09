@@ -139,6 +139,7 @@ git push && git push origin v0.1.0       # 等 Actions 跑完即可
 - **更新失败时不再只给一个「重试更新」**：下载 / 安装失败会在更新面板里显示分类后的中文原因（网络被网关拦截、验签失败、无权限替换 app、其它）并附上原始错误摘要，直接告诉你该换网络、手动装 dmg，还是把 app 移回「应用程序」。以前错误只写进底部状态栏，很容易完全看不到
 - 起因：v0.4.2 发布后遇到本机到 `github.com/.../releases/download/` 返回 `504 Gateway Time-out`，面板能弹出但下载更新包失败。产物经换路径下载、gzip 校验和签名比对确认无损，排查过程与绕过办法记在 `docs/AUTO_UPDATE.md` 第 6 节
 - 验证：`npm run build`、`cargo fmt --check`、`cargo test` 88 passed / 2 ignored；浅色 / 深色主题的失败态面板静态预览均无裁切或重叠
+- 发版：run `42570127599` 首次因 GitHub Release CDN 504 导致 Windows 打包下载 NSIS 失败，重跑失败 job 后四个 job 全绿，10 个资产齐全，`latest.json` 为 0.4.3、三平台签名齐全（详见 `docs/AUTO_UPDATE.md` 第 6 节）。**这波故障期间 Release 大文件直连仍可能 504，应用内更新下不动包时请直接装 dmg**
 
 ### v0.4.2（2026-11-09）
 
