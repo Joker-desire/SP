@@ -620,20 +620,23 @@
       </div>
     </div>
 
-    <!-- ── 对比选一张 ─────────────────────────────────────────────────── -->
+    <!-- ── 连拍对比：同一组可以保留多张 ──────────────────────────────── -->
     <div class="modal" id="compare-modal" hidden>
       <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-labelledby="compare-title">
-        <h2 class="modal-title" id="compare-title">挑一张</h2>
+        <h2 class="modal-title" id="compare-title">连拍对比</h2>
 
         <div class="modal-body">
+          <p class="modal-note compare-status" id="compare-status">尚未保留任何一张</p>
           <div class="compare-grid" id="compare-grid"></div>
           <p class="modal-note">
-            点一张 = 保留它，同组其它自动标为淘汰；再点一次已保留的，取消这次选择。
-            键盘 <kbd>1</kbd>–<kbd>9</kbd> 直接选第几张，<kbd>Esc</kbd> 返回。
+            点一张 = 保留或取消这一张，<strong>同一组可以留多张</strong>；
+            <kbd>Shift</kbd> + 点击 = 只留这张、同组其余标为淘汰。
+            键盘 <kbd>1</kbd>–<kbd>9</kbd> 对应第几张（同样支持 <kbd>Shift</kbd>），<kbd>Esc</kbd> 返回。
           </p>
         </div>
 
         <div class="modal-foot">
+          <button class="btn btn-ghost compare-clear" id="compare-clear">清空本组</button>
           <button class="btn" id="compare-done">完成</button>
         </div>
       </div>
@@ -743,7 +746,7 @@
         <span class="update-title" id="update-title">发现新版本</span>
         <button class="update-close" id="update-close" aria-label="关闭">×</button>
       </div>
-      <p class="update-notes" id="update-notes"></p>
+      <div class="update-notes" id="update-notes"></div>
       <div class="update-progress" id="update-progress" hidden>
         <span id="update-progress-bar"></span>
       </div>

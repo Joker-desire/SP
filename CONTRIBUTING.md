@@ -52,7 +52,13 @@ CI（`.github/workflows/ci.yml`）会跑 `cargo fmt --check`、`cargo test`、`n
 版本由 maintainer 走：
 
 ```bash
-npm run bump 0.1.1 && git commit -am "v0.1.1" && git tag v0.1.1 && git push --follow-tags
+npm run bump 0.1.1                  # 同步改三处版本号
+# 写 release-notes/v0.1.1.md：每行一条 "- xxx" 的简洁更新项，必做
+git commit -am "v0.1.1"
+git tag -a v0.1.1 -m "v0.1.1"       # 必须附注 tag，轻量 tag 不触发发版
+git push && git push origin v0.1.1
 ```
 
-推 tag 之后 GitHub Actions 会自动构建 macOS（Apple Silicon / Intel）+ Windows 安装包并建 Release。版本号三处（package.json、Cargo.toml、tauri.conf.json）必须一致，所以用 `npm run bump`，不要手改。
+推 tag 之后 GitHub Actions 会自动构建 macOS（Apple Silicon / Intel）+ Windows 安装包并建 Release，再由 `updater-json` job 汇总三平台签名生成 `latest.json`。版本号三处（package.json、Cargo.toml、tauri.conf.json）必须一致，所以用 `npm run bump`，不要手改；两个锁文件（`package-lock.json`、`src-tauri/Cargo.lock`）里的版本也要一起改。
+
+`release-notes/<tag>.md` 不能省：它既是 Release 页说明，也是 `latest.json` 的 `notes`，客户端更新面板会逐条展示。缺文件或没有 `- ` 条目，CI 直接失败。

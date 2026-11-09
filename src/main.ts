@@ -516,6 +516,8 @@ const elSimilarNote = $<HTMLElement>("#similar-note");
 const elCompareModal = $<HTMLElement>("#compare-modal");
 const elCompareGrid = $<HTMLElement>("#compare-grid");
 const elCompareDone = $<HTMLButtonElement>("#compare-done");
+const elCompareStatus = $<HTMLElement>("#compare-status");
+const elCompareClear = $<HTMLButtonElement>("#compare-clear");
 
 // ---------------------------------------------------------------------------
 // 状态
@@ -597,6 +599,9 @@ interface UndoItem {
 interface UndoEntry {
   label: string;
   before: UndoItem[];
+  /** 这些项在操作完成后的值。连拍弹窗里的成员常常没进 itemById，
+   *  只靠 itemById 取「现在长什么样」会拿到 null，重做就成了空操作。 */
+  after?: UndoItem[];
 }
 /** 最多记这么多步。再早的操作用户也不会想退回去，留着只是占内存。 */
 const UNDO_LIMIT = 50;
@@ -2702,9 +2707,9 @@ function labelForPatch(patch: Patch, n: number): string {
   return `标记${many}`;
 }
 
-function pushUndo(label: string, before: UndoItem[]) {
+function pushUndo(label: string, before: UndoItem[], after?: UndoItem[]) {
   if (before.length === 0) return;
-  undoStack.push({ label, before });
+  undoStack.push({ label, before, after });
   if (undoStack.length > UNDO_LIMIT) undoStack.shift();
   // 有了新操作，之前那条「往前一步」的路就作废了
   redoStack.length = 0;
@@ -2745,15 +2750,16 @@ async function moveStack(from: UndoEntry[], to: UndoEntry[], verb: string) {
     return;
   }
 
-  // 反向一步要用的值：这几项现在的样子。卡片不在内存里就当作「没动过」，
-  // 免得往库里写一个我们其实不知道的值
+  // 反向一步要用的值：这几项现在的样子。主网格没加载到这些照片时 itemById
+  // 里没有，退回用 entry.after（上一步写进去的值），否则重做会变成空操作。
   const inverse: UndoItem[] = entry.before.map((it) => {
     const c = itemById.get(it.id);
+    const a = entry.after?.find((x) => x.id === it.id);
     return {
       id: it.id,
-      decision: it.decision !== null ? (c?.decision ?? null) : null,
-      stars: it.stars !== null ? (c?.stars ?? null) : null,
-      color: it.color !== null ? (c?.color ?? null) : null,
+      decision: it.decision !== null ? (c?.decision ?? a?.decision ?? null) : null,
+      stars: it.stars !== null ? (c?.stars ?? a?.stars ?? null) : null,
+      color: it.color !== null ? (c?.color ?? a?.color ?? null) : null,
     };
   });
 
@@ -2789,7 +2795,7 @@ async function moveStack(from: UndoEntry[], to: UndoEntry[], verb: string) {
     return;
   }
 
-  to.push({ label: entry.label, before: inverse });
+  to.push({ label: entry.label, before: inverse, after: entry.before });
   if (to.length > UNDO_LIMIT) to.shift();
   updateUndoRedo();
 
@@ -3071,11 +3077,13 @@ async function runExport() {
 }
 
 // ---------------------------------------------------------------------------
-// 连拍分组 + 对比选一张
+// 连拍分组 + 对比挑选
 //
-// 拍连拍时一次快门连按好几张，挑一张最好的就行。这里按拍摄时间把相近的
-// 聚成一组，点一组进去并排看，点一张 = 留它、同组其它自动淘汰。
-// 标记走和卡片、灯箱同一套 apply_decision，所以侧栏计数、筛选都跟着动。
+// 按拍摄时间把相近的几张聚成一组，点进去并排看。默认点一张只切换这一张，
+// 同一组想留几张都行；Shift + 点（或 Shift + 数字）才是老行为：只留这一张、
+// 其余淘汰；「清空本组」把整组回到未标记。
+// 后端 decisions 以 pair_key 为主键，压根没有「一组只能一个 keep」的约束，
+// 所以这里改的是产品语义，不用动数据库，也不用动导出。
 // ---------------------------------------------------------------------------
 
 function currentGap(): number {
@@ -3125,7 +3133,7 @@ function renderSimilarGroups(groups: SimilarGroup[]) {
   }
   elSimilarNote.textContent =
     `${groups.length} 组 · 涉及 ${totalPhotos} 张` +
-    (totalKept > 0 ? ` · 已挑出 ${totalKept} 张` : "");
+    (totalKept > 0 ? ` · 已保留 ${totalKept} 张` : "");
 
   for (const g of groups) {
     const kept = g.members.filter((m) => m.decision === "keep").length;
@@ -3135,7 +3143,7 @@ function renderSimilarGroups(groups: SimilarGroup[]) {
     const head = document.createElement("div");
     head.className = "similar-head";
     const span = g.spanSecs > 0 ? ` · 跨度 ${g.spanSecs}s` : "";
-    const keptText = kept > 0 ? ` · 已挑 ${kept}` : "";
+    const keptText = kept > 0 ? ` · 已留 ${kept} 张` : "";
     head.innerHTML =
       `<span class="similar-time">${escapeHtml(g.startText ?? "时间未知")}</span>` +
       `<span class="similar-count">${g.size} 张${span}${keptText}</span>`;
@@ -3165,7 +3173,7 @@ function renderSimilarGroups(groups: SimilarGroup[]) {
     const compareBtn = document.createElement("button");
     compareBtn.type = "button";
     compareBtn.className = "btn btn-primary";
-    compareBtn.textContent = "对比选一张";
+    compareBtn.textContent = "对比挑选";
     compareBtn.addEventListener("click", () => openCompare(g));
     actions.appendChild(compareBtn);
     card.appendChild(actions);
@@ -3176,15 +3184,43 @@ function renderSimilarGroups(groups: SimilarGroup[]) {
 
 let compareGroup: SimilarGroup | null = null;
 
+/** 只改一个格子的高亮与角标，别整组重画（大组重画会闪）。 */
+function setCompareBadge(cell: HTMLElement, kept: boolean) {
+  cell.classList.toggle("is-kept", kept);
+  const old = cell.querySelector(".compare-badge");
+  if (kept && !old) {
+    const badge = document.createElement("span");
+    badge.className = "compare-badge";
+    badge.textContent = "已留";
+    cell.appendChild(badge);
+  } else if (!kept && old) {
+    old.remove();
+  }
+}
+
+function paintComparePatch(patch: { id: number; decision: Decision | null }[]) {
+  for (const p of patch) {
+    const cell = elCompareGrid.querySelector<HTMLElement>(`[data-id="${p.id}"]`);
+    if (cell) setCompareBadge(cell, p.decision === "keep");
+  }
+}
+
+function updateCompareStatus(group: SimilarGroup) {
+  const kept = group.members.filter((m) => m.decision === "keep").length;
+  elCompareStatus.textContent =
+    kept > 0 ? `已保留 ${kept} 张 · 还可以继续加选` : "尚未保留任何一张";
+}
+
 function openCompare(group: SimilarGroup) {
   compareGroup = group;
   elCompareGrid.replaceChildren();
   elCompareModal.hidden = false;
+  updateCompareStatus(group);
 
   group.members.forEach((m, i) => {
     const tile = document.createElement("button");
     tile.type = "button";
-    tile.className = "compare-tile" + (m.decision === "keep" ? " is-kept" : "");
+    tile.className = "compare-tile";
     tile.dataset.id = String(m.id);
 
     const img = document.createElement("img");
@@ -3204,64 +3240,100 @@ function openCompare(group: SimilarGroup) {
     name.textContent = m.name;
     tile.appendChild(name);
 
-    if (m.decision === "keep") {
-      const badge = document.createElement("span");
-      badge.className = "compare-badge";
-      badge.textContent = "已选";
-      tile.appendChild(badge);
-    }
-
-    tile.addEventListener("click", () => pickInGroup(group, m.id));
+    setCompareBadge(tile, m.decision === "keep");
+    tile.addEventListener("click", (e) => {
+      void pickInGroup(group, m.id, e.shiftKey ? "solo" : "toggle");
+    });
     elCompareGrid.appendChild(tile);
   });
 }
 
-/** 选一张：它标 keep，同组其它一律 reject。已经是 keep 的那张再点一次 = 取消（全清回 none）。 */
-async function pickInGroup(group: SimilarGroup, pickId: number) {
-  const already = group.members.find((m) => m.id === pickId)?.decision === "keep";
-  const patch: { id: number; decision: string }[] = group.members.map((m) => ({
-    id: m.id,
-    decision: already ? "none" : m.id === pickId ? "keep" : "reject",
-  }));
+type CompareAction = "toggle" | "solo" | "clear";
 
-  // 星级没动过，撤销时也不该去碰它，所以记 null
-  const before: UndoItem[] = group.members.map((m) => ({
-    id: m.id,
-    decision: m.decision as Decision,
+/**
+ * 对比视图里的一次标记。默认只切换被点那一张，同一组可以留任意多张：
+ *   - 已是 keep → 回到 none（只取消这一张，不碰同组其它）
+ *   - none / reject → keep（旧版本留下的 reject 也能直接点回来）
+ * solo 是老行为「只留一张、其余淘汰」；clear 把整组回到未标记。
+ *
+ * patch 只装真正要改的行。以前每点一次都把整组重写一遍，多选之后既浪费
+ * 又会在撤销栈里塞满没动过的照片。写入走 queueMarkWrite，和主网格的连续
+ * 过片排同一条队，侧栏计数才不会查在写前面。
+ */
+async function pickInGroup(
+  group: SimilarGroup,
+  pickId: number | null,
+  action: CompareAction = "toggle",
+) {
+  const picked = group.members.find((m) => m.id === pickId);
+  if (action !== "clear" && !picked) return;
+
+  let patch: { id: number; decision: Decision }[];
+  if (action === "clear") {
+    patch = group.members
+      .filter((m) => m.decision !== "none")
+      .map((m) => ({ id: m.id, decision: "none" }));
+  } else if (action === "solo") {
+    patch = group.members.map((m) => ({
+      id: m.id,
+      decision: m.id === pickId ? ("keep" as const) : ("reject" as const),
+    }));
+  } else {
+    patch = [{ id: picked!.id, decision: picked!.decision === "keep" ? "none" : "keep" }];
+  }
+  if (patch.length === 0) {
+    setHint("这一组还没有需要改动的标记。", "warn");
+    return;
+  }
+
+  // 撤销只记被改动的这些行；星级与色标没动，记 null 让撤销别碰它们
+  const before: UndoItem[] = patch.map((p) => ({
+    id: p.id,
+    decision: group.members.find((m) => m.id === p.id)!.decision as Decision,
     stars: null,
     color: null,
   }));
+  const after: UndoItem[] = patch.map((p) => ({
+    id: p.id,
+    decision: p.decision,
+    stars: null,
+    color: null,
+  }));
+  const label =
+    action === "clear" ? "清空连拍组标记" : action === "solo" ? "连拍只留一张" : "连拍保留标记";
 
-  // 先本地乐观更新，避免一张张闪
-  for (const p of patch) {
-    const cell = elCompareGrid.querySelector<HTMLElement>(`[data-id="${p.id}"]`);
-    if (!cell) continue;
-    cell.classList.toggle("is-kept", p.decision === "keep");
-    const oldBadge = cell.querySelector(".compare-badge");
-    if (p.decision === "keep" && !oldBadge) {
-      const badge = document.createElement("span");
-      badge.className = "compare-badge";
-      badge.textContent = "已选";
-      cell.appendChild(badge);
-    } else if (p.decision !== "keep" && oldBadge) {
-      oldBadge.remove();
-    }
-  }
+  // 乐观更新，避免一张张闪
+  paintComparePatch(patch);
 
   try {
-    await Promise.all(
-      patch.map((p) => invoke<number>("apply_decision", { ids: [p.id], decision: p.decision, stars: null }))
-    );
-    // 同步回分组数据，连拍列表的「已挑 N」才准
+    await queueMarkWrite(async () => {
+      // 同一次操作里 decision 相同的合并成一次 IPC：solo 时几十张只要两次
+      const byDecision = new Map<Decision, number[]>();
+      for (const p of patch) {
+        const list = byDecision.get(p.decision) ?? [];
+        list.push(p.id);
+        byDecision.set(p.decision, list);
+      }
+      for (const [decision, ids] of byDecision) {
+        await invoke<number>("apply_decision", { ids, decision, stars: null });
+      }
+    });
+
     for (const p of patch) {
       const m = group.members.find((x) => x.id === p.id);
       if (m) m.decision = p.decision;
+      // 主网格里可能有同一张，状态要跟着变，否则关掉弹窗看到的还是旧标记
+      const c = itemById.get(p.id);
+      if (c) c.decision = p.decision;
     }
-    pushUndo(already ? "取消连拍选择" : `连拍选优 ${group.size} 张`, before);
+    repaint(patch.map((p) => p.id));
+    updateCompareStatus(group);
+    pushUndo(label, before, after);
     refreshFacetCounts();
   } catch (e) {
+    // 落库失败就撤回乐观更新，别留下和数据库不一致的绿框
+    paintComparePatch(before.map((b) => ({ id: b.id, decision: b.decision })));
     setHint(`标记没能保存：${String(e)}`, "error");
-    void refreshSimilarGroups();
   }
 }
 
@@ -3285,18 +3357,24 @@ elSimilarModal.addEventListener("click", (e) => {
 });
 elSimilarGap.addEventListener("change", () => void refreshSimilarGroups());
 elCompareDone.addEventListener("click", closeCompareDialog);
+elCompareClear.addEventListener("click", () => {
+  if (compareGroup) void pickInGroup(compareGroup, null, "clear");
+});
 elCompareModal.addEventListener("click", (e) => {
   if (e.target === elCompareModal) closeCompareDialog();
 });
 
-// 对比视图里 1–9 直接选第几张。Esc 交给全局监听统一关，别关两次。
+// 对比视图里 1–9 对应第几张。用 e.code 才能连 Shift+数字一起认出来：
+// Shift+1 的 e.key 是 "!"，Number() 会直接 NaN。Esc 交给全局监听统一关。
 document.addEventListener("keydown", (e) => {
   if (elCompareModal.hidden) return;
-  const n = Number(e.key);
-  if (Number.isInteger(n) && n >= 1 && n <= 9 && compareGroup) {
-    const m = compareGroup.members[n - 1];
-    if (m) void pickInGroup(compareGroup, m.id);
-  }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const hit = /^(?:Digit|Numpad)([1-9])$/.exec(e.code);
+  if (!hit || !compareGroup) return;
+  const m = compareGroup.members[Number(hit[1]) - 1];
+  if (!m) return;
+  e.preventDefault();
+  void pickInGroup(compareGroup, m.id, e.shiftKey ? "solo" : "toggle");
 });
 
 // ---------------------------------------------------------------------------
@@ -5043,11 +5121,38 @@ const elUpdateClose = $<HTMLButtonElement>("#update-close");
 let pendingUpdate: Update | null = null;
 let updateBusy = false;
 
+/**
+ * 把 latest.json 的 notes 渲染成一条条更新项。内容来自 GitHub，一律
+ * textContent 落到 DOM，不用 innerHTML。老清单或手写说明没有 "- " 前缀，
+ * 就仍按整段文本显示，别把旧版本的更新提示弄成空白。
+ */
+function renderUpdateNotes(raw: string) {
+  const text = raw.trim();
+  const items = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[-*·]\s+\S/.test(line))
+    .map((line) => line.replace(/^[-*·]\s+/, ""));
+
+  elUpdateNotes.replaceChildren();
+  if (items.length === 0) {
+    elUpdateNotes.textContent = text || "修复与改进，可到 Release 页查看完整说明。";
+    return;
+  }
+  const ul = document.createElement("ul");
+  ul.className = "update-notes-list";
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.textContent = item;
+    ul.appendChild(li);
+  }
+  elUpdateNotes.appendChild(ul);
+}
+
 function showUpdatePanel() {
   if (!pendingUpdate) return;
   elUpdateTitle.textContent = `发现新版本 ${pendingUpdate.version}`;
-  const notes = (pendingUpdate.body ?? "").trim();
-  elUpdateNotes.textContent = notes || "修复与改进，可到 Release 页查看完整说明。";
+  renderUpdateNotes(pendingUpdate.body ?? "");
   elUpdateProgress.hidden = true;
   elUpdateProgressBar.style.width = "0%";
   elUpdateNow.disabled = false;

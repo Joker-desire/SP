@@ -158,7 +158,7 @@ async function checkForUpdate(silent: boolean) {
       if (!silent) toast("已是最新版本");
       return;
     }
-    // 弹「发现 vX：立即更新 / 稍后」，展示 update.body 里的更新说明
+    // 弹「发现 vX：立即更新 / 稍后」，逐条展示 update.body 里的更新项
     if (!(await confirmUpdate(update.version, update.body))) return;
     await update.downloadAndInstall((event) => {
       if (event.event === "Progress") setProgress(event.data.chunkLength);
@@ -300,7 +300,7 @@ for (const [key, name] of targets) {
 
 writeFileSync("latest.json", JSON.stringify({
   version,
-  notes: `S·P ${version} 更新`,
+  notes: readFileSync(`release-notes/${tag}.md`, "utf8").trim(),
   pub_date: new Date().toISOString(),   // RFC 3339
   platforms,
 }, null, 2));
@@ -309,6 +309,7 @@ writeFileSync("latest.json", JSON.stringify({
 要点：
 - `platforms` 键是 `OS-ARCH` 格式；`signature` 必须是 `.sig` 的**内容**，不能是路径或 URL。
 - **任一平台缺签名就让 CI 失败**，绝不上传一份残缺清单。
+- `notes` 来自 `release-notes/<tag>.md`（每行一条 `- xxx`），同一份内容也用作 Release 页说明。缺文件或没有 `- ` 条目直接让 CI 失败，客户端会把这些条目渲染成列表；**不允许再发「更新说明见 Release 页面」这类占位文案**。
 - Windows 选 `.msi` 而非 NSIS `.exe`，配合 `installMode: "passive"`；若改选 exe，对应改 `updaterJsonPreferNsis` 的等价决策。
 - 带连字符的 tag（如 `v0.4.1-beta.1`）会被原流程标成 `--prerelease`，`/releases/latest/` **不会**指向它，灰度别用这种 tag。
 
@@ -331,7 +332,8 @@ writeFileSync("latest.json", JSON.stringify({
 | `npm run build`、`cargo check`、`cargo fmt --check` | 全过 |
 | 本地带密钥打包 | 产出 `.app.tar.gz` 与 `.sig` |
 | CI 三个 build job | 各自产出 sig，`updater-json` job 生成并上传 `latest.json` |
-| `curl -fsSL .../releases/latest/download/latest.json \| jq .` | 三个 platforms 齐全，`version` 为 semver |
+| `curl -fsSL .../releases/latest/download/latest.json \| jq .` | 三个 platforms 齐全，`version` 为 semver，`notes` 含该版 `- xxx` 条目 |
+| `release-notes/<tag>.md` | 更新面板逐条列出更新项；文件缺失或没有条目时 CI 直接失败 |
 | 装 v0.4.0 → 检查 → 下载 → 安装 → 重启 | 关于页版本号变成 0.4.1 |
 | 断网 / GitHub 超时时启动 | 不卡首屏、无报错弹窗、可继续正常选片 |
 | 篡改 `.sig` 或包内容 | 验签失败并拒绝安装 |
@@ -360,7 +362,7 @@ writeFileSync("latest.json", JSON.stringify({
 ## 7. 最终采用的选择
 
 1. **检查时机**：启动 8 秒后静默查一次 + 顶栏下载箭头按钮手动查；不做定时轮询。查到过就直接把面板叫回来，不重复打网络请求。
-2. **更新说明**：显示在更新面板里（`update.body`），不提供「跳过此版本」。手动检查无更新 / 失败时，结果走状态栏 `setHint`，不另做 toast。
+2. **更新说明**：来自 `release-notes/<tag>.md`，每行一条 `- xxx`；发版时写进 `latest.json` 的 `notes`，同时作为 Release 页说明，客户端面板用 `textContent` 逐条渲染成列表（不解析 HTML，内容来自 GitHub 不可信）。缺文件 / 无条目时建 Release 与生成清单两步都会让 CI 红。不提供「跳过此版本」；手动检查无更新 / 失败时，结果走状态栏 `setHint`，不另做 toast。
 3. **Windows**：用 `.msi` + `installMode: "passive"`，不用 NSIS `.exe`。
 4. **关于页**：不放按钮，检查逻辑全在主窗口；`capabilities` 的 `windows` 仍是 `["main"]`，不用给 `"about"` 开权限。
 5. **镜像 endpoint**：暂不加，只用 `/releases/latest/download/latest.json`；靠 `check({ timeout: 15000 })`、失败静默降级与常驻的手动下载入口兜底。

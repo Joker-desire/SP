@@ -135,6 +135,12 @@ jobs:
         shell: bash
         run: |
           v="${GITHUB_REF_NAME#v}"
+          notes="release-notes/${GITHUB_REF_NAME}.md"
+          # 更新面板直接展示这份清单，发版漏写就等于用户看不到更新内容
+          if [ ! -f "$notes" ]; then
+            echo "::error::缺少 $notes，请写明这一版的简洁更新项（每行一条 - xxx）"
+            exit 1
+          fi
           # 多个平台并行跑，谁先到谁建；后来的只上传
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" out/* --clobber
@@ -143,7 +149,7 @@ jobs:
             [[ "$GITHUB_REF_NAME" == *-* ]] && extra+=(--prerelease)
             gh release create "$GITHUB_REF_NAME" out/* \
               --title "S·P v${v}" \
-              --generate-notes "${extra[@]}"
+              --notes-file "$notes" "${extra[@]}"
           fi
 
       - name: 上传 Artifacts（手动触发时的下载入口）
