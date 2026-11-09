@@ -5132,6 +5132,7 @@ const elUpdateTitle = $<HTMLElement>("#update-title");
 const elUpdateNotes = $<HTMLElement>("#update-notes");
 const elUpdateProgress = $<HTMLElement>("#update-progress");
 const elUpdateProgressBar = $<HTMLElement>("#update-progress-bar");
+const elUpdateError = $<HTMLElement>("#update-error");
 const elUpdateNow = $<HTMLButtonElement>("#update-now");
 const elUpdateLater = $<HTMLButtonElement>("#update-later");
 const elUpdateClose = $<HTMLButtonElement>("#update-close");
@@ -5167,10 +5168,44 @@ function renderUpdateNotes(raw: string) {
   elUpdateNotes.appendChild(ul);
 }
 
+/**
+ * 把 updater 抛出的底层错误翻成「能照着做」的中文。原来只写进状态栏，
+ * 用户看到的只有「重试更新」四个字，根本不知道是网络、验签还是权限问题。
+ */
+function describeUpdateError(e: unknown): { summary: string; detail: string } {
+  const raw = String(e ?? "");
+  let summary: string;
+  if (/504|502|503|gateway|timeout|timed out|connection|dns|network|error sending request|tcp|tls|reset|connection closed/i.test(raw)) {
+    summary =
+      "下载更新包时网络中断或被网关拦截（常见：代理节点 / GitHub Release 暂时连不上）。\n" +
+      "可以点「重试更新」，或换网络、关掉代理再试；也可以到 Release 页手动下载 dmg 安装。";
+  } else if (/signature|verify|minisign|invalid|mismatch|public key/i.test(raw)) {
+    summary = "更新包验签失败，为安全起见没有安装。请到 Release 页手动下载 dmg，或等下个版本修复。";
+  } else if (/permission|denied|read-only|os error 13|operation not permitted/i.test(raw)) {
+    summary = "没有权限替换应用本体。请把 S·P 移到「应用程序」后重试，或手动下载 dmg 安装。";
+  } else {
+    summary = "更新没能装上，当前版本和数据都没动。可点「重试更新」，或到 Release 页手动下载 dmg。";
+  }
+  return { summary, detail: raw.length > 180 ? `${raw.slice(0, 180)}…` : raw };
+}
+
+function showUpdateError(e: unknown) {
+  const { summary, detail } = describeUpdateError(e);
+  elUpdateError.replaceChildren();
+  elUpdateError.appendChild(document.createTextNode(summary));
+  const line = document.createElement("span");
+  line.className = "update-error-detail";
+  line.textContent = `原始错误：${detail}`;
+  elUpdateError.appendChild(line);
+  elUpdateError.hidden = false;
+}
+
 function showUpdatePanel() {
   if (!pendingUpdate) return;
   elUpdateTitle.textContent = `发现新版本 ${pendingUpdate.version}`;
   renderUpdateNotes(pendingUpdate.body ?? "");
+  elUpdateError.hidden = true;
+  elUpdateError.replaceChildren();
   elUpdateProgress.hidden = true;
   elUpdateProgressBar.style.width = "0%";
   elUpdateNow.disabled = false;
@@ -5235,6 +5270,8 @@ async function installUpdate() {
   elUpdateNow.disabled = true;
   elUpdateLater.hidden = true;
   elUpdateClose.hidden = true;
+  elUpdateError.hidden = true;
+  elUpdateError.replaceChildren();
   setUpdateProgress(0, 0);
   let downloaded = 0;
   let total = 0;
@@ -5251,7 +5288,8 @@ async function installUpdate() {
     await relaunch();
   } catch (e) {
     console.error("[updater] 安装失败", e);
-    setHint(`更新失败：${String(e)}，可到 Release 页手动下载`, "error");
+    showUpdateError(e);
+    setHint("更新失败，原因已写在更新面板里", "error");
     elUpdateProgress.hidden = true;
     elUpdateNow.disabled = false;
     elUpdateNow.textContent = "重试更新";

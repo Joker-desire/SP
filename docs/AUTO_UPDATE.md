@@ -372,6 +372,20 @@ writeFileSync("latest.json", JSON.stringify({
 
 **回滚**：出问题时删掉 Release 上的 `latest.json`，或把它重传成旧版本号即可；已安装的 app 不会被破坏，只是检查不到新版本。更新失败不会损坏数据目录。
 
+### 已知故障：Release 下载返回 504（2026-11-09，v0.4.2 首次遇到）
+
+**现象**：v0.4.2 面板能正常弹出（说明 `check()` 拿到了清单），点「立即更新」后很快失败，按钮变成「重试更新」。旧版把错误只写进状态栏 `setHint`，用户看面板完全不知道发生了什么。
+
+**排查结论：产物无损，是本机到 `github.com/<owner>/<repo>/releases/download/` 这条路径被网关 504。**
+
+- `curl -I .../releases/download/v0.4.2/...` → `504 Gateway Time-out`；verbose 显示代理 CONNECT 隧道已建立，是后续 GET 超时，不是 DNS 或证书问题。
+- 同时 `api.github.com`、`raw.githubusercontent.com` 都是 200，所以「GitHub 全挂」的判断不成立，故障只落在 Release 下载域名上。
+- 改用 `api.github.com/repos/Joker-desire/SP/releases/assets/{id}` + `Accept: application/octet-stream` 能完整拉下 7,884,735 字节，`gzip -t` 通过；取回的 `.sig` 与 `latest.json` 里的 `signature` 逐字节一致 → **不是缺资产、不是签名错、不是版本不匹配**。
+
+**绕过**：换网络 / 关掉代理后点「重试更新」；或到 Release 页手动下载 dmg 安装，数据目录不受影响。**不要**把 API asset URL 写进 `latest.json`：该路径需要 token 认证，不带 token 会 302 回同样的下载域名，对公开客户端没用。
+
+**代码改进（v0.4.3 起生效）**：`installUpdate()` 失败时在更新面板内显示分类后的中文原因（网络 / 验签 / 权限 / 其它）与原始错误摘要，不再只塞进状态栏；「重试更新」旁边能直接看到该换网络还是该手动装。
+
 ---
 
 ## 7. 最终采用的选择

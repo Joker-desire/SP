@@ -471,6 +471,28 @@ select {
   transition: width 0.2s var(--ease);
 }
 
+/* 下载/安装失败时把原因写在面板里：状态栏太容易错过，
+   用户只会看到「重试更新」，根本不知道是网络、验签还是权限问题 */
+.update-error {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.update-error-detail {
+  display: block;
+  margin-top: 4px;
+  font-size: 10.5px;
+  opacity: 0.78;
+}
+
 .update-actions {
   display: flex;
   justify-content: flex-end;
