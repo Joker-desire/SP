@@ -3,7 +3,7 @@
 > **状态**：已按本方案落地于 **v0.4.0（2026-11-08）**，下文保留为实施记录与运维手册。
 > **适用**：首个带更新器的版本是 v0.4.0；v0.3.0 及更早版本无法自动升级，需手动装一次。
 > **依据**：Tauri v2 Updater 官方文档与 `tauri-apps/tauri-action` README（2026-11-08 核对）。
-> **关联**：`README.md` 下载安装 / 发版章节、`docs/DESIGN.md`、`CONTRIBUTING.md`。
+> **关联**：`README.md` 下载安装 / 自动更新章节、`CONTRIBUTING.md` 发版流程、`docs/GUIDE.md`、`docs/DESIGN.md`。
 >
 > 实施时的两处偏差：① 改动落在 `feature/lens-filter-sidebar-collapse` 分支上，没有另开分支；② 客户端依赖与配置是手工精确编辑的，没用 `npm run tauri add`（避免它改写自定义 Builder 链）。密钥放在 `~/.tauri/sp-updater.key` + `.password`，两个值已写入仓库 Actions Secrets。
 
