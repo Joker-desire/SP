@@ -321,7 +321,9 @@ writeFileSync("latest.json", JSON.stringify({
 4. 再发一个 `v0.4.1`（改一行文案即可），验证 v0.4.0 → v0.4.1 的完整自动更新链路。
 5. 灰度期内保留 Release 页手动下载入口。
 
-**首次灰度执行记录（2026-11-08）**：`v0.4.1` 已作为正式 tag 发出（不带 `-` 后缀，否则 `/releases/latest/` 会跳过 prerelease，客户端永远读不到新清单；这一版只升版本号，无功能改动）。发布 run `42489269914` 四个 job 全绿；Release 10 个资产齐全；`/releases/latest/download/latest.json` 返回 200，`version: 0.4.1`，三个平台的签名长度 400 / 400 / 412，`darwin-aarch64` 指向 7.51 MB 的 `SP_0.4.1_macos_apple-silicon.app.tar.gz`。本机已确认 `/Applications/S·P.app` 为 0.4.0、内置公钥与 CI 签名私钥配套。客户端侧的「检查 → 下载 → 验签 → 重启 → 关于页 0.4.1」仍需人工在应用内走一遍，结果另记。
+**首次灰度执行记录（2026-11-08）**：`v0.4.1` 已作为正式 tag 发出（不带 `-` 后缀，否则 `/releases/latest/` 会跳过 prerelease，客户端永远读不到新清单；这一版只升版本号，无功能改动）。发布 run `42489269914` 四个 job 全绿；Release 10 个资产齐全；`/releases/latest/download/latest.json` 返回 200，`version: 0.4.1`，三个平台的签名长度 400 / 400 / 412，`darwin-aarch64` 指向 7.51 MB 的 `SP_0.4.1_macos_apple-silicon.app.tar.gz`。本机已确认 `/Applications/S·P.app` 为 0.4.0、内置公钥与 CI 签名私钥配套。
+
+**客户端验证结果（2026-11-09，用户实测通过）**：v0.4.0 → v0.4.1 的完整链路走通 —— 检查发现新版 → 下载 → 验签 → 安装 → 自动重启 → 关于页显示 0.4.1，选片数据与标记未受影响。至此首次灰度用例闭环，自动更新通道从「服务端就绪」升级为「端到端已验证」。
 
 > 触发检查前先**重启应用或点顶栏下载箭头**：启动时那次静默检查只在 8 秒后跑一次，代码里没有轮询，已经跑过就不会自己再查。刚发布时 GitHub 的 `/releases/latest/` 可能有短暂 CDN 缓存，若提示「已是最新版本」，等一两分钟重试即可。
 
@@ -334,7 +336,7 @@ writeFileSync("latest.json", JSON.stringify({
 | CI 三个 build job | 各自产出 sig，`updater-json` job 生成并上传 `latest.json` |
 | `curl -fsSL .../releases/latest/download/latest.json \| jq .` | 三个 platforms 齐全，`version` 为 semver，`notes` 含该版 `- xxx` 条目 |
 | `release-notes/<tag>.md` | 更新面板逐条列出更新项；文件缺失或没有条目时 CI 直接失败 |
-| 装 v0.4.0 → 检查 → 下载 → 安装 → 重启 | 关于页版本号变成 0.4.1 |
+| 装 v0.4.0 → 检查 → 下载 → 安装 → 重启 | 关于页版本号变成 0.4.1（**2026-11-09 实测通过**） |
 | 断网 / GitHub 超时时启动 | 不卡首屏、无报错弹窗、可继续正常选片 |
 | 篡改 `.sig` 或包内容 | 验签失败并拒绝安装 |
 | macOS 更新后 | 记录 Gatekeeper 是否重新拦截（当前 app 未签名/未公证） |

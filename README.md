@@ -148,6 +148,7 @@ git push && git push origin v0.1.0       # 等 Actions 跑完即可
 - **自动更新链路验证版，无功能改动**。这一版只升版本号，用来在真实环境里跑通「v0.4.0 已安装 → 客户端发现新版 → 验签 → 下载 `.app.tar.gz` → 安装 → 重启 → 关于页变成 0.4.1」整条链路；`docs/AUTO_UPDATE.md` 里列的首次灰度用例就是这一条
 - 顺带验证发版工作流的 `updater-json` 汇总 job：三个平台的 `.app.tar.gz` / `.msi` 与 `.sig` 齐全后生成 `latest.json`，且 `/releases/latest/download/latest.json` 会指向这一版
 - 注意测试版**不能用带 `-` 后缀的 tag**（例如 `v0.4.1-beta.1`）：工作流会把带连字符的 tag 建成 prerelease，而客户端的 `/releases/latest/` 会跳过 prerelease，结果清单仍停在 0.4.0，测不到更新
+- **2026-11-09 客户端实测通过**：v0.4.0 → v0.4.1 走完发现新版、下载、验签、安装、自动重启，关于页显示 0.4.1，图库与选片标记保留；至此自动更新通道端到端验证闭环
 
 ### v0.4.0（2026-11-08）
 
