@@ -142,7 +142,8 @@ git push && git push origin v0.1.0       # 等 Actions 跑完即可
   - 顺带修三处：标记写入改走 `queueMarkWrite`（与主网格连续过片同一条队列，侧栏计数不会查在写前面）；成功后同步 `itemById` 并 `repaint`（关掉弹窗，主网格不再显示旧标记）；撤销只记真正改动的行并补 `after` 快照（连拍成员常不在 `itemById`，以前重做会变成空操作）
 - **更新面板逐条列出更新项**：`latest.json` 的 `notes` 不再是一句占位文案，改为来自 `release-notes/<tag>.md`；面板把每条 `- xxx` 渲染成列表（纯 `textContent`，不解析 HTML）。发版漏写说明 CI 直接失败，Release 页复用同一份内容
 - **手动「检查更新」移到「关于 S·P」**：顶栏下载箭头换成 ⓘ 关于入口（Windows / Linux 靠它打开关于页，小红点仍表示发现新版），关于窗口新增「检查更新」按钮；**已是最新版本时弹窗明确告知**，检查失败 / 下载中 / 发现新版也都有对应反馈。检查仍由主窗口执行、结果经事件回传，about 窗口只拿 `core:default` 权限，不接触 updater 插件；Rust 端补 `open_about` / `focus_main_window` 两个命令并把关于窗口放到全平台可用
-- 验证：`npm run build`、`cargo fmt --check`、`cargo test` 88 passed / 2 ignored；更新清单脚本正向用例（3 平台 / 4 条更新项）与两个反向用例（缺说明文件、说明里没有 `- ` 条目）均通过；发版工作流 YAML 结构校验通过
+- **浅色主题主按钮悬停修复**：`开始扫描` / `立即更新` / `选择文件夹并导出` 等 `.btn-primary` 的文字写死白色，而通用 `.btn:hover` 的 `background` 简写会把它的蓝色渐变整块覆盖成 `var(--bg-hover)`——浅色主题下该值是近白色 `#eceef2`，于是悬停时白字白底、按钮内容消失。现在主按钮与 `.is-active` 激活态都在 hover 里重新声明自己的底色，深色主题下也不再出现「主按钮一悬停就变灰」
+- 验证：`npm run build`、`cargo fmt --check`、`cargo test` 88 passed / 2 ignored；更新清单脚本正向用例（3 平台 / 6 条更新项）与两个反向用例（缺说明文件、说明里没有 `- ` 条目）均通过；发版工作流 YAML 结构校验通过；浅色 / 深色主题的按钮悬停态静态对照预览均无文字丢失
 
 ### v0.4.1（2026-11-08）
 
