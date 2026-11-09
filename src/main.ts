@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -5102,12 +5102,30 @@ window.addEventListener("keydown", (e) => {
 // ---------------------------------------------------------------------------
 // 自动更新
 //
-// 启动后静默查一次、顶栏按钮手动查、查到后由用户决定装不装。不做后台轮询：
-// 静态 latest.json 一次 GET 就够，轮询只会撞 GitHub 限流。失败一律静默降级，
-// 断网时也该能正常选片；绝不自动重启——用户可能正在连续打标签。
+// 启动后静默查一次、关于窗口的「检查更新」按钮手动查、查到后由用户决定装不装。
+// 不做后台轮询：静态 latest.json 一次 GET 就够，轮询只会撞 GitHub 限流。
+// 失败一律静默降级，断网时也该能正常选片；绝不自动重启——用户可能正在连续打标签。
+//
+// 关于窗口是独立 Webview，updater 与更新面板都在主窗口，那边只负责发请求、
+// 显示结果；结果通过事件回传。这样它不需要任何 updater / dialog 插件权限。
 // ---------------------------------------------------------------------------
 
-const elBtnUpdate = $<HTMLButtonElement>("#btn-update");
+const UPDATE_CHECK_REQUEST = "sp://update-check-request";
+const UPDATE_CHECK_RESULT = "sp://update-check-result";
+
+interface UpdateCheckResult {
+  kind: "latest" | "available" | "error" | "busy";
+  version?: string;
+  message?: string;
+}
+
+/** 启动 8 秒那次静默检查不回传结果——关于窗口没有在等，也不该凭空弹窗。 */
+function reportUpdateCheck(silent: boolean, result: UpdateCheckResult) {
+  if (silent) return;
+  void emit(UPDATE_CHECK_RESULT, result).catch(() => {});
+}
+
+const elBtnAbout = $<HTMLButtonElement>("#btn-about");
 const elUpdateDot = $<HTMLElement>("#update-dot");
 const elUpdatePanel = $<HTMLElement>("#update-panel");
 const elUpdateTitle = $<HTMLElement>("#update-title");
@@ -5175,29 +5193,38 @@ function setUpdateProgress(downloaded: number, total: number) {
 }
 
 async function checkForUpdate(silent: boolean) {
-  if (updateBusy) return;
+  if (updateBusy) {
+    reportUpdateCheck(silent, { kind: "busy" });
+    return;
+  }
   // 之前查到过就直接把面板叫回来，别再打一次网络请求
   if (pendingUpdate && !silent) {
     showUpdatePanel();
+    reportUpdateCheck(false, { kind: "available", version: pendingUpdate.version });
     return;
   }
   updateBusy = true;
-  elBtnUpdate.disabled = true;
   try {
     const update = await check({ timeout: 15000 });
     if (update) {
       pendingUpdate = update;
       elUpdateDot.hidden = false;
       showUpdatePanel();
-    } else if (!silent) {
-      setHint("已是最新版本");
+      reportUpdateCheck(silent, { kind: "available", version: update.version });
+    } else {
+      // 手动检查时除状态栏外，关于窗口还会弹一个明确的「已是最新版本」。
+      if (!silent) setHint("已是最新版本");
+      reportUpdateCheck(silent, { kind: "latest" });
     }
   } catch (e) {
     console.warn("[updater] 检查更新失败", e);
     if (!silent) setHint("检查更新失败，可到 Release 页手动下载", "warn");
+    reportUpdateCheck(silent, {
+      kind: "error",
+      message: "网络或 GitHub 暂时连不上，可到 Release 页手动下载；选片不受影响。",
+    });
   } finally {
     updateBusy = false;
-    elBtnUpdate.disabled = false;
   }
 }
 
@@ -5205,7 +5232,6 @@ async function installUpdate() {
   const update = pendingUpdate;
   if (!update || updateBusy) return;
   updateBusy = true;
-  elBtnUpdate.disabled = true;
   elUpdateNow.disabled = true;
   elUpdateLater.hidden = true;
   elUpdateClose.hidden = true;
@@ -5233,17 +5259,21 @@ async function installUpdate() {
     elUpdateClose.hidden = false;
   } finally {
     updateBusy = false;
-    elBtnUpdate.disabled = false;
   }
 }
 
-elBtnUpdate.addEventListener("click", () => void checkForUpdate(false));
+elBtnAbout.addEventListener("click", () => {
+  void invoke("open_about").catch((e) => {
+    setHint(`打开关于窗口失败：${String(e)}`, "error");
+  });
+});
+void listen(UPDATE_CHECK_REQUEST, () => void checkForUpdate(false));
 elUpdateNow.addEventListener("click", () => void installUpdate());
 elUpdateLater.addEventListener("click", dismissUpdatePanel);
 elUpdateClose.addEventListener("click", dismissUpdatePanel);
 
 // 首屏铺完再查，别和扫描 / 分面统计抢网络与主线程。
-// 放在顶层而不是 boot() 里：哪怕初始化失败，顶栏按钮也仍能手动重试。
+// 放在顶层而不是 boot() 里：哪怕初始化失败，关于窗口的检查请求也仍能手动重试。
 setTimeout(() => void checkForUpdate(true), 8000);
 
 async function boot() {

@@ -2767,9 +2767,11 @@ async fn similar_groups(
 // 系统原生的「关于」面板只认图标 + 名称 + 版本号，塞不进 slogan，
 // 也没法用我们自己的品牌排版。所以 macOS 菜单里的「关于 S·P」
 // 打开的是自绘窗口（about.html），原生面板从此不再出现。
+//
+// 手动「检查更新」按钮也放进这个窗口，因此它必须能从任意平台打开：
+// macOS 走应用菜单，Windows / Linux 走顶栏按钮（open_about 命令）。
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
 fn open_about_window(app: &tauri::AppHandle) {
     use tauri::Manager;
     if let Some(w) = app.get_webview_window("about") {
@@ -2780,7 +2782,7 @@ fn open_about_window(app: &tauri::AppHandle) {
     if let Err(e) =
         tauri::WebviewWindowBuilder::new(app, "about", tauri::WebviewUrl::App("about.html".into()))
             .title("关于 S·P")
-            .inner_size(340.0, 400.0)
+            .inner_size(340.0, 470.0)
             .resizable(false)
             .maximizable(false)
             .minimizable(false)
@@ -2788,6 +2790,25 @@ fn open_about_window(app: &tauri::AppHandle) {
             .build()
     {
         eprintln!("打开关于窗口失败：{e}");
+    }
+}
+
+/// 顶栏「关于 S·P」按钮的入口。Windows / Linux 没有 macOS 应用菜单，
+/// 不开放这个命令的话，那两个平台就永远打不开放着手动检查更新的关于页。
+#[tauri::command]
+fn open_about(app: tauri::AppHandle) {
+    open_about_window(&app);
+}
+
+/// 关于窗口里查到新版本时把主窗口提到前面——更新面板挂在主窗口上，
+/// 不聚焦会被关于窗口挡住，用户只看得到「发现新版本」却找不到按钮。
+#[tauri::command]
+fn focus_main_window(app: tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
     }
 }
 
@@ -2906,11 +2927,13 @@ pub fn run() {
             photo_thumbnail,
             cache_stats,
             clear_cache,
-            set_camera_offset
+            set_camera_offset,
+            open_about,
+            focus_main_window
         ]);
 
-    // 「关于」菜单只在 macOS 上接管：Windows 的窗口菜单栏放这种品牌页反而碍事，
-    // Windows 的版本信息走「设置」类入口的常规做法（以后需要再说）。
+    // 应用菜单只在 macOS 上接管；Windows / Linux 由顶栏按钮调 `open_about`
+    // 打开同一个关于窗口，手动检查更新的入口因此不会丢。
     #[cfg(target_os = "macos")]
     let builder = builder.menu(macos_menu).on_menu_event(|app, event| {
         if event.id() == "about-sp" {

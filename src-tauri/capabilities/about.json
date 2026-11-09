@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "about",
+  "description": "Capability for the about window: core APIs only (event emit/listen for the update check); no updater, dialog or opener plugin access",
+  "windows": ["about"],
+  "permissions": [
+    "core:default"
+  ]
+}

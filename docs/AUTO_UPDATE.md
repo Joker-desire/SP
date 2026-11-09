@@ -143,7 +143,7 @@ let builder = tauri::Builder::default()
 
 若 `process:default` 不含 `allow-relaunch`（以本机生成的 schema 为准），显式补一条 `process:allow-relaunch`。
 
-> 关于窗口的 label 是 `"about"`（`lib.rs:2781` 用 `WebviewWindowBuilder::new(app, "about", ...)`），不在 `windows: ["main"]` 里。**第一版建议把检查逻辑全放主窗口**，about 页仍只显示版本号；如果一定要在 about 页放按钮，需把 `windows` 改成 `["main", "about"]`。
+> 关于窗口的 label 是 `"about"`，不在 `default.json` 的 `windows: ["main"]` 里。现在「检查更新」按钮放在关于页，因此另有一份 `capabilities/about.json` 只给它 `core:default`（用于事件 emit / listen）。updater / dialog 插件权限仍只属于主窗口：about 页发 `sp://update-check-request`，主窗口执行 `check()`，再用 `sp://update-check-result` 把 `latest` / `available` / `error` / `busy` 送回，about 页负责弹窗。跨窗口传的是普通对象，不是 `Update` 实例，所以主窗口始终持有下载安装所需的真实对象。
 
 **`src/main.ts`**（主窗口，示意骨架）：
 
@@ -155,7 +155,11 @@ async function checkForUpdate(silent: boolean) {
   try {
     const update = await check({ timeout: 15000 });
     if (!update) {
-      if (!silent) toast("已是最新版本");
+      // 手动检查：状态栏 + 关于窗口的「已是最新版本」弹窗
+      if (!silent) {
+        setHint("已是最新版本");
+        emit(UPDATE_CHECK_RESULT, { kind: "latest" });
+      }
       return;
     }
     // 弹「发现 vX：立即更新 / 稍后」，逐条展示 update.body 里的更新项
@@ -170,7 +174,8 @@ async function checkForUpdate(silent: boolean) {
   }
 }
 
-// 启动 8 秒后静默查一次，不阻塞首屏；顶栏另设一个手动「检查更新」入口
+// 启动 8 秒后静默查一次，不阻塞首屏；手动入口在「关于 S·P」窗口里，
+// 它只发事件，真正的 check() 仍在主窗口执行
 setTimeout(() => void checkForUpdate(true), 8000);
 ```
 
@@ -325,7 +330,7 @@ writeFileSync("latest.json", JSON.stringify({
 
 **客户端验证结果（2026-11-09，用户实测通过）**：v0.4.0 → v0.4.1 的完整链路走通 —— 检查发现新版 → 下载 → 验签 → 安装 → 自动重启 → 关于页显示 0.4.1，选片数据与标记未受影响。至此首次灰度用例闭环，自动更新通道从「服务端就绪」升级为「端到端已验证」。
 
-> 触发检查前先**重启应用或点顶栏下载箭头**：启动时那次静默检查只在 8 秒后跑一次，代码里没有轮询，已经跑过就不会自己再查。刚发布时 GitHub 的 `/releases/latest/` 可能有短暂 CDN 缓存，若提示「已是最新版本」，等一两分钟重试即可。
+> 触发检查前先**重启应用，或打开「关于 S·P」点「检查更新」**：启动时那次静默检查只在 8 秒后跑一次，代码里没有轮询，已经跑过就不会自己再查。刚发布时 GitHub 的 `/releases/latest/` 可能有短暂 CDN 缓存，若弹窗提示「已是最新版本」，等一两分钟重试即可。
 
 ### 步骤 5：验证清单
 
@@ -337,6 +342,8 @@ writeFileSync("latest.json", JSON.stringify({
 | `curl -fsSL .../releases/latest/download/latest.json \| jq .` | 三个 platforms 齐全，`version` 为 semver，`notes` 含该版 `- xxx` 条目 |
 | `release-notes/<tag>.md` | 更新面板逐条列出更新项；文件缺失或没有条目时 CI 直接失败 |
 | 装 v0.4.0 → 检查 → 下载 → 安装 → 重启 | 关于页版本号变成 0.4.1（**2026-11-09 实测通过**） |
+| 关于页点「检查更新」且没有新版本 | 弹窗提示「已是最新版本」并带当前版本号，按钮恢复可点 |
+| Windows / Linux 点顶栏 ⓘ | 能打开同一个关于窗口，检查更新按钮可用 |
 | 断网 / GitHub 超时时启动 | 不卡首屏、无报错弹窗、可继续正常选片 |
 | 篡改 `.sig` 或包内容 | 验签失败并拒绝安装 |
 | macOS 更新后 | 记录 Gatekeeper 是否重新拦截（当前 app 未签名/未公证） |
@@ -363,12 +370,13 @@ writeFileSync("latest.json", JSON.stringify({
 
 ## 7. 最终采用的选择
 
-1. **检查时机**：启动 8 秒后静默查一次 + 顶栏下载箭头按钮手动查；不做定时轮询。查到过就直接把面板叫回来，不重复打网络请求。
-2. **更新说明**：来自 `release-notes/<tag>.md`，每行一条 `- xxx`；发版时写进 `latest.json` 的 `notes`，同时作为 Release 页说明，客户端面板用 `textContent` 逐条渲染成列表（不解析 HTML，内容来自 GitHub 不可信）。缺文件 / 无条目时建 Release 与生成清单两步都会让 CI 红。不提供「跳过此版本」；手动检查无更新 / 失败时，结果走状态栏 `setHint`，不另做 toast。
-3. **Windows**：用 `.msi` + `installMode: "passive"`，不用 NSIS `.exe`。
-4. **关于页**：不放按钮，检查逻辑全在主窗口；`capabilities` 的 `windows` 仍是 `["main"]`，不用给 `"about"` 开权限。
-5. **镜像 endpoint**：暂不加，只用 `/releases/latest/download/latest.json`；靠 `check({ timeout: 15000 })`、失败静默降级与常驻的手动下载入口兜底。
-6. **预发布版**：带连字符的 tag 会被标 `--prerelease`，`/releases/latest/` 不指向它，所以自动更新只认正式版 tag；测试包走 `workflow_dispatch` 的 Artifacts。
+1. **检查时机**：启动 8 秒后静默查一次 + 关于页「检查更新」按钮手动查；不做定时轮询。查到过就直接把面板叫回来，不重复打网络请求。
+2. **更新说明**：来自 `release-notes/<tag>.md`，每行一条 `- xxx`；发版时写进 `latest.json` 的 `notes`，同时作为 Release 页说明，客户端面板用 `textContent` 逐条渲染成列表（不解析 HTML，内容来自 GitHub 不可信）。缺文件 / 无条目时建 Release 与生成清单两步都会让 CI 红。不提供「跳过此版本」。
+3. **手动检查的反馈**：已是最新版本 / 失败 / 下载中 / 发现新版，四种结果都经事件回传到关于窗口 —— 无更新时**弹窗写明当前版本号**，失败给原因与手动下载入口；主窗口状态栏仍同步一句 `setHint`。about 侧有 20 秒超时兜底，主窗口没回应也不会把按钮一直锁住。
+4. **Windows**：用 `.msi` + `installMode: "passive"`，不用 NSIS `.exe`。
+5. **关于页**：手动检查按钮就在这里；顶栏的 ⓘ 是「关于」入口（也是 Windows / Linux 唯一入口，小红点挂它上面）。检查逻辑仍全在主窗口，about 窗口只发事件、显示结果，权限由独立的 `capabilities/about.json` 给 `core:default`，`default.json` 的 `windows` 仍是 `["main"]`。查到新版时调 `focus_main_window` 把主窗口提到前面，否则更新面板会被关于窗口挡住。
+6. **镜像 endpoint**：暂不加，只用 `/releases/latest/download/latest.json`；靠 `check({ timeout: 15000 })`、失败静默降级与常驻的手动下载入口兜底。
+7. **预发布版**：带连字符的 tag 会被标 `--prerelease`，`/releases/latest/` 不指向它，所以自动更新只认正式版 tag；测试包走 `workflow_dispatch` 的 Artifacts。
 
 ---
 
