@@ -3351,3 +3351,103 @@ html[data-mode="simple"] #btn-clear {
   line-height: 1.7;
   color: var(--text-dim);
 }
+
+/* ---------- 大图 · 直方图 ---------- */
+/* 固定左上角：详细信息面板在右侧、缩放控件在右上、标记按钮行在底部，
+   放这里三个都不挡；贴左下角时窗口一窄就会挤到「保留」按钮。 */
+.loupe-hist {
+  position: absolute;
+  top: 18px;
+  left: 14px;
+  width: 300px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  z-index: 5;
+}
+
+.loupe-hist[hidden] {
+  display: none;
+}
+
+.lh-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.lh-close {
+  border: 0;
+  background: none;
+  color: var(--text-mute);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.lh-svg {
+  display: block;
+  width: 100%;
+  height: 96px;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.lh-legend {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.lh-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.lh-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.lh-dot--r { background: #ff5f56; }
+.lh-dot--g { background: #4ecb71; }
+.lh-dot--b { background: #4a9eff; }
+.lh-dot--l { background: rgba(127, 127, 127, 0.75); }
+
+.lh-note {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-mute);
+}
+
+/* 顺手修一处同类的浅色主题问题：缩放控件用玻璃底，浅色下会变成白底，
+   而 .zbtn 的文字写死了浅色——右上角就是一块什么也看不见的白条。 */
+html[data-theme="light"] .loupe-zoom {
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.94);
+}
+
+html[data-theme="light"] .zbtn {
+  color: var(--text);
+}
+
+html[data-theme="light"] .zbtn:hover {
+  background: var(--bg-hover);
+}
+
+html[data-theme="light"] .zbtn.is-active {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}

@@ -152,6 +152,7 @@ fn apply_schema(conn: &Connection) -> Result<()> {
     ensure_core_columns(conn)?;
     conn.execute_batch(SCHEMA_TABLES)?;
     add_missing_columns(conn);
+    invalidate_outdated_analysis(conn);
     create_indexes(conn);
     Ok(())
 }
@@ -227,6 +228,8 @@ fn add_missing_columns(conn: &Connection) {
         ("photos", "overexposed", "REAL"),
         ("photos", "underexposed", "REAL"),
         ("photos", "analyze_failed", "INTEGER NOT NULL DEFAULT 0"),
+        // 画面分析的算法版本。补列时老行拿到 0，下面的作废逻辑会把它们重算一遍。
+        ("photos", "analyze_version", "INTEGER NOT NULL DEFAULT 0"),
         // 色标。空串表示没标。老库升级上来的人以前的保留 / 星级一个都不会少。
         ("decisions", "color", "TEXT NOT NULL DEFAULT ''"),
     ];
@@ -245,6 +248,24 @@ fn add_missing_columns(conn: &Connection) {
                 eprintln!("提示：未能给 {table} 补上 {col} 列（{e}）");
             }
         }
+    }
+}
+
+/// 画质判定算法升级后，把旧口径算出来的指标作废。
+///
+/// 不删数据、不重建库：只把三列清成 NULL，后台分析趟本来就挑「还没算过」的，
+/// 于是它会自动重算一遍。`analyze_version` 由那一趟写入，之后每次启动这条
+/// UPDATE 都命中 0 行，等于零成本。
+fn invalidate_outdated_analysis(conn: &Connection) {
+    let sql = format!(
+        "UPDATE photos SET sharpness = NULL, overexposed = NULL, underexposed = NULL,
+                         analyze_failed = 0
+          WHERE is_primary = 1 AND analyze_version < {}",
+        crate::analyze::ANALYZE_VERSION
+    );
+    if let Err(e) = conn.execute(&sql, []) {
+        // 作废失败最多是旧指标继续显示，不该挡住应用启动
+        eprintln!("提示：未能作废旧画质指标（{e}）");
     }
 }
 
@@ -328,7 +349,9 @@ CREATE TABLE IF NOT EXISTS photos (
   sharpness          REAL,
   overexposed        REAL,
   underexposed       REAL,
-  analyze_failed     INTEGER NOT NULL DEFAULT 0
+  analyze_failed     INTEGER NOT NULL DEFAULT 0,
+  -- 写入这三项时用的算法版本；升级时见 invalidate_outdated_analysis
+  analyze_version    INTEGER NOT NULL DEFAULT 0
 );
 
 -- 注意：索引不写在这里，见下方 SCHEMA_INDEXES —— 它们必须排在新列补齐之后。

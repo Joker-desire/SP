@@ -464,6 +464,12 @@ const elLoupeZoomLabel = $<HTMLButtonElement>("#loupe-zoom-reset");
 const elLoupeZoomIn = $<HTMLButtonElement>("#loupe-zoom-in");
 const elLoupeZoomOut = $<HTMLButtonElement>("#loupe-zoom-out");
 const elLoupeZoomActual = $<HTMLButtonElement>("#loupe-zoom-actual");
+const elLoupeHistBtn = $<HTMLButtonElement>("#loupe-histogram");
+const elLoupeHistPanel = $<HTMLElement>("#loupe-hist-panel");
+const elLoupeHistClose = $<HTMLButtonElement>("#loupe-hist-close");
+// `$` 的约束是 HTMLElement，SVG 元素不在其中；这里单独取一次
+const elLoupeHistSvg = document.querySelector<SVGSVGElement>("#loupe-hist-svg")!;
+const elLoupeHistNote = $<HTMLElement>("#loupe-hist-note");
 
 const elExportModal = $<HTMLElement>("#export-modal");
 const elExportScope = $<HTMLElement>("#export-scope");
@@ -831,27 +837,52 @@ function loadThumb(id: number, size: ThumbSize): Promise<ThumbPayload> {
 
 // ---- 画面质量 ----
 //
-// 阈值和后端 analyze.rs 里的是一对，改一边就要改另一边，
-// 否则会出现「侧栏说 15 张、筛出来 12 张」这种对不上的情况。
-// 后端是计数和筛选的口径，以前端为准只会两边打架，所以这里跟着后端走。
-const BLUR_THRESHOLD = 25;
-const OVEREXPOSED_THRESHOLD = 0.02;
-const UNDEREXPOSED_THRESHOLD = 0.25;
+// 阈值只在后端 analyze.rs 定义一次，启动时通过 quality_config 取回来。
+// 以前两边各硬编码一份，改后端忘了改前端，就会出现「侧栏说 15 张、筛出来 12 张」。
+// 下面的对象留的只是「后端还没回话」那几十毫秒的兜底值，别在别处再写一份常量。
+interface QualityConfig {
+  blurThreshold: number;
+  overexposedThreshold: number;
+  underexposedThreshold: number;
+  version: number;
+}
+const qualityCfg: QualityConfig = {
+  blurThreshold: 25,
+  overexposedThreshold: 0.05,
+  underexposedThreshold: 0.25,
+  version: 2,
+};
 
-/** 这张照片有没有机器能看出来的硬伤。没有就返回 null——不给人添标签。 */
+async function loadQualityConfig() {
+  try {
+    Object.assign(qualityCfg, await invoke<QualityConfig>("quality_config"));
+  } catch {
+    /* 拿不到就沿用兜底值，界面不该因此崩掉 */
+  }
+}
+
+/**
+ * 这张照片有没有机器「怀疑」的硬伤。
+ * 一律写「疑似」：清晰度按最清晰区域算、曝光只看溢出占比，都是初筛，
+ * 浅景深和雪景仍可能误判，最终判断交给眼睛（以及大图里的直方图）。
+ */
 function qualityIssue(c: PairCard): string | null {
-  if (is(c.sharpness) && (c.sharpness as number) < BLUR_THRESHOLD) return "糊";
-  if (is(c.overexposed) && (c.overexposed as number) >= OVEREXPOSED_THRESHOLD) return "过曝";
-  if (is(c.underexposed) && (c.underexposed as number) >= UNDEREXPOSED_THRESHOLD) return "欠曝";
+  if (is(c.sharpness) && (c.sharpness as number) < qualityCfg.blurThreshold) return "疑似糊";
+  if (is(c.overexposed) && (c.overexposed as number) >= qualityCfg.overexposedThreshold)
+    return "疑似过曝";
+  if (is(c.underexposed) && (c.underexposed as number) >= qualityCfg.underexposedThreshold)
+    return "疑似欠曝";
   return null;
 }
 
 /** 徽标的悬停说明：把具体数值摆出来，阈值准不准一眼能判断。 */
 function qualityDetail(c: PairCard): string {
   const bits: string[] = [];
-  if (is(c.sharpness)) bits.push(`清晰度 ${Math.round(c.sharpness as number)}（低于 ${BLUR_THRESHOLD} 判为糊）`);
+  if (is(c.sharpness))
+    bits.push(`清晰度 ${Math.round(c.sharpness as number)}（低于 ${qualityCfg.blurThreshold} 判疑似跑焦）`);
   if (is(c.overexposed)) bits.push(`高光溢出 ${((c.overexposed as number) * 100).toFixed(1)}%`);
   if (is(c.underexposed)) bits.push(`暗部死黑 ${((c.underexposed as number) * 100).toFixed(1)}%`);
+  bits.push("机器初筛 · 以肉眼和直方图为准");
   return bits.join(" · ");
 }
 
@@ -1364,9 +1395,12 @@ function qualityOf(c: PairCard): { key: string; label: string } {
   if (c.sharpness === null && c.overexposed === null && c.underexposed === null) {
     return { key: "pending", label: "未分析" };
   }
-  if (c.sharpness !== null && c.sharpness < BLUR_THRESHOLD) return { key: "blur", label: "疑似跑焦" };
-  if (c.overexposed !== null && c.overexposed >= OVEREXPOSED_THRESHOLD) return { key: "over", label: "高光溢出" };
-  if (c.underexposed !== null && c.underexposed >= UNDEREXPOSED_THRESHOLD) return { key: "under", label: "暗部死黑" };
+  if (c.sharpness !== null && c.sharpness < qualityCfg.blurThreshold)
+    return { key: "blur", label: "疑似跑焦" };
+  if (c.overexposed !== null && c.overexposed >= qualityCfg.overexposedThreshold)
+    return { key: "over", label: "疑似过曝" };
+  if (c.underexposed !== null && c.underexposed >= qualityCfg.underexposedThreshold)
+    return { key: "under", label: "疑似欠曝" };
   return { key: "ok", label: "正常" };
 }
 
@@ -3706,6 +3740,9 @@ async function startScan(
     if (opts.quiet && changed === 0) {
       // 启动时的自动重扫：图库没变化就别重排界面，免得白闪一下
       setHint(`图库已是最新（${r.pairs.toLocaleString()} 张，检查用时 ${(r.elapsedMs / 1000).toFixed(1)} 秒）`);
+      // 算法升级会在数据库里把旧指标作废；即使一张新照片都没有，
+      // 也得让后台趟把它们重算回来，否则「疑似」徽标会一直空着。
+      void runAnalysis();
     } else {
       if (r.pairs === 0 && opts.includeDirs?.length === 0) {
         // 一个子文件夹都没勾、根目录自己这层又没照片：把出路说清楚，别让人对着空网格猜
@@ -3830,12 +3867,12 @@ async function runAnalysis() {
     const over = lastFacets?.quality.find((q) => q.key === "over")?.count ?? 0;
     const under = lastFacets?.quality.find((q) => q.key === "under")?.count ?? 0;
     const bits: string[] = [];
-    if (blur > 0) bits.push(`${blur.toLocaleString()} 张可能糊了`);
-    if (over > 0) bits.push(`${over.toLocaleString()} 张高光溢出`);
-    if (under > 0) bits.push(`${under.toLocaleString()} 张暗部死黑`);
+    if (blur > 0) bits.push(`${blur.toLocaleString()} 张疑似跑焦`);
+    if (over > 0) bits.push(`${over.toLocaleString()} 张疑似过曝`);
+    if (under > 0) bits.push(`${under.toLocaleString()} 张疑似欠曝`);
     setHint(
       bits.length > 0
-        ? `画面分析完成（${r.analyzed.toLocaleString()} 张）：${bits.join(" · ")}，左侧「画面质量」可单独筛`
+        ? `画面分析完成（${r.analyzed.toLocaleString()} 张）：${bits.join(" · ")}，仅作初筛，大图里按 H 看直方图复核`
         : `画面分析完成（${r.analyzed.toLocaleString()} 张），没发现明显问题`,
     );
   } catch {
@@ -4788,15 +4825,16 @@ function renderDetail(d: PhotoDetail) {
       d.sharpness === null && d.overexposed === null && d.underexposed === null
         ? [detailRow("状态", "还没分析（后台分析还没轮到它，或这个格式算不出来）")]
         : [
-            detailRow("清晰度", d.sharpness === null ? "" : `${Math.round(d.sharpness)} 分（< ${BLUR_THRESHOLD} 判跑焦）`),
+            detailRow("清晰度", d.sharpness === null ? "" : `${Math.round(d.sharpness)} 分（< ${qualityCfg.blurThreshold} 判疑似跑焦）`),
             detailRow(
               "高光溢出",
-              d.overexposed === null ? "" : `${(d.overexposed * 100).toFixed(1)}%（≥ ${OVEREXPOSED_THRESHOLD * 100}% 判溢出）`,
+              d.overexposed === null ? "" : `${(d.overexposed * 100).toFixed(1)}%（≥ ${(qualityCfg.overexposedThreshold * 100).toFixed(0)}% 判疑似过曝）`,
             ),
             detailRow(
               "暗部死黑",
-              d.underexposed === null ? "" : `${(d.underexposed * 100).toFixed(1)}%（≥ ${UNDEREXPOSED_THRESHOLD * 100}% 判死黑）`,
+              d.underexposed === null ? "" : `${(d.underexposed * 100).toFixed(1)}%（≥ ${(qualityCfg.underexposedThreshold * 100).toFixed(0)}% 判疑似欠曝）`,
             ),
+            detailRow("判定口径", `v${qualityCfg.version} · 取画面最清晰区域评估，机器初筛`),
           ],
     ),
     exifSec,
@@ -4837,6 +4875,101 @@ function weekdayOf(t: string): string {
 elLoupeDetailBtn.addEventListener("click", () => toggleDetail());
 elLoupeDetailClose.addEventListener("click", () => toggleDetail(false));
 
+// ── 大图 · 直方图 ─────────────────────────────────────────────────────
+//
+// 「疑似过曝 / 疑似跑焦」只是机器初筛，看一眼两端有没有堆积才是摄影师
+// 自己的判断。数据由后端从内嵌预览算，前端只负责画，不碰文件。
+
+interface Histogram {
+  r: number[];
+  g: number[];
+  b: number[];
+  luma: number[];
+}
+
+const HIST_KEY = "sp:histogram";
+const HIST_W = 256;
+const HIST_H = 100;
+const HIST_NOTE = "曲线堆在最右＝高光溢出，堆在最左＝暗部死黑";
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+let histOpen = localStorage.getItem(HIST_KEY) === "1";
+/** 异步回来时对号用：连着翻页时，慢的那张不能盖掉当前这张。 */
+let histForId: number | null = null;
+
+/** 计数开方压缩：一张有大片纯白的照片，线性刻度会把其余 255 个桶压成贴底平线。 */
+function drawHistogram(h: Histogram) {
+  const peak = Math.max(...h.luma, ...h.r, ...h.g, ...h.b, 1);
+  const y = (v: number) => HIST_H - Math.min(HIST_H, Math.sqrt(v / peak) * HIST_H);
+  elLoupeHistSvg.replaceChildren();
+
+  // 四等分参考线：不标数字，只给眼睛一个「两端」的参照
+  for (const x of [HIST_W / 4, HIST_W / 2, (HIST_W * 3) / 4]) {
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", String(x));
+    line.setAttribute("x2", String(x));
+    line.setAttribute("y1", "0");
+    line.setAttribute("y2", String(HIST_H));
+    line.setAttribute("stroke", "rgba(127,127,127,0.22)");
+    line.setAttribute("stroke-width", "0.6");
+    elLoupeHistSvg.appendChild(line);
+  }
+
+  const area = document.createElementNS(SVG_NS, "path");
+  area.setAttribute(
+    "d",
+    `M0,${HIST_H} L${h.luma.map((v, i) => `${i},${y(v).toFixed(1)}`).join(" L")} L${HIST_W - 1},${HIST_H} Z`,
+  );
+  area.setAttribute("fill", "rgba(127,127,127,0.38)");
+  elLoupeHistSvg.appendChild(area);
+
+  const channels: Array<[number[], string]> = [
+    [h.r, "#ff5f56"],
+    [h.g, "#4ecb71"],
+    [h.b, "#4a9eff"],
+  ];
+  for (const [bins, color] of channels) {
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", `M${bins.map((v, i) => `${i},${y(v).toFixed(1)}`).join(" L")}`);
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", color);
+    path.setAttribute("stroke-width", "1.1");
+    path.setAttribute("opacity", "0.85");
+    elLoupeHistSvg.appendChild(path);
+  }
+}
+
+async function loadHistogram(id: number) {
+  histForId = id;
+  elLoupeHistNote.textContent = "正在读取预览…";
+  try {
+    const h = await invoke<Histogram>("photo_histogram", { id });
+    if (histForId !== id || !histOpen || elLoupe.hidden) return;
+    drawHistogram(h);
+    elLoupeHistNote.textContent = HIST_NOTE;
+  } catch {
+    if (histForId !== id || !histOpen) return;
+    elLoupeHistSvg.replaceChildren();
+    elLoupeHistNote.textContent = "这张取不到内嵌预览，画不出直方图";
+  }
+}
+
+function toggleHistogram(on = !histOpen) {
+  histOpen = on;
+  localStorage.setItem(HIST_KEY, on ? "1" : "0");
+  elLoupeHistPanel.hidden = !on;
+  elLoupeHistBtn.classList.toggle("is-active", on);
+  if (!on) {
+    histForId = null;
+    return;
+  }
+  const c = items[loupeIndex];
+  if (c) void loadHistogram(c.id);
+}
+
+elLoupeHistBtn.addEventListener("click", () => toggleHistogram());
+elLoupeHistClose.addEventListener("click", () => toggleHistogram(false));
+
 /**
  * 全屏切换。
  *
@@ -4875,6 +5008,7 @@ async function openLoupe(index: number) {
   paintLoupeMark(c);
   // 详情面板开着就跟着翻页换内容；读取是异步的，回来对不上号会自己丢弃
   if (detailOpen) void loadPhotoDetail(c.id);
+  if (histOpen) void loadHistogram(c.id);
   if (showAf) void loadAf(c.id);
   else hideAf();
   updateCullInfo();
@@ -5187,6 +5321,11 @@ window.addEventListener("keydown", (e) => {
     if (lower === "i") {
       e.preventDefault();
       toggleDetail();
+      return;
+    }
+    if (lower === "h") {
+      e.preventDefault();
+      toggleHistogram();
       return;
     }
 
@@ -5605,10 +5744,13 @@ setTimeout(() => void checkForUpdate(true), 8000);
 async function boot() {
   applyTheme(savedTheme());
   initSidebar();
+  // 画质阈值由后端统一下发，别在前端再抄一份常量
+  await loadQualityConfig();
 
   // 界面档位与列数：head 里的内联脚本已经预置了 data-mode 防闪烁，
   // 这里补齐按钮状态、该档自己的列数，以及首次启动的一屏键位卡。
   applyUiMode(uiMode, true);
+  toggleHistogram(histOpen);
   showWelcomeIfNeeded();
 
   // 分组依据选择器：本应用只有分组视图，始终显示

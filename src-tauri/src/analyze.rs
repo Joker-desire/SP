@@ -20,6 +20,14 @@ use crate::thumb;
 
 /// 分析用的工作尺寸。清晰度看的是边缘对比，256px 足够；再大只是白烧 CPU。
 const WORK_SIZE: u32 = 256;
+/// 直方图用的工作尺寸，比清晰度稍大一点，让曲线不至于全是锯齿。
+const HIST_SIZE: u32 = 512;
+
+/// 清晰度口径改过一次：v1 全图拉普拉斯方差，v2 按「画面里最清晰的那部分」评估。
+///
+/// 升级时把旧指标作废（见 `db::invalidate_outdated_analysis`），后台趟会
+/// 自动重算，用户不用手动点什么；以后再改算法，把这个数加一即可。
+pub const ANALYZE_VERSION: i64 = 2;
 
 /// 清晰度的判定门槛（0–100）。低于它算「可能糊了」。
 ///
@@ -28,7 +36,11 @@ const WORK_SIZE: u32 = 256;
 /// 等真素材跑出分布之后再校准。
 pub const BLUR_THRESHOLD: f64 = 25.0;
 /// 高光溢出 / 暗部死黑的判定门槛（占比）。
-pub const OVEREXPOSED_THRESHOLD: f64 = 0.02;
+///
+/// 溢出门槛原来是 2%：白墙、雪、逆光天空、白衣服随随便便就过线，
+/// 「过曝」徽标几乎等于噪音。提到 5% 才算得上「一片白没细节」。
+/// 仍然只是机器初筛，所以前端一律写成「疑似」，判断权留给眼睛和直方图。
+pub const OVEREXPOSED_THRESHOLD: f64 = 0.05;
 pub const UNDEREXPOSED_THRESHOLD: f64 = 0.25;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -41,25 +53,71 @@ pub struct Metrics {
     pub underexposed: f64,
 }
 
+/// 取一张「够用且尽量小」的内嵌 JPEG 预览。
+///
+/// RAW 里常有好几档预览，直接解最大那张会把内存峰值抬到上百 MB × 核数；
+/// `fitting_jpeg` 挑够用的最小那张。老机身只有一张更小的预览时退回最大的。
+fn preview_bytes(path: &Path, min_width: u32) -> Result<Vec<u8>> {
+    match thumb::fitting_jpeg_from_file(path, min_width) {
+        Ok((b, _)) => Ok(b),
+        Err(_) => Ok(thumb::best_jpeg_from_file(path)
+            .with_context(|| format!("取不到预览：{}", path.display()))?
+            .0),
+    }
+}
+
 /// 算一张照片的画面指标。算不出来返回 Err——调用方记下来跳过，不重试。
 pub fn metrics_for(path: &Path) -> Result<Metrics> {
-    // 指标只在一张 256px 见方的小图上算，没必要把 RAW 里 5568px 的全尺寸
-    // 预览解出来再缩。fitting_jpeg 挑「够用的最小那张」；rayon 满核并行时，
-    // 这一步直接决定内存峰值（原来是核数 × 上百 MB 的解码缓冲）。
-    let bytes = match thumb::fitting_jpeg_from_file(path, WORK_SIZE) {
-        Ok((b, _)) => b,
-        // 老机身可能只有一张比 WORK_SIZE 还小的预览，退回最大的那张照样能量
-        Err(_) => {
-            thumb::best_jpeg_from_file(path)
-                .with_context(|| format!("取不到预览：{}", path.display()))?
-                .0
-        }
-    };
+    let bytes = preview_bytes(path, WORK_SIZE)?;
     // 和缩略图共用一道并发闸门，别让满核的解码把内存吃光
     let _permit = thumb::global_limiter().acquire();
     let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
         .with_context(|| format!("预览解码失败：{}", path.display()))?;
     Ok(measure(&img))
+}
+
+/// RGB / 亮度直方图，各 256 个桶。给大图里那个「自己看一眼」的面板用。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Histogram {
+    pub r: Vec<u32>,
+    pub g: Vec<u32>,
+    pub b: Vec<u32>,
+    pub luma: Vec<u32>,
+}
+
+/// 按库内 id 对应的文件算直方图。和指标一样只看内嵌预览，不解码 RAW 全图。
+pub fn histogram_for(path: &Path) -> Result<Histogram> {
+    let bytes = preview_bytes(path, HIST_SIZE)?;
+    let _permit = thumb::global_limiter().acquire();
+    let img = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg)
+        .with_context(|| format!("预览解码失败：{}", path.display()))?;
+    Ok(histogram_of(&img))
+}
+
+/// 从已解码图像算直方图，单独拆出来便于直接测。
+pub fn histogram_of(img: &image::DynamicImage) -> Histogram {
+    let small = img.resize(HIST_SIZE, HIST_SIZE, image::imageops::FilterType::Triangle);
+    let rgb = small.to_rgb8();
+    let mut r = [0u32; 256];
+    let mut g = [0u32; 256];
+    let mut b = [0u32; 256];
+    let mut luma = [0u32; 256];
+    for p in rgb.pixels() {
+        let (rv, gv, bv) = (p.0[0] as usize, p.0[1] as usize, p.0[2] as usize);
+        r[rv] += 1;
+        g[gv] += 1;
+        b[bv] += 1;
+        // Rec.709 亮度的整数近似，和肉眼明暗更贴近，不必用浮点
+        let l = ((rv * 54 + gv * 183 + bv * 19) >> 8).min(255);
+        luma[l] += 1;
+    }
+    Histogram {
+        r: r.to_vec(),
+        g: g.to_vec(),
+        b: b.to_vec(),
+        luma: luma.to_vec(),
+    }
 }
 
 /// 从已经解码的图像算指标。单独拆出来是为了能直接测——
@@ -73,7 +131,7 @@ pub fn measure(img: &image::DynamicImage) -> Metrics {
         return Metrics::default();
     }
 
-    let sharpness = laplacian_score(&gray);
+    let sharpness = sharpness_score(&gray);
 
     let mut over = 0u64;
     let mut under = 0u64;
@@ -99,11 +157,8 @@ pub fn measure(img: &image::DynamicImage) -> Metrics {
 ///
 /// 原理：清晰的地方相邻像素变化大，糊成一片的地方变化小。对每个像素算
 /// 「自己×4 减去上下左右」，取这批数的方差——方差越大越清晰。
-/// 原始方差没有上界，除以一个经验常数压到 0–100，方便显示和定门槛。
-fn laplacian_score(gray: &image::GrayImage) -> f64 {
-    let (w, h) = gray.dimensions();
-    let px = |x: u32, y: u32| -> i32 { gray.get_pixel(x, y).0[0] as i32 };
-
+/// 原始方差没有上界，开方后压到 0–100，方便显示和定门槛。
+fn lap_variance(w: u32, h: u32, px: impl Fn(u32, u32) -> i32) -> f64 {
     let mut sum = 0f64;
     let mut sum_sq = 0f64;
     let mut n = 0f64;
@@ -119,16 +174,57 @@ fn laplacian_score(gray: &image::GrayImage) -> f64 {
         return 0.0;
     }
     let mean = sum / n;
-    let variance = (sum_sq / n - mean * mean).max(0.0);
-    // 开方再压到 0–100。
-    //
-    // 原始方差是平方量，动态范围太夸张：清晰图和极致清晰图能差出几十倍，
-    // 而「稍微糊」和「很糊」只差几倍——线性映射会把可用的区间全挤在底部。
-    // 开方之后更接近「看起来差多少」。
-    //
-    // 门槛是拍脑袋定的经验值，不是理论推导：先用一批真素材跑一遍看分布再调。
-    // 宁可先标得保守一点，误标一张好片比漏标一张糊片更烦人。
-    variance.sqrt().clamp(0.0, 100.0)
+    (sum_sq / n - mean * mean).max(0.0)
+}
+
+/// 开方再压到 0–100。原始方差是平方量，动态范围太夸张：清晰图和极致清晰图
+/// 能差出几十倍，而「稍微糊」和「很糊」只差几倍——线性映射会把可用区间
+/// 全挤在底部。开方之后更接近「看起来差多少」。
+fn normalized_lap(w: u32, h: u32, px: impl Fn(u32, u32) -> i32) -> f64 {
+    lap_variance(w, h, px).sqrt().clamp(0.0, 100.0)
+}
+
+fn laplacian_score(gray: &image::GrayImage) -> f64 {
+    let (w, h) = gray.dimensions();
+    let px = |x: u32, y: u32| -> i32 { gray.get_pixel(x, y).0[0] as i32 };
+    normalized_lap(w, h, px)
+}
+
+/// 按「画面里最清晰的那部分」评估清晰度，而不是整张图求平均。
+///
+/// 全图方差有个致命的误判：浅景深人像里，大面积虚化背景的边缘变化几乎为零，
+/// 它会把整张图的方差拉低，于是焦点锐利的眼睛被标成「糊」。用户实机反馈的
+/// 「虚化当成糊」就是这么来的。
+///
+/// 做法：切成 8×8 块，各算一块的清晰度，取最清晰那 25% 的**中位数**
+/// （中位数比均值抗造：一两块水印 / 高对比文字不会把整张糊片救回来），
+/// 再和全图分数做 8:2 融合——留一点全图分，避免局部噪点彻底盖过整体。
+fn sharpness_score(gray: &image::GrayImage) -> f64 {
+    const GRID: u32 = 8;
+    let (w, h) = gray.dimensions();
+    let bw = w / GRID;
+    let bh = h / GRID;
+    if bw < 4 || bh < 4 {
+        return laplacian_score(gray);
+    }
+    let global = laplacian_score(gray);
+    let px = |x: u32, y: u32| -> i32 { gray.get_pixel(x, y).0[0] as i32 };
+
+    let mut tiles = Vec::with_capacity((GRID * GRID) as usize);
+    for gy in 0..GRID {
+        for gx in 0..GRID {
+            let (x0, y0) = (gx * bw, gy * bh);
+            tiles.push(normalized_lap(bw, bh, |x, y| px(x0 + x, y0 + y)));
+        }
+    }
+    tiles.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let top = &tiles[tiles.len() * 3 / 4..];
+    let tiled = if top.len() % 2 == 0 {
+        (top[top.len() / 2 - 1] + top[top.len() / 2]) / 2.0
+    } else {
+        top[top.len() / 2]
+    };
+    (0.8 * tiled + 0.2 * global).clamp(0.0, 100.0)
 }
 
 /// 一趟分析的进度。
@@ -257,11 +353,14 @@ where
             {
                 let mut up = tx.prepare(
                     "UPDATE photos SET sharpness = ?1, overexposed = ?2, underexposed = ?3,
-                                      analyze_failed = 0
+                                      analyze_failed = 0, analyze_version = ?5
                      WHERE id = ?4",
                 )?;
-                let mut failed_up =
-                    tx.prepare("UPDATE photos SET analyze_failed = 1 WHERE id = ?1")?;
+                // 失败也记版本号：算法升级时会被重新捞一遍，但同一版本内
+                // 不会每次启动都白重试。
+                let mut failed_up = tx.prepare(
+                    "UPDATE photos SET analyze_failed = 1, analyze_version = ?2 WHERE id = ?1",
+                )?;
                 for (id, m) in &results {
                     match m {
                         Some(m) => {
@@ -269,13 +368,14 @@ where
                                 m.sharpness,
                                 m.overexposed,
                                 m.underexposed,
-                                id
+                                id,
+                                ANALYZE_VERSION
                             ])?;
                         }
                         // 取不到预览就记一笔：不然下一趟又把它捞出来白算，
                         // 「还剩 N 张」永远归不了零，每次启动都重跑一遍。
                         None => {
-                            failed_up.execute([id])?;
+                            failed_up.execute(rusqlite::params![id, ANALYZE_VERSION])?;
                         }
                     }
                 }
@@ -337,6 +437,63 @@ mod tests {
             "清晰图该明显高过纯色图：{s_sharp} vs {s_flat}"
         );
         assert!(s_flat < BLUR_THRESHOLD, "纯色图该被判成糊");
+    }
+
+    /// 浅景深：只有画面中一块是实的，四周围全是虚化背景。
+    /// 旧的全图方差口径会被大片平滑区域拉低，新口径该按清晰的那块来评。
+    fn shallow_depth_of_field(w: u32, h: u32) -> image::DynamicImage {
+        let mut img = image::GrayImage::from_pixel(w, h, image::Luma([128u8]));
+        let (x0, y0, side) = (w / 4, h / 4, w / 2);
+        for y in y0..y0 + side {
+            for x in x0..x0 + side {
+                let v = ((x * 7 + y * 13) % 251) as u8;
+                img.put_pixel(x, y, image::Luma([v]));
+            }
+        }
+        image::DynamicImage::ImageLuma8(img)
+    }
+
+    #[test]
+    fn blurred_background_no_longer_drowns_the_sharp_subject() {
+        let img = shallow_depth_of_field(256, 256);
+        let gray = img.to_luma8();
+        let old = laplacian_score(&gray); // v1：全图一个方差
+        let new = measure(&img).sharpness; // v2：最清晰的 25% 块
+        assert!(
+            new > old + 5.0,
+            "浅景深照片该比全图方差口径明显更高：v2 {new:.1} vs v1 {old:.1}"
+        );
+        assert!(new > BLUR_THRESHOLD, "主体锐利的照片不该被标成糊：{new:.1}");
+        assert!(
+            measure(&flat(256, 256)).sharpness < BLUR_THRESHOLD,
+            "整张纯色仍然要判糊，别把口径放宽到什么都不报"
+        );
+    }
+
+    #[test]
+    fn histogram_counts_full_white_and_full_black() {
+        let white = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            40,
+            30,
+            image::Rgb([255u8, 255, 255]),
+        ));
+        let h = histogram_of(&white);
+        // histogram_of 会先按工作尺寸缩放，所以只断言「全部像素都落在同一桶」
+        let total: u32 = h.luma.iter().sum();
+        assert!(total > 0);
+        assert_eq!(h.r[255], total);
+        assert_eq!(h.g[255], total);
+        assert_eq!(h.b[255], total);
+        assert_eq!(h.luma[255], total);
+
+        let black = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            40,
+            30,
+            image::Rgb([0u8, 0, 0]),
+        ));
+        let h2 = histogram_of(&black);
+        let total2: u32 = h2.luma.iter().sum();
+        assert_eq!(h2.luma[0], total2);
     }
 
     #[test]

@@ -483,6 +483,22 @@
           <div class="ld-body" id="loupe-detail-body"></div>
         </aside>
 
+        <!-- 直方图：比「疑似过曝」四个字靠谱，看两端有没有堆积就知道了 -->
+        <aside class="loupe-hist" id="loupe-hist-panel" hidden>
+          <div class="lh-head">
+            <span>直方图</span>
+            <button class="lh-close" id="loupe-hist-close" title="关闭（H）" aria-label="关闭直方图">×</button>
+          </div>
+          <svg class="lh-svg" id="loupe-hist-svg" viewBox="0 0 256 100" preserveAspectRatio="none" role="img" aria-label="RGB 与亮度直方图"></svg>
+          <div class="lh-legend">
+            <span><i class="lh-dot lh-dot--r"></i>R</span>
+            <span><i class="lh-dot lh-dot--g"></i>G</span>
+            <span><i class="lh-dot lh-dot--b"></i>B</span>
+            <span><i class="lh-dot lh-dot--l"></i>亮度</span>
+          </div>
+          <div class="lh-note" id="loupe-hist-note">曲线堆在最右＝高光溢出，堆在最左＝暗部死黑</div>
+        </aside>
+
         <!-- 大图里的标记按钮和网格里的是同一批操作，只是位置更顺手 -->
         <div class="loupe-actions">
           <button class="cbtn cbtn--keep" id="loupe-keep" title="保留并看下一张（P）">
@@ -500,6 +516,7 @@
           <button class="cbtn" id="loupe-unmark" title="清除标记（U）">清除<kbd>U</kbd></button>
           <button class="cbtn" id="loupe-detail" title="详细信息（I）">详情<kbd>I</kbd></button>
           <button class="cbtn" id="loupe-af-toggle" title="显示相机记录的对焦框（O）">对焦点<kbd>O</kbd></button>
+          <button class="cbtn" id="loupe-histogram" title="显示 RGB / 亮度直方图（H）">直方图<kbd>H</kbd></button>
 
           <!-- 星级放一组可点的按钮：按 1-5 打星，按完停在原地，
                再按别的数字就是调整——打星是评价，不是过片 -->
@@ -529,7 +546,7 @@
           <span class="loupe-name" id="loupe-name"></span>
           <span class="loupe-exif" id="loupe-exif"></span>
           <span class="loupe-pos" id="loupe-pos"></span>
-          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · 0 清星 · 6-9 与 - 色标 · I 详情 · O 对焦点 · + 放大 / _ 缩小 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
+          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · 0 清星 · 6-9 与 - 色标 · I 详情 · O 对焦点 · H 直方图 · + 放大 / _ 缩小 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
           <button class="btn btn-ghost loupe-close" id="loupe-close">关闭</button>
         </div>
       </div>

@@ -128,6 +128,46 @@ async fn analyze_library(
     .map_err(|e| e.to_string())?
 }
 
+/// 画质判定口径。阈值只在 `analyze.rs` 定义一次，前端启动时取回去用：
+/// 以前两边各写一份，改后端忘了改前端就会出现「侧栏说 15 张、筛出来 12 张」。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QualityConfig {
+    blur_threshold: f64,
+    overexposed_threshold: f64,
+    underexposed_threshold: f64,
+    version: i64,
+}
+
+#[tauri::command]
+fn quality_config() -> QualityConfig {
+    QualityConfig {
+        blur_threshold: analyze::BLUR_THRESHOLD,
+        overexposed_threshold: analyze::OVEREXPOSED_THRESHOLD,
+        underexposed_threshold: analyze::UNDEREXPOSED_THRESHOLD,
+        version: analyze::ANALYZE_VERSION,
+    }
+}
+
+/// 大图里的直方图。按库内 id 取路径，不接收任意路径——
+/// 前端不该有能力读用户没导入过的文件。
+#[tauri::command]
+async fn photo_histogram(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<analyze::Histogram, String> {
+    let path: String = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        conn.query_row("SELECT path FROM photos WHERE id = ?1", [id], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        analyze::histogram_for(Path::new(&path)).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 列出某个目录下的子目录（含自身），供「文件夹范围选择」弹窗做一棵可勾选的树。
 #[tauri::command]
 async fn list_subdirs(path: String) -> Result<Vec<indexer::DirNode>, String> {
@@ -1438,17 +1478,17 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         vec![
             Facet {
                 key: "blur".into(),
-                label: "可能糊了".into(),
+                label: "疑似跑焦".into(),
                 count: blur,
             },
             Facet {
                 key: "over".into(),
-                label: "高光溢出".into(),
+                label: "疑似过曝".into(),
                 count: over,
             },
             Facet {
                 key: "under".into(),
-                label: "暗部死黑".into(),
+                label: "疑似欠曝".into(),
                 count: under,
             },
         ]
@@ -2988,6 +3028,8 @@ pub fn run() {
             list_subdirs,
             folder_from_drop,
             analyze_library,
+            quality_config,
+            photo_histogram,
             list_camera_bodies,
             library_stats,
             library_facets,
