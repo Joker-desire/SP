@@ -2471,37 +2471,226 @@ async function invertSelection() {
 }
 
 // ---------------------------------------------------------------------------
-// 一屏选片：当前目标 / 自定义列数 / 简洁·专业切换
+// 显示哪些功能：逐项开关 / 简洁·专业预设 / 自定义列数 / 首次键位卡
 //
-// 这三条都只改「界面怎么显示」，不碰选片数据：切模式不改 filter / selection /
-// groupMode，被藏起来的按钮对应的快捷键照常可用（⌘Z、P/X/U、1-5、I、F…）。
+// 这一切只改「界面怎么显示」，不碰选片数据：切档不改 filter / selection /
+// groupMode；被藏起来的按钮对应的快捷键照常可用（⌘Z、P/X/U、1-5、I、H、F…）。
+// 「简洁 / 专业」不是两套界面，只是这份清单的两组预设勾选。
 // ---------------------------------------------------------------------------
 
-type UiMode = "simple" | "pro";
-const UI_MODE_KEY = "sp:ui-mode";
-const COLS_KEY = "sp:cols:"; // 后面接档位，两档各记各的列数
+type UiMode = "simple" | "pro" | "custom";
+
+const UI_MODE_KEY = "sp:ui-mode"; // 旧版只有 simple / pro，留着做迁移
+const FEATURES_KEY = "sp:features"; // 现在：启用的功能键清单
+const COLS_KEY = "sp:cols:"; // 后面接档位，各档记各的列数
 const WELCOME_KEY = "sp:welcome-seen";
 const MIN_COLS = 1;
 const MAX_COLS = 8;
 
-const elBtnMode = $<HTMLButtonElement>("#btn-mode");
-const elModeLabel = $<HTMLElement>("#mode-label");
+type FeatureSection = "顶栏与文件" | "选片操作" | "左侧筛选" | "大图查看";
+
+interface FeatureDef {
+  key: string;
+  label: string;
+  note: string;
+  section: FeatureSection;
+}
+
+const FEATURE_SECTIONS: FeatureSection[] = ["顶栏与文件", "选片操作", "左侧筛选", "大图查看"];
+
+/**
+ * 所有可开关的控件。
+ *
+ * 加新控件两步：HTML 上写 `data-feature="key"`，这里登记一行。
+ * 没登记的元素一律常显 —— 选择文件夹、导出、清除筛选、关于 / 更新入口
+ * 都在这个范畴：能藏的东西都可以藏，但出口不能藏。
+ */
+const FEATURES: FeatureDef[] = [
+  { key: "rescan", label: "重新扫描", note: "图库有变动时再扫一遍", section: "顶栏与文件" },
+  { key: "cache", label: "清理缓存", note: "缩略图 / 索引占用与清理", section: "顶栏与文件" },
+  { key: "similar", label: "连拍分组", note: "按时间把连拍收成一组对比", section: "顶栏与文件" },
+  { key: "clearLib", label: "清空文件夹", note: "回到未选文件夹的状态，不动原片", section: "顶栏与文件" },
+  { key: "undoRedo", label: "撤销 / 重做", note: "标记误操作回退（⌘Z）", section: "顶栏与文件" },
+  { key: "groupBy", label: "分组依据", note: "按日期 / 镜头 / 横竖图等收组", section: "顶栏与文件" },
+  { key: "theme", label: "深浅色切换", note: "跟随你的使用环境", section: "顶栏与文件" },
+
+  { key: "keepReject", label: "保留 / 淘汰", note: "P / X，最常用的两个动作", section: "选片操作" },
+  { key: "stars", label: "星级按钮", note: "0–5 星，键盘数字同样可用", section: "选片操作" },
+  { key: "unmark", label: "清除标记", note: "一键退回未标状态（U）", section: "选片操作" },
+  { key: "selectOps", label: "全选 / 反选 / 取消", note: "批量选择的入口", section: "选片操作" },
+  { key: "bulk", label: "批量标记", note: "对整批（含没滚到的）一次落标记", section: "选片操作" },
+  { key: "search", label: "文件名搜索", note: "图库大时定位单张", section: "选片操作" },
+  { key: "sort", label: "排序", note: "按时间 / 星级 / 清晰度排", section: "选片操作" },
+  { key: "cols", label: "列数调节", note: "1–8 列，列少了图更大", section: "选片操作" },
+  { key: "cullInfo", label: "操作提示文字", note: "「单击选中 · 双击看大图」那行", section: "选片操作" },
+
+  { key: "facetDecision", label: "选片状态", note: "保留 / 淘汰 / 未标", section: "左侧筛选" },
+  { key: "facetStars", label: "星级筛选", note: "按星数缩小范围", section: "左侧筛选" },
+  { key: "facetColors", label: "色标筛选", note: "红黄绿蓝紫", section: "左侧筛选" },
+  { key: "facetQuality", label: "画面质量", note: "疑似跑焦 / 高光溢出 / 暗部死黑", section: "左侧筛选" },
+  { key: "facetPair", label: "文件类型", note: "RAW+JPG / 仅 RAW / 配对缺失", section: "左侧筛选" },
+  { key: "facetShape", label: "画幅方向", note: "横图 / 竖图 / 方图", section: "左侧筛选" },
+  { key: "facetDays", label: "拍摄日期", note: "按月份收", section: "左侧筛选" },
+  { key: "facetFocal", label: "焦段", note: "按焦段分桶", section: "左侧筛选" },
+  { key: "facetIso", label: "ISO", note: "按感光度分桶", section: "左侧筛选" },
+  { key: "facetCamera", label: "机身", note: "含两台机身的时间校正", section: "左侧筛选" },
+  { key: "facetLens", label: "镜头", note: "用了哪几支镜头", section: "左侧筛选" },
+
+  { key: "loupeZoom", label: "缩放控件", note: "− / 100% / + / 1:1", section: "大图查看" },
+  { key: "loupeDetail", label: "详细信息", note: "完整 EXIF（I）", section: "大图查看" },
+  { key: "loupeAf", label: "对焦点", note: "画相机记录的 AF 框（O）", section: "大图查看" },
+  { key: "loupeHist", label: "直方图", note: "RGB 与亮度（H）", section: "大图查看" },
+  { key: "loupeStars", label: "星级按钮", note: "大图里直接点星", section: "大图查看" },
+  { key: "loupeColors", label: "色标按钮", note: "红黄绿蓝紫", section: "大图查看" },
+  { key: "loupeKeys", label: "键位提示", note: "底栏那行快捷键说明", section: "大图查看" },
+];
+
+const FEATURE_KEYS = FEATURES.map((f) => f.key);
+
+/** 简洁预设：只留导入、看图、标记、导出这条主路径，其余收起。 */
+const SIMPLE_KEYS = new Set(
+  FEATURE_KEYS.filter(
+    (k) =>
+      ![
+        "rescan",
+        "cache",
+        "similar",
+        "clearLib",
+        "undoRedo",
+        "groupBy",
+        "sort",
+        "unmark",
+        "selectOps",
+        "bulk",
+        "facetQuality",
+        "facetPair",
+        "facetShape",
+        "facetDays",
+        "facetFocal",
+        "facetIso",
+        "facetCamera",
+        "facetLens",
+      ].includes(k)
+  )
+);
+
+const elBtnFeatures = $<HTMLButtonElement>("#btn-features");
+const elFeaturesLabel = $<HTMLElement>("#features-label");
+const elFeatModal = $<HTMLElement>("#feat-modal");
+const elFeatBody = $<HTMLElement>("#feat-body");
+const elFeatCount = $<HTMLElement>("#feat-count");
+const elFeatDone = $<HTMLButtonElement>("#feat-done");
+const elFeatReset = $<HTMLButtonElement>("#feat-reset");
+const elFeatPresetButtons = Array.from(
+  elFeatModal.querySelectorAll<HTMLButtonElement>("[data-preset]")
+);
 const elColsMinus = $<HTMLButtonElement>("#cols-minus");
 const elColsPlus = $<HTMLButtonElement>("#cols-plus");
 const elColsValue = $<HTMLButtonElement>("#cols-value");
 const elWelcome = $<HTMLElement>("#welcome");
 const elWelcomeOk = $<HTMLButtonElement>("#welcome-ok");
 
-/** 老用户（已有图库）升级后保持专业模式，全新安装默认简洁模式。 */
-function detectUiMode(): UiMode {
-  const saved = localStorage.getItem(UI_MODE_KEY);
-  if (saved === "simple" || saved === "pro") return saved;
-  return localStorage.getItem(ROOT_KEY) ? "pro" : "simple";
+/** 全新安装默认简洁；已有图库的老用户升级上来保持专业，免得以为按钮全没了。 */
+function defaultKeys(): Set<string> {
+  return localStorage.getItem(ROOT_KEY) ? new Set(FEATURE_KEYS) : new Set(SIMPLE_KEYS);
 }
 
-let uiMode: UiMode = detectUiMode();
-/** 简洁档默认 2 列（图更大），专业档沿用原来的自适应宽度。 */
-const colsByMode: Record<UiMode, number | null> = { simple: 2, pro: null };
+function loadFeatures(): Set<string> {
+  const raw = localStorage.getItem(FEATURES_KEY);
+  if (raw !== null) {
+    try {
+      const arr: unknown = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        // 认不出的键直接丢掉：旧版本存下的清单里可能有已删掉的功能
+        return new Set(arr.filter((k): k is string => typeof k === "string" && FEATURE_KEYS.includes(k)));
+      }
+    } catch {
+      /* 手改坏了就退回默认，不让人卡在空白界面上 */
+    }
+  }
+  // 从旧版的 sp:ui-mode 迁移
+  const legacy = localStorage.getItem(UI_MODE_KEY);
+  if (legacy === "simple") return new Set(SIMPLE_KEYS);
+  if (legacy === "pro") return new Set(FEATURE_KEYS);
+  return defaultKeys();
+}
+
+let enabledFeatures = loadFeatures();
+
+function sameKeys(set: Set<string>, keys: Iterable<string>): boolean {
+  const arr = [...keys];
+  return arr.length === set.size && arr.every((k) => set.has(k));
+}
+
+function modeOf(set: Set<string>): UiMode {
+  if (sameKeys(set, SIMPLE_KEYS)) return "simple";
+  if (sameKeys(set, FEATURE_KEYS)) return "pro";
+  return "custom";
+}
+
+let uiMode: UiMode = modeOf(enabledFeatures);
+
+function persistFeatures() {
+  localStorage.setItem(FEATURES_KEY, JSON.stringify([...enabledFeatures]));
+}
+
+/** 只写 <html data-features>：CSS 一处生效，DOM 不销毁、状态不丢。 */
+function applyFeatures() {
+  uiMode = modeOf(enabledFeatures);
+  document.documentElement.dataset.features = FEATURE_KEYS.filter((k) =>
+    enabledFeatures.has(k)
+  ).join(" ");
+  document.documentElement.dataset.mode = uiMode;
+
+  const label = uiMode === "simple" ? "简洁" : uiMode === "pro" ? "专业" : "自定义";
+  elFeaturesLabel.textContent = label;
+  elBtnFeatures.dataset.preset = uiMode;
+  elBtnFeatures.title =
+    uiMode === "custom"
+      ? `当前：自定义显示 ${enabledFeatures.size} 项。点开逐项调整（⌘/Ctrl + ,）`
+      : `当前：${label}。点开可选择显示哪些功能（⌘/Ctrl + ,）`;
+  applyCols(colsByMode[uiMode]);
+  updateFeatChrome();
+}
+
+/** 换一个预设；列数、侧栏这些「档位级的习惯」跟着各档走。 */
+function applyPreset(mode: "simple" | "pro") {
+  const prev = uiMode;
+  enabledFeatures = new Set(mode === "simple" ? SIMPLE_KEYS : FEATURE_KEYS);
+  persistFeatures();
+  localStorage.setItem(UI_MODE_KEY, mode);
+  if (mode !== prev) {
+    // 自定义档沿用你离开时那档的列数，换档不该让图突然变大变小
+    colsByMode.custom = colsByMode[prev];
+    localStorage.setItem(`${COLS_KEY}custom`, colsByMode[prev] === null ? "auto" : String(colsByMode[prev]));
+  }
+  applyFeatures();
+  if (mode === "simple" && localStorage.getItem(SIDEBAR_KEY) === null) toggleSidebar(true);
+  setHint(
+    mode === "simple"
+      ? "已切到简洁模式：高级功能仍在，快捷键照用；点「功能」可逐项加回来。"
+      : "已切到专业模式：全部功能已显示，也可以在「功能」里逐项关掉。"
+  );
+}
+
+/** 单个开关：一改就不再是预设，标成「自定义」。 */
+function setFeature(key: string, on: boolean) {
+  if (!FEATURE_KEYS.includes(key)) return;
+  const prev = uiMode;
+  if (on) enabledFeatures.add(key);
+  else enabledFeatures.delete(key);
+  persistFeatures();
+  if (prev !== "custom") {
+    colsByMode.custom = colsByMode[prev];
+    localStorage.setItem(`${COLS_KEY}custom`, colsByMode[prev] === null ? "auto" : String(colsByMode[prev]));
+  }
+  applyFeatures();
+  // 藏了列表 / 侧栏时给一句交代：东西还在，只是没显示
+  if (!on) setHint("已隐藏这项功能，快捷键仍然可用。点顶栏「功能」可以再打开。");
+}
+
+/** 简洁档默认 2 列（图更大），专业 / 自定义沿用自适应宽度或你手动设的值。 */
+const colsByMode: Record<UiMode, number | null> = { simple: 2, pro: null, custom: null };
 
 function readCols(mode: UiMode): number | null {
   const raw = localStorage.getItem(`${COLS_KEY}${mode}`);
@@ -2513,6 +2702,7 @@ function readCols(mode: UiMode): number | null {
 
 colsByMode.simple = readCols("simple");
 colsByMode.pro = readCols("pro");
+colsByMode.custom = readCols("custom");
 
 /** 只改 CSS 轨道；方向键用的 gridColumns() 自己会数出来，不用同步。 */
 function applyCols(n: number | null) {
@@ -2544,33 +2734,125 @@ function gridThumbSize(): 512 | 1600 {
   return colsByMode[uiMode] === 1 ? 1600 : 512;
 }
 
-function applyUiMode(mode: UiMode, initial = false) {
-  uiMode = mode;
-  document.documentElement.dataset.mode = mode;
-  elBtnMode.setAttribute("aria-pressed", String(mode === "simple"));
-  elModeLabel.textContent = mode === "simple" ? "简洁" : "专业";
-  elBtnMode.title =
-    mode === "simple"
-      ? "当前：简洁模式。点一下切到专业模式（全部功能）"
-      : "当前：专业模式。点一下切到简洁模式（只留选片主路径）";
-  applyCols(colsByMode[mode]);
-  // 首次进简洁档、且用户从没动过侧栏 → 默认收起；之后完全尊重用户自己的选择
-  if (initial && mode === "simple" && localStorage.getItem(SIDEBAR_KEY) === null) {
-    toggleSidebar(true);
+// ---- 功能页 ---------------------------------------------------------------
+
+function updateFeatChrome() {
+  if (!elFeatModal) return;
+  elFeatCount.textContent = `已显示 ${enabledFeatures.size} / ${FEATURE_KEYS.length} 项`;
+  for (const btn of elFeatPresetButtons) {
+    const preset = btn.dataset.preset;
+    btn.classList.toggle("is-active", preset === uiMode);
   }
-  if (!initial) {
-    setHint(
-      mode === "simple"
-        ? "已切到简洁模式：高级功能仍在，快捷键照用，再点一次切回。"
-        : "已切到专业模式：全部功能已显示。"
-    );
-  }
+  elFeatBody.querySelectorAll<HTMLElement>(".feat-section").forEach((sec) => {
+    const section = sec.dataset.section as FeatureSection;
+    const defs = FEATURES.filter((f) => f.section === section);
+    const on = defs.filter((f) => enabledFeatures.has(f.key)).length;
+    const count = sec.querySelector<HTMLElement>(".feat-section-count");
+    if (count) count.textContent = `${on}/${defs.length}`;
+  });
 }
 
-elBtnMode.addEventListener("click", () => {
-  const next: UiMode = uiMode === "simple" ? "pro" : "simple";
-  localStorage.setItem(UI_MODE_KEY, next);
-  applyUiMode(next);
+function renderFeatureList() {
+  elFeatBody.textContent = "";
+  for (const section of FEATURE_SECTIONS) {
+    const defs = FEATURES.filter((f) => f.section === section);
+    if (defs.length === 0) continue;
+
+    const sec = document.createElement("section");
+    sec.className = "feat-section";
+    sec.dataset.section = section;
+
+    const head = document.createElement("div");
+    head.className = "feat-section-head";
+    const title = document.createElement("span");
+    title.textContent = section;
+    const count = document.createElement("span");
+    count.className = "feat-section-count";
+    head.append(title, count);
+
+    const grid = document.createElement("div");
+    grid.className = "feat-grid";
+
+    for (const f of defs) {
+      const row = document.createElement("label");
+      row.className = `feat-row${enabledFeatures.has(f.key) ? " is-on" : ""}`;
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = enabledFeatures.has(f.key);
+      input.dataset.key = f.key;
+
+      const sw = document.createElement("span");
+      sw.className = "feat-switch";
+      sw.setAttribute("aria-hidden", "true");
+
+      const text = document.createElement("span");
+      text.className = "feat-text";
+      const label = document.createElement("span");
+      label.className = "feat-label";
+      label.textContent = f.label;
+      text.appendChild(label);
+      if (f.note) {
+        const note = document.createElement("span");
+        note.className = "feat-note";
+        note.textContent = f.note;
+        text.appendChild(note);
+      }
+
+      row.append(input, sw, text);
+      grid.appendChild(row);
+    }
+
+    sec.append(head, grid);
+    elFeatBody.appendChild(sec);
+  }
+  updateFeatChrome();
+}
+
+function openFeatureDialog() {
+  renderFeatureList();
+  elFeatModal.hidden = false;
+  elFeatBody.scrollTop = 0;
+}
+
+function closeFeatureDialog() {
+  if (elFeatModal.hidden) return;
+  elFeatModal.hidden = true;
+  elBtnFeatures.focus();
+}
+
+elBtnFeatures.addEventListener("click", () => {
+  if (elFeatModal.hidden) openFeatureDialog();
+  else closeFeatureDialog();
+});
+elFeatDone.addEventListener("click", closeFeatureDialog);
+elFeatModal.addEventListener("click", (e) => {
+  if (e.target === elFeatModal) closeFeatureDialog();
+});
+
+elFeatReset.addEventListener("click", () => {
+  enabledFeatures = defaultKeys();
+  persistFeatures();
+  applyFeatures();
+  renderFeatureList();
+  setHint("已恢复推荐配置（新装为简洁，已有图库为专业）。");
+});
+
+for (const btn of elFeatPresetButtons) {
+  btn.addEventListener("click", () => {
+    const preset = btn.dataset.preset;
+    if (preset === "simple" || preset === "pro") applyPreset(preset);
+    renderFeatureList();
+  });
+}
+
+// 委托一次：列表重绘也不用重新绑监听
+elFeatBody.addEventListener("change", (e) => {
+  const input = e.target as HTMLInputElement;
+  if (input.type !== "checkbox" || !input.dataset.key) return;
+  setFeature(input.dataset.key, input.checked);
+  const row = input.closest<HTMLElement>(".feat-row");
+  row?.classList.toggle("is-on", input.checked);
 });
 
 elColsMinus.addEventListener("click", () => {
@@ -5264,6 +5546,7 @@ window.addEventListener("keydown", (e) => {
     [elCompareModal, closeCompareDialog],
     [elScopeModal, closeScopeModal],
     [elOffsetModal, () => { elOffsetModal.hidden = true; }],
+    [elFeatModal, closeFeatureDialog],
   ];
   const openModal = modals.find(([el]) => !el.hidden);
   if (openModal) {
@@ -5274,6 +5557,14 @@ window.addEventListener("keydown", (e) => {
       const top = Array.from(document.querySelectorAll<HTMLElement>(".modal:not([hidden])")).pop();
       if (top) trapModalTab(e, top);
     }
+    return;
+  }
+
+  // ⌘, / Ctrl+, 打开「显示哪些功能」。放在输入框判断之前——
+  // 正在搜索框里打字时按它，也应该是打开设置，而不是打出一个逗号。
+  if (meta && key === ",") {
+    e.preventDefault();
+    openFeatureDialog();
     return;
   }
 
@@ -5777,9 +6068,11 @@ async function boot() {
   // 画质阈值由后端统一下发，别在前端再抄一份常量
   await loadQualityConfig();
 
-  // 界面档位与列数：head 里的内联脚本已经预置了 data-mode 防闪烁，
-  // 这里补齐按钮状态、该档自己的列数，以及首次启动的一屏键位卡。
-  applyUiMode(uiMode, true);
+  // 界面开关：head 里的内联脚本已经预置了 data-mode 防闪烁，
+  // 这里把真正的启用清单写进 data-features、补齐列数与按钮状态。
+  applyFeatures();
+  // 首次进简洁档、且用户从没动过侧栏 → 默认收起；之后完全尊重用户自己的选择
+  if (uiMode === "simple" && localStorage.getItem(SIDEBAR_KEY) === null) toggleSidebar(true);
   toggleHistogram(histOpen);
   showWelcomeIfNeeded();
 

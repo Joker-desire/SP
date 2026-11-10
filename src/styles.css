@@ -3190,32 +3190,83 @@ html[data-cols] .group-grid {
   .card-rate { display: flex; }
 }
 
-/* ---------- 简洁 / 专业一键切换 ---------- */
+/* ---------- 显示哪些功能：按 data-feature 逐项开关 ----------
+   两段规则做同一件事：
+   A. data-mode 兜底 —— main.ts 还没把启用清单写进 DOM 时，先按档位藏好，
+      避免首帧闪一下全部按钮（老用户升级时尤其明显）。
+   B. data-features —— 真正的开关，值是「启用的功能键」空格分隔清单。
+      只要用户动过任何一项，A 段就自动失效（:not([data-features])）。
+   注意这里**不藏**：更新面板、进度条、错误横幅、导入 / 导出、
+   #btn-clear（筛选生效时它就是「一键清除」）。筛选藏了，出口不能藏。 */
 .btn-mode { gap: 5px; }
 .mode-label { font-size: 11.5px; color: var(--text-dim); }
-.btn-mode[aria-pressed="true"] { border-color: var(--accent); }
-.btn-mode[aria-pressed="true"] .mode-label { color: var(--accent); font-weight: 600; }
+.btn-mode[data-preset="simple"],
+.btn-mode[data-preset="custom"] { border-color: var(--accent); }
+.btn-mode[data-preset="simple"] .mode-label,
+.btn-mode[data-preset="custom"] .mode-label { color: var(--accent); font-weight: 600; }
+.btn-mode[data-preset="custom"] { border-style: dashed; }
 
-/* 注意这里**不藏**：更新面板、进度条、错误横幅、导出、缓存占用、
-   #btn-clear（筛选生效时它就是「一键清除」）。筛选藏了，出口不能藏。 */
-html[data-mode="simple"] #btn-rescan,
-html[data-mode="simple"] #btn-cache,
-html[data-mode="simple"] #btn-similar,
-html[data-mode="simple"] #btn-clear-lib,
-html[data-mode="simple"] #btn-undo,
-html[data-mode="simple"] #btn-redo,
-html[data-mode="simple"] #group-mode,
-html[data-mode="simple"] #sort,
-html[data-mode="simple"] #btn-unmark,
-html[data-mode="simple"] #btn-select-all,
-html[data-mode="simple"] #btn-invert,
-html[data-mode="simple"] #btn-select-none,
-html[data-mode="simple"] #bulk,
-html[data-mode="simple"] .facet-group:not([data-group="decision"]):not([data-group="stars"]):not([data-group="colors"]) {
+html[data-mode="simple"]:not([data-features]) [data-feature="rescan"],
+html[data-mode="simple"]:not([data-features]) [data-feature="cache"],
+html[data-mode="simple"]:not([data-features]) [data-feature="similar"],
+html[data-mode="simple"]:not([data-features]) [data-feature="clearLib"],
+html[data-mode="simple"]:not([data-features]) [data-feature="undoRedo"],
+html[data-mode="simple"]:not([data-features]) [data-feature="groupBy"],
+html[data-mode="simple"]:not([data-features]) [data-feature="sort"],
+html[data-mode="simple"]:not([data-features]) [data-feature="unmark"],
+html[data-mode="simple"]:not([data-features]) [data-feature="selectOps"],
+html[data-mode="simple"]:not([data-features]) [data-feature="bulk"],
+html[data-mode="simple"]:not([data-features]) [data-feature="facetQuality"],
+html[data-mode="simple"]:not([data-features]) [data-feature="facetPair"],
+html[data-mode="simple"]:not([data-features]) [data-feature="facetShape"],
+html[data-mode="simple"]:not([data-features]) [data-feature="facetDays"],
+html[data-mode="simple"]:not([data-features]) [data-feature="facetFocal"],
+html[data-mode="simple"]:not([data-features]) [data-feature="facetIso"],
+html[data-mode="simple"]:not([data-features]) [data-feature="facetCamera"],
+html[data-mode="simple"]:not([data-features]) [data-feature="facetLens"] {
   display: none !important;
 }
 
-html[data-mode="simple"] #btn-clear {
+html[data-features]:not([data-features~="rescan"]) [data-feature="rescan"],
+html[data-features]:not([data-features~="cache"]) [data-feature="cache"],
+html[data-features]:not([data-features~="similar"]) [data-feature="similar"],
+html[data-features]:not([data-features~="clearLib"]) [data-feature="clearLib"],
+html[data-features]:not([data-features~="undoRedo"]) [data-feature="undoRedo"],
+html[data-features]:not([data-features~="groupBy"]) [data-feature="groupBy"],
+html[data-features]:not([data-features~="theme"]) [data-feature="theme"],
+html[data-features]:not([data-features~="search"]) [data-feature="search"],
+html[data-features]:not([data-features~="sort"]) [data-feature="sort"],
+html[data-features]:not([data-features~="cols"]) [data-feature="cols"],
+html[data-features]:not([data-features~="keepReject"]) [data-feature="keepReject"],
+html[data-features]:not([data-features~="unmark"]) [data-feature="unmark"],
+html[data-features]:not([data-features~="stars"]) [data-feature="stars"],
+html[data-features]:not([data-features~="selectOps"]) [data-feature="selectOps"],
+html[data-features]:not([data-features~="bulk"]) [data-feature="bulk"],
+html[data-features]:not([data-features~="cullInfo"]) [data-feature="cullInfo"],
+html[data-features]:not([data-features~="facetDecision"]) [data-feature="facetDecision"],
+html[data-features]:not([data-features~="facetStars"]) [data-feature="facetStars"],
+html[data-features]:not([data-features~="facetColors"]) [data-feature="facetColors"],
+html[data-features]:not([data-features~="facetQuality"]) [data-feature="facetQuality"],
+html[data-features]:not([data-features~="facetPair"]) [data-feature="facetPair"],
+html[data-features]:not([data-features~="facetShape"]) [data-feature="facetShape"],
+html[data-features]:not([data-features~="facetDays"]) [data-feature="facetDays"],
+html[data-features]:not([data-features~="facetFocal"]) [data-feature="facetFocal"],
+html[data-features]:not([data-features~="facetIso"]) [data-feature="facetIso"],
+html[data-features]:not([data-features~="facetCamera"]) [data-feature="facetCamera"],
+html[data-features]:not([data-features~="facetLens"]) [data-feature="facetLens"],
+html[data-features]:not([data-features~="loupeZoom"]) [data-feature="loupeZoom"],
+html[data-features]:not([data-features~="loupeDetail"]) [data-feature="loupeDetail"],
+html[data-features]:not([data-features~="loupeAf"]) [data-feature="loupeAf"],
+html[data-features]:not([data-features~="loupeHist"]) [data-feature="loupeHist"],
+html[data-features]:not([data-features~="loupeStars"]) [data-feature="loupeStars"],
+html[data-features]:not([data-features~="loupeColors"]) [data-feature="loupeColors"],
+html[data-features]:not([data-features~="loupeKeys"]) [data-feature="loupeKeys"] {
+  display: none !important;
+}
+
+/* 简洁 / 自定义下高级控件都收了，「清除筛选」是唯一的显性出口，给个胶囊强调 */
+html[data-mode="simple"] #btn-clear,
+html[data-mode="custom"] #btn-clear {
   border-radius: 999px;
   border-color: var(--accent);
   color: var(--accent);
@@ -3451,3 +3502,185 @@ html[data-theme="light"] .zbtn.is-active {
   color: var(--accent-text);
   background: var(--accent-soft);
 }
+
+/* ===========================================================================
+   显示哪些功能（自定义页面）
+   ---------------------------------------------------------------------------
+   和「简洁 / 专业」的区别：那两档是预设，这里是一项一项勾。
+   勾选立刻写进 html[data-features]，背后就是真实界面，所见即所得。
+   =========================================================================== */
+
+.feat-modal { z-index: 85; }
+
+.feat-box {
+  width: min(780px, 100%);
+  max-height: 100%;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.feat-head {
+  padding: 20px 22px 10px;
+}
+
+.feat-head .modal-title { margin-bottom: 6px; }
+
+.feat-sub {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--text-dim);
+}
+
+/* ---- 预设：三个按钮，点一下套一整组勾选 ---- */
+.feat-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 22px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.feat-preset {
+  flex: 1 1 150px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 12px;
+  text-align: left;
+  font: inherit;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.feat-preset b { font-size: 12.5px; font-weight: 600; }
+.feat-preset span { font-size: 11px; color: var(--text-mute); }
+
+.feat-preset:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.feat-preset.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.feat-preset.is-active b { color: var(--accent-text); }
+.feat-preset.is-active span { color: var(--accent-text); opacity: 0.8; }
+
+/* ---- 清单：按区域分组，两列排 ---- */
+.feat-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 6px 22px 14px;
+}
+
+.feat-section + .feat-section { margin-top: 4px; }
+
+.feat-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 2px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+}
+
+.feat-section-count { font-weight: 400; letter-spacing: 0; }
+
+.feat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 10px;
+}
+
+@media (max-width: 620px) {
+  .feat-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.feat-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+
+.feat-row:hover { background: var(--bg-hover); }
+
+/* 真 checkbox 藏在开关底下：键盘 Tab 能聚焦，读屏也认得 */
+.feat-row input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.feat-switch {
+  flex: 0 0 auto;
+  position: relative;
+  width: 30px;
+  height: 17px;
+  margin-top: 1px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transition: background var(--dur) var(--ease);
+}
+
+.feat-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform var(--dur) var(--ease);
+}
+
+.feat-row input:checked + .feat-switch { background: var(--accent); }
+.feat-row input:checked + .feat-switch::after { transform: translateX(13px); }
+.feat-row input:focus-visible + .feat-switch {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.feat-text { min-width: 0; }
+.feat-label { display: block; font-size: 12.5px; line-height: 1.35; }
+.feat-note { display: block; font-size: 11px; line-height: 1.45; color: var(--text-mute); }
+
+/* 关掉的那项把文字压暗一点，扫一眼就知道哪些没开 */
+.feat-row:not(.is-on) .feat-label { color: var(--text-dim); }
+
+/* ---- 底部：计数 + 固定出口说明 + 两个按钮 ---- */
+.feat-foot {
+  align-items: center;
+  margin-top: 0;
+  padding: 12px 22px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.feat-foot-info {
+  margin-right: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.feat-count { font-size: 11.5px; color: var(--text-dim); }
+.feat-locked { font-size: 10.5px; color: var(--text-mute); }

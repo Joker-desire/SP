@@ -5,15 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>S·P 选片</title>
     <script>
-      // 界面档位在 CSS 加载前定好，避免启动时先闪一下专业版再切到简洁版。
-      // 老用户（已有图库）升级后保持专业模式，全新安装默认简洁模式。
+      // 界面开关在 CSS 加载前定好，避免启动时先闪一下全部按钮再藏起来。
+      // 两件事：① 用户自定义过的功能清单直接写进 data-features；
+      //        ② 没有清单时按档位给个兜底（老用户升级保持专业，全新安装简洁）。
       try {
+        var f = localStorage.getItem("sp:features");
+        if (f) {
+          document.documentElement.dataset.features = (JSON.parse(f) || []).join(" ");
+        }
         var m = localStorage.getItem("sp:ui-mode");
         if (m !== "simple" && m !== "pro") {
           m = localStorage.getItem("sp:root") ? "pro" : "simple";
         }
         document.documentElement.dataset.mode = m;
-      } catch (_) { /* localStorage 不可用就用上面的默认档 */ }
+      } catch (_) { /* localStorage 不可用就用 HTML 上的默认档 */ }
     </script>
     <link rel="stylesheet" href="/src/styles.css" />
     <script type="module" src="/src/main.ts" defer></script>
@@ -45,22 +50,23 @@
       </div>
 
       <div class="topbar-actions">
-        <!-- 一键切换简洁 / 专业。只改「哪些控件可见」，底层仍是同一套 DOM 与快捷键。 -->
+        <!-- 显示哪些功能：打开自定义页面逐项勾选。简洁 / 专业只是两组预设，
+             底层仍是同一套 DOM 与快捷键，藏起来的功能快捷键照常可用。 -->
         <button
           class="btn btn-ghost btn-mode"
-          id="btn-mode"
-          aria-pressed="false"
-          title="切换界面模式"
-          aria-label="切换界面模式"
+          id="btn-features"
+          title="选择显示哪些功能（⌘/Ctrl + ,）"
+          aria-label="选择显示哪些功能"
         >
           <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
-            <rect x="1.8" y="3.2" width="12.4" height="9.6" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3" />
-            <path d="M5.4 3.2v9.6M5.4 7.2h5.2M5.4 9.8h3.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+            <path d="M2.2 5h6.1M11.5 5h2.3M2.2 11h2.3M7.7 11h6.1" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" />
+            <circle cx="10.1" cy="5" r="1.5" fill="none" stroke="currentColor" stroke-width="1.35" />
+            <circle cx="6.2" cy="11" r="1.5" fill="none" stroke="currentColor" stroke-width="1.35" />
           </svg>
-          <span class="mode-label" id="mode-label">专业</span>
+          <span class="mode-label" id="features-label">专业</span>
         </button>
 
-        <button class="btn btn-ghost btn-icon" id="btn-theme" title="切换深浅色" aria-label="切换深浅色">
+        <button class="btn btn-ghost btn-icon" id="btn-theme" data-feature="theme" title="切换深浅色" aria-label="切换深浅色">
           <svg class="icon icon-sun" viewBox="0 0 16 16" aria-hidden="true">
             <circle cx="8" cy="8" r="3.1" fill="none" stroke="currentColor" stroke-width="1.4" />
             <g stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
@@ -91,7 +97,7 @@
           <span class="update-dot" id="update-dot" hidden></span>
         </button>
 
-        <button class="btn btn-ghost" id="btn-rescan" disabled>
+        <button class="btn btn-ghost" id="btn-rescan" data-feature="rescan" disabled>
           <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
             <path
               d="M13.2 8a5.2 5.2 0 1 1-1.6-3.8"
@@ -105,7 +111,7 @@
           <span class="btn-text">重新扫描</span>
         </button>
 
-        <button class="btn btn-ghost" id="btn-cache" title="清理缩略图缓存 / 照片索引（不会碰原片）">
+        <button class="btn btn-ghost" id="btn-cache" data-feature="cache" title="清理缩略图缓存 / 照片索引（不会碰原片）">
           <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
             <path
               d="M2.7 4.3h10.6M6.3 4.3V2.9h3.4v1.4M4.3 4.3l.7 8.2c0 .6.5 1.1 1.1 1.1h4c.6 0 1.1-.5 1.1-1.1l.7-8.2"
@@ -123,6 +129,7 @@
         <button
           class="btn btn-ghost"
           id="btn-similar"
+          data-feature="similar"
           title="把连着拍的照片按时间分组，一次挑出最好的一张"
         >
           <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -162,28 +169,28 @@
           <span class="btn-text">选择文件夹</span>
         </button>
 
-        <button class="btn btn-ghost" id="btn-clear-lib" hidden title="清空当前文件夹（不删原片、不丢标记），回到「选择文件夹」状态">
+        <button class="btn btn-ghost" id="btn-clear-lib" data-feature="clearLib" hidden title="清空当前文件夹（不删原片、不丢标记），回到「选择文件夹」状态">
           <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
             <path d="M2.7 4.3h10.6M6.3 4.3V2.9h3.4v1.4M4.3 4.3l.7 8.2c0 .6.5 1.1 1.1 1.1h4c.6 0 1.1-.5 1.1-1.1l.7-8.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <span class="btn-text">清空</span>
         </button>
 
-        <button class="btn btn-ghost" id="btn-undo" disabled title="没有可撤销的标记操作（⌘Z / Ctrl+Z）">
+        <button class="btn btn-ghost" id="btn-undo" data-feature="undoRedo" disabled title="没有可撤销的标记操作（⌘Z / Ctrl+Z）">
           <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
             <path d="M6.4 4.6 3.2 7.8l3.2 3.2M3.2 7.8h5.4a3.3 3.3 0 0 1 0 6.6H6.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <span class="btn-text">撤销</span>
         </button>
 
-        <button class="btn btn-ghost" id="btn-redo" disabled title="没有可重做的操作（⇧⌘Z / Ctrl+Shift+Z）">
+        <button class="btn btn-ghost" id="btn-redo" data-feature="undoRedo" disabled title="没有可重做的操作（⇧⌘Z / Ctrl+Shift+Z）">
           <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
             <path d="M9.6 4.6l3.2 3.2-3.2 3.2M12.8 7.8H7.4a3.3 3.3 0 0 0 0 6.6h2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           <span class="btn-text">重做</span>
         </button>
 
-        <select class="select" id="group-mode" aria-label="分组依据" title="分组视图按什么依据收组" hidden>
+        <select class="select" id="group-mode" data-feature="groupBy" aria-label="分组依据" title="分组视图按什么依据收组" hidden>
           <option value="folder">按文件夹分组</option>
           <option value="decision">按选片状态分组</option>
           <option value="stars">按星级分组</option>
@@ -232,22 +239,22 @@
 
           <!-- 选片状态排在最前：这是每天真正要用的那一栏，
                文件类型 / 日期 / 机身是「怎么找到这批照片」，它是「怎么处理这批照片」。 -->
-          <section class="facet-group facet-group--lead" data-group="decision">
+          <section class="facet-group facet-group--lead" data-group="decision" data-feature="facetDecision">
             <h3 class="facet-title">选片状态</h3>
             <div class="facet-list" id="facets-decision"></div>
           </section>
 
-          <section class="facet-group" data-group="stars">
+          <section class="facet-group" data-group="stars" data-feature="facetStars">
             <h3 class="facet-title">星级</h3>
             <div class="facet-list facet-list--stars" id="facets-stars"></div>
           </section>
 
-          <section class="facet-group" data-group="colors">
+          <section class="facet-group" data-group="colors" data-feature="facetColors">
             <h3 class="facet-title">色标</h3>
             <div class="facet-list facet-list--colors" id="facets-colors"></div>
           </section>
 
-          <section class="facet-group" id="group-quality" data-group="quality" hidden>
+          <section class="facet-group" id="group-quality" data-group="quality" data-feature="facetQuality" hidden>
             <h3 class="facet-title">
               画面质量
               <span class="facet-title-note" id="quality-note"></span>
@@ -255,17 +262,17 @@
             <div class="facet-list" id="facets-quality"></div>
           </section>
 
-          <section class="facet-group" data-group="pair">
+          <section class="facet-group" data-group="pair" data-feature="facetPair">
             <h3 class="facet-title">文件类型</h3>
             <div class="facet-list" id="facets-pair"></div>
           </section>
 
-          <section class="facet-group" id="group-shape" data-group="shape" hidden>
+          <section class="facet-group" id="group-shape" data-group="shape" data-feature="facetShape" hidden>
             <h3 class="facet-title">画幅方向</h3>
             <div class="facet-list" id="facets-shape"></div>
           </section>
 
-          <section class="facet-group" data-group="days">
+          <section class="facet-group" data-group="days" data-feature="facetDays">
             <h3 class="facet-title">
               拍摄日期
               <span class="facet-title-note" id="days-note"></span>
@@ -273,17 +280,17 @@
             <div class="facet-list facet-list--days" id="facets-days"></div>
           </section>
 
-          <section class="facet-group" id="group-params" data-group="focal" hidden>
+          <section class="facet-group" id="group-params" data-group="focal" data-feature="facetFocal" hidden>
             <h3 class="facet-title">焦段</h3>
             <div class="facet-list" id="facets-focal"></div>
           </section>
 
-          <section class="facet-group" id="group-iso" data-group="iso" hidden>
+          <section class="facet-group" id="group-iso" data-group="iso" data-feature="facetIso" hidden>
             <h3 class="facet-title">ISO</h3>
             <div class="facet-list" id="facets-iso"></div>
           </section>
 
-          <section class="facet-group" data-group="cameras">
+          <section class="facet-group" data-group="cameras" data-feature="facetCamera">
             <h3 class="facet-title">
               机身
               <button class="facet-link" id="btn-time-offset" hidden title="两台机身时钟不同步时，在这里校正">时间校正</button>
@@ -291,7 +298,7 @@
             <div class="facet-list" id="facets-cameras"></div>
           </section>
 
-          <section class="facet-group" id="group-lens" data-group="lens" hidden>
+          <section class="facet-group" id="group-lens" data-group="lens" data-feature="facetLens" hidden>
             <h3 class="facet-title">
               镜头
               <span class="facet-title-note" id="lens-note"></span>
@@ -315,7 +322,7 @@
         </div>
 
         <div class="toolbar">
-          <div class="search-wrap">
+          <div class="search-wrap" data-feature="search">
             <svg class="icon search-icon" viewBox="0 0 16 16" aria-hidden="true">
               <circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4" />
               <path d="M10.2 10.2 14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
@@ -324,7 +331,7 @@
             <button class="search-clear" id="search-clear" hidden aria-label="清除搜索">×</button>
           </div>
 
-          <select class="select" id="sort" aria-label="排序">
+          <select class="select" id="sort" data-feature="sort" aria-label="排序">
             <option value="takenDesc">拍摄时间 · 新 → 旧</option>
             <option value="takenAsc">拍摄时间 · 旧 → 新</option>
             <option value="nameAsc">文件名 · A → Z</option>
@@ -337,7 +344,7 @@
 
         <!-- 自定义列数：2 列能把小图放大到看得清脸，1 列接近单张看图但仍可打标。
              中间那颗显示当前值，点一下回到「自动」（按窗口宽度排）。 -->
-        <div class="cols-control" id="cols-control" role="group" aria-label="网格列数">
+        <div class="cols-control" id="cols-control" data-feature="cols" role="group" aria-label="网格列数">
           <button class="cols-btn" id="cols-minus" type="button" title="少一列（图片更大）" aria-label="减少列数">−</button>
           <button class="cols-value" id="cols-value" type="button" title="恢复自动列数">自动</button>
           <button class="cols-btn" id="cols-plus" type="button" title="多一列（图片更小）" aria-label="增加列数">+</button>
@@ -353,22 +360,22 @@
              选中一批 → 按一下键 → 状态立刻落到卡片上。 -->
         <div class="cullbar" id="cullbar" hidden>
           <div class="cullbar-side">
-            <button class="cbtn cbtn--keep" id="btn-keep" title="标记为保留（快捷键 P）">
+            <button class="cbtn cbtn--keep" id="btn-keep" data-feature="keepReject" title="标记为保留（快捷键 P）">
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="m3.2 8.4 3.2 3.2 6.4-7.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
               保留<kbd>P</kbd>
             </button>
-            <button class="cbtn cbtn--reject" id="btn-reject" title="标记为淘汰（快捷键 X）">
+            <button class="cbtn cbtn--reject" id="btn-reject" data-feature="keepReject" title="标记为淘汰（快捷键 X）">
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
               </svg>
               淘汰<kbd>X</kbd>
             </button>
-            <button class="cbtn" id="btn-unmark" title="清除标记与星级（快捷键 U）">清除<kbd>U</kbd></button>
+            <button class="cbtn" id="btn-unmark" data-feature="unmark" title="清除标记与星级（快捷键 U）">清除<kbd>U</kbd></button>
           </div>
 
-          <div class="cullbar-stars" id="cullbar-stars" role="group" aria-label="星级">
+          <div class="cullbar-stars" id="cullbar-stars" data-feature="stars" role="group" aria-label="星级">
             <button type="button" data-stars="1" title="1 星">★</button>
             <button type="button" data-stars="2" title="2 星">★</button>
             <button type="button" data-stars="3" title="3 星">★</button>
@@ -377,13 +384,13 @@
             <button type="button" data-stars="0" class="is-clear" title="清除星级">0</button>
           </div>
 
-          <div class="cullbar-info" id="cullbar-info">单击选中 · 双击看大图</div>
+          <div class="cullbar-info" id="cullbar-info" data-feature="cullInfo">单击选中 · 双击看大图</div>
 
           <div class="cullbar-side cullbar-side--end">
-            <button class="cbtn" id="btn-select-all" title="选中当前筛选下的全部照片（⌘/Ctrl + A）">全选</button>
-            <button class="cbtn" id="btn-invert" title="选中当前筛选下还没被选中的">反选</button>
-            <button class="cbtn" id="btn-select-none" title="取消选择（Esc）">取消</button>
-            <div class="bulk" id="bulk">
+            <button class="cbtn" id="btn-select-all" data-feature="selectOps" title="选中当前筛选下的全部照片（⌘/Ctrl + A）">全选</button>
+            <button class="cbtn" id="btn-invert" data-feature="selectOps" title="选中当前筛选下还没被选中的">反选</button>
+            <button class="cbtn" id="btn-select-none" data-feature="selectOps" title="取消选择（Esc）">取消</button>
+            <div class="bulk" id="bulk" data-feature="bulk">
               <button class="cbtn" id="btn-bulk" aria-haspopup="true" aria-expanded="false" title="对当前筛选出来的每张照片一次性标记（含还没滚出来的那些），⌘Z 可整批撤销">批量 ▾</button>
               <div class="bulk-menu" id="bulk-menu" hidden>
                 <button type="button" data-bulk="keep">标为保留</button>
@@ -445,7 +452,7 @@
           <span><kbd>←</kbd><kbd>→</kbd> 翻页</span>
           <span><kbd>Esc</kbd> 关闭大图</span>
         </div>
-        <p class="welcome-note">想用全部高级功能？点顶栏「简洁 / 专业」一键切过去。</p>
+        <p class="welcome-note">想用更多功能？点顶栏「功能」逐项勾选，或直接套「专业」预设。</p>
         <button class="btn btn-primary welcome-ok" id="welcome-ok" type="button">知道了，开始选片</button>
       </div>
     </div>
@@ -461,7 +468,7 @@
 
       <div class="loupe-stage">
         <!-- 缩放控件浮在图上：放大看细节是选片时的高频动作，不该让人去底栏找 -->
-        <div class="loupe-zoom" id="loupe-zoom">
+        <div class="loupe-zoom" id="loupe-zoom" data-feature="loupeZoom">
           <button class="zbtn" id="loupe-zoom-out" title="缩小（快捷键 -）" aria-label="缩小">
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           </button>
@@ -520,13 +527,13 @@
             淘汰<kbd>X</kbd>
           </button>
           <button class="cbtn" id="loupe-unmark" title="清除标记（U）">清除<kbd>U</kbd></button>
-          <button class="cbtn" id="loupe-detail" title="详细信息（I）">详情<kbd>I</kbd></button>
-          <button class="cbtn" id="loupe-af-toggle" title="显示相机记录的对焦框（O）">对焦点<kbd>O</kbd></button>
-          <button class="cbtn" id="loupe-histogram" title="显示 RGB / 亮度直方图（H）">直方图<kbd>H</kbd></button>
+          <button class="cbtn" id="loupe-detail" data-feature="loupeDetail" title="详细信息（I）">详情<kbd>I</kbd></button>
+          <button class="cbtn" id="loupe-af-toggle" data-feature="loupeAf" title="显示相机记录的对焦框（O）">对焦点<kbd>O</kbd></button>
+          <button class="cbtn" id="loupe-histogram" data-feature="loupeHist" title="显示 RGB / 亮度直方图（H）">直方图<kbd>H</kbd></button>
 
           <!-- 星级放一组可点的按钮：按 1-5 打星，按完停在原地，
                再按别的数字就是调整——打星是评价，不是过片 -->
-          <div class="loupe-stars" id="loupe-stars" role="group" aria-label="星级">
+          <div class="loupe-stars" id="loupe-stars" data-feature="loupeStars" role="group" aria-label="星级">
             <button type="button" data-stars="1" title="1 星（快捷键 1）">★</button>
             <button type="button" data-stars="2" title="2 星（快捷键 2）">★</button>
             <button type="button" data-stars="3" title="3 星（快捷键 3）">★</button>
@@ -537,7 +544,7 @@
 
           <!-- 色标同理做成可点的：键盘 6-9 和减号能按，鼠标这边也要能点。
                再点一次同一个色＝取消，和键盘一个规矩 -->
-          <div class="loupe-colors" id="loupe-colors" role="group" aria-label="色标">
+          <div class="loupe-colors" id="loupe-colors" data-feature="loupeColors" role="group" aria-label="色标">
             <button type="button" data-color="red" title="红 6">红<kbd>6</kbd></button>
             <button type="button" data-color="yellow" title="黄 7">黄<kbd>7</kbd></button>
             <button type="button" data-color="green" title="绿 8">绿<kbd>8</kbd></button>
@@ -552,7 +559,7 @@
           <span class="loupe-name" id="loupe-name"></span>
           <span class="loupe-exif" id="loupe-exif"></span>
           <span class="loupe-pos" id="loupe-pos"></span>
-          <span class="loupe-keys">← → 翻页 · P/X 标记 · 1-5 打星 · 0 清星 · 6-9 与 - 色标 · I 详情 · O 对焦点 · H 直方图 · + 放大 / _ 缩小 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
+          <span class="loupe-keys" data-feature="loupeKeys">← → 翻页 · P/X 标记 · 1-5 打星 · 0 清星 · 6-9 与 - 色标 · I 详情 · O 对焦点 · H 直方图 · + 放大 / _ 缩小 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
           <button class="btn btn-ghost loupe-close" id="loupe-close">关闭</button>
         </div>
       </div>
@@ -838,6 +845,40 @@
       <div class="update-actions">
         <button class="btn btn-ghost" id="update-later">稍后</button>
         <button class="btn btn-primary" id="update-now">立即更新</button>
+      </div>
+    </div>
+
+    <!-- ── 显示哪些功能：逐项勾选，勾完立刻生效，背后就是真实界面 ──────
+         简洁 / 专业只是两组预设；改任何一项就变成「自定义」。
+         选项由 main.ts 里的 FEATURES 清单生成，加新控件只需登记一行。 -->
+    <div class="modal feat-modal" id="feat-modal" hidden>
+      <div class="modal-box feat-box" role="dialog" aria-modal="true" aria-labelledby="feat-title">
+        <div class="feat-head">
+          <h2 class="modal-title" id="feat-title">显示哪些功能</h2>
+          <p class="feat-sub">
+            勾上就显示，取消就藏起来。只改可见性 —— 已选的筛选、已经打的标记、被藏起来的快捷键都不会丢。
+          </p>
+        </div>
+
+        <div class="feat-presets" role="group" aria-label="快速预设">
+          <button class="feat-preset" type="button" data-preset="simple">
+            <b>简洁</b><span>导入 · 看图 · 标记 · 导出</span>
+          </button>
+          <button class="feat-preset" type="button" data-preset="pro">
+            <b>专业</b><span>全部功能都显示</span>
+          </button>
+        </div>
+
+        <div class="feat-body" id="feat-body"></div>
+
+        <div class="modal-foot feat-foot">
+          <div class="feat-foot-info">
+            <span class="feat-count" id="feat-count"></span>
+            <span class="feat-locked">导入、导出、清除筛选、更新入口始终显示，避免把自己关在外面</span>
+          </div>
+          <button class="btn" id="feat-reset" type="button">恢复推荐</button>
+          <button class="btn btn-primary" id="feat-done" type="button">完成</button>
+        </div>
       </div>
     </div>
 
