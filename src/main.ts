@@ -890,6 +890,27 @@ function cardEl(c: PairCard): HTMLElement {
   const overlay = document.createElement("div");
   overlay.className = "card-overlay";
 
+  // 一步打星：hover 时浮出 5 颗可点的星，点一下就写库，不用先点开大图。
+  // 按钮不带独立 listener，统一由 elGrid 的 click 委托处理。
+  const rate = document.createElement("div");
+  rate.className = "card-rate";
+  rate.setAttribute("aria-label", "直接打星");
+  for (let n = 1; n <= 5; n += 1) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.rate = String(n);
+    b.textContent = "★";
+    b.title = `${n} 星`;
+    rate.appendChild(b);
+  }
+  const rateClear = document.createElement("button");
+  rateClear.type = "button";
+  rateClear.dataset.rate = "0";
+  rateClear.className = "card-rate-clear";
+  rateClear.textContent = "0";
+  rateClear.title = "清除星级";
+  rate.appendChild(rateClear);
+
   const foot = document.createElement("div");
   foot.className = "card-foot";
 
@@ -917,7 +938,7 @@ function cardEl(c: PairCard): HTMLElement {
     span.textContent = bits.join(" · ");
     sub.appendChild(span);
   }
-  overlay.append(foot, sub);
+  overlay.append(rate, foot, sub);
 
   card.append(ph, img, mark, stripe, overlay);
 
@@ -964,6 +985,11 @@ function paintCard(card: HTMLElement, c: PairCard) {
     stars.textContent = c.stars > 0 ? "★".repeat(c.stars) : "";
   }
 
+  card.querySelectorAll<HTMLButtonElement>(".card-rate button[data-rate]").forEach((b) => {
+    const n = Number(b.dataset.rate);
+    b.classList.toggle("is-active", n > 0 && n <= c.stars);
+  });
+
   const stripe = card.querySelector<HTMLElement>(".card-color");
   if (stripe) {
     stripe.hidden = c.color === "";
@@ -988,7 +1014,7 @@ async function hydrate(card: HTMLElement) {
   card.dataset.epoch = epoch;
   card.dataset.state = "loading";
   try {
-    const t = await loadThumb(id, 512);
+    const t = await loadThumb(id, gridThumbSize());
     // 期间可能被滚远了（状态被改回 idle），那就不要白占内存
     if (card.dataset.state !== "loading" || card.dataset.epoch !== epoch) return;
     img.src = t.dataUrl;
@@ -2027,6 +2053,9 @@ function renderActiveFilters() {
 
   elActiveFilters.hidden = chips.length === 0;
   elActiveCount.textContent = String(chips.length);
+  // 简洁模式下侧栏会收起，工具栏这颗「清除筛选」就是唯一的一键出口，
+  // 把条件数写在按钮上，别让人筛完了找不到在哪清。
+  elClear.textContent = chips.length > 0 ? `清除筛选（${chips.length}）` : "清除筛选";
   elClearAll.title = `清除全部 ${chips.length} 个筛选条件`;
   elActiveList.replaceChildren();
 
@@ -2376,18 +2405,171 @@ async function invertSelection() {
   syncSelection();
 }
 
+// ---------------------------------------------------------------------------
+// 一屏选片：当前目标 / 自定义列数 / 简洁·专业切换
+//
+// 这三条都只改「界面怎么显示」，不碰选片数据：切模式不改 filter / selection /
+// groupMode，被藏起来的按钮对应的快捷键照常可用（⌘Z、P/X/U、1-5、I、F…）。
+// ---------------------------------------------------------------------------
+
+type UiMode = "simple" | "pro";
+const UI_MODE_KEY = "sp:ui-mode";
+const COLS_KEY = "sp:cols:"; // 后面接档位，两档各记各的列数
+const WELCOME_KEY = "sp:welcome-seen";
+const MIN_COLS = 1;
+const MAX_COLS = 8;
+
+const elBtnMode = $<HTMLButtonElement>("#btn-mode");
+const elModeLabel = $<HTMLElement>("#mode-label");
+const elColsMinus = $<HTMLButtonElement>("#cols-minus");
+const elColsPlus = $<HTMLButtonElement>("#cols-plus");
+const elColsValue = $<HTMLButtonElement>("#cols-value");
+const elWelcome = $<HTMLElement>("#welcome");
+const elWelcomeOk = $<HTMLButtonElement>("#welcome-ok");
+
+/** 老用户（已有图库）升级后保持专业模式，全新安装默认简洁模式。 */
+function detectUiMode(): UiMode {
+  const saved = localStorage.getItem(UI_MODE_KEY);
+  if (saved === "simple" || saved === "pro") return saved;
+  return localStorage.getItem(ROOT_KEY) ? "pro" : "simple";
+}
+
+let uiMode: UiMode = detectUiMode();
+/** 简洁档默认 2 列（图更大），专业档沿用原来的自适应宽度。 */
+const colsByMode: Record<UiMode, number | null> = { simple: 2, pro: null };
+
+function readCols(mode: UiMode): number | null {
+  const raw = localStorage.getItem(`${COLS_KEY}${mode}`);
+  if (raw === null) return colsByMode[mode];
+  if (raw === "auto") return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= MIN_COLS && n <= MAX_COLS ? n : colsByMode[mode];
+}
+
+colsByMode.simple = readCols("simple");
+colsByMode.pro = readCols("pro");
+
+/** 只改 CSS 轨道；方向键用的 gridColumns() 自己会数出来，不用同步。 */
+function applyCols(n: number | null) {
+  if (n === null) {
+    delete document.documentElement.dataset.cols;
+    elColsValue.textContent = "自动";
+    elColsValue.title = "当前按窗口宽度自动排列；点 − / + 可固定列数";
+  } else {
+    document.documentElement.dataset.cols = String(n);
+    document.documentElement.style.setProperty("--sp-cols", String(n));
+    elColsValue.textContent = `${n} 列`;
+    elColsValue.title = "点一下恢复自动列数";
+  }
+  elColsMinus.disabled = n !== null && n <= MIN_COLS;
+  elColsPlus.disabled = n !== null && n >= MAX_COLS;
+}
+
+function setCols(n: number | null) {
+  const changed = colsByMode[uiMode] !== n;
+  colsByMode[uiMode] = n;
+  localStorage.setItem(`${COLS_KEY}${uiMode}`, n === null ? "auto" : String(n));
+  applyCols(n);
+  // 列宽变了：重新铺一遍，让已显示的卡片按新档位取缩略图（缓存仍在，不会变慢）
+  if (changed) void reload({ keepView: true });
+}
+
+/** 1 列时卡片接近满屏宽，512px 档会明显糊，改用 1600 档。2 列仍用 512 就够。 */
+function gridThumbSize(): 512 | 1600 {
+  return colsByMode[uiMode] === 1 ? 1600 : 512;
+}
+
+function applyUiMode(mode: UiMode, initial = false) {
+  uiMode = mode;
+  document.documentElement.dataset.mode = mode;
+  elBtnMode.setAttribute("aria-pressed", String(mode === "simple"));
+  elModeLabel.textContent = mode === "simple" ? "简洁" : "专业";
+  elBtnMode.title =
+    mode === "simple"
+      ? "当前：简洁模式。点一下切到专业模式（全部功能）"
+      : "当前：专业模式。点一下切到简洁模式（只留选片主路径）";
+  applyCols(colsByMode[mode]);
+  // 首次进简洁档、且用户从没动过侧栏 → 默认收起；之后完全尊重用户自己的选择
+  if (initial && mode === "simple" && localStorage.getItem(SIDEBAR_KEY) === null) {
+    toggleSidebar(true);
+  }
+  if (!initial) {
+    setHint(
+      mode === "simple"
+        ? "已切到简洁模式：高级功能仍在，快捷键照用，再点一次切回。"
+        : "已切到专业模式：全部功能已显示。"
+    );
+  }
+}
+
+elBtnMode.addEventListener("click", () => {
+  const next: UiMode = uiMode === "simple" ? "pro" : "simple";
+  localStorage.setItem(UI_MODE_KEY, next);
+  applyUiMode(next);
+});
+
+elColsMinus.addEventListener("click", () => {
+  const cur = colsByMode[uiMode] ?? gridColumns();
+  setCols(Math.max(MIN_COLS, cur - 1));
+});
+elColsPlus.addEventListener("click", () => {
+  const cur = colsByMode[uiMode] ?? gridColumns();
+  setCols(Math.min(MAX_COLS, cur + 1));
+});
+elColsValue.addEventListener("click", () => setCols(null));
+
+/** 全新安装才弹一次；升级用户不该被弹窗打断。 */
+function showWelcomeIfNeeded() {
+  if (localStorage.getItem(WELCOME_KEY) === "1" || localStorage.getItem(ROOT_KEY)) return;
+  elWelcome.hidden = false;
+}
+
+function closeWelcome() {
+  elWelcome.hidden = true;
+  localStorage.setItem(WELCOME_KEY, "1");
+}
+
+elWelcomeOk.addEventListener("click", closeWelcome);
+elWelcome.addEventListener("click", (e) => {
+  if (e.target === elWelcome) closeWelcome();
+});
+
+/** 鼠标停在哪张卡片上：键盘标记的默认目标。事件委托，几千张卡片只挂一个监听器。 */
+let hoverCardId: number | null = null;
+function setHoverCard(id: number | null) {
+  if (hoverCardId === id) return;
+  if (hoverCardId !== null) {
+    elGrid
+      .querySelector<HTMLElement>(`.card[data-id="${hoverCardId}"]`)
+      ?.removeAttribute("data-hover");
+  }
+  hoverCardId = id;
+  if (id !== null) {
+    elGrid.querySelector<HTMLElement>(`.card[data-id="${id}"]`)?.setAttribute("data-hover", "1");
+  }
+}
+
+elGrid.addEventListener("pointerover", (e) => {
+  const card = (e.target as HTMLElement).closest<HTMLElement>(".card");
+  setHoverCard(card ? Number(card.dataset.id) || null : null);
+});
+elGrid.addEventListener("pointerleave", () => setHoverCard(null));
+
 /**
  * 这一次标记落在谁身上。
  *
  * 大图打开时就是眼前这一张：在大图里，你只可能在判断这一张，
  * 让它去操作背后被选中的那一批是反直觉的，而且看不见后果。
- * 网格里则是当前选中的那一批。
+ * 网格里优先看鼠标停在哪张——省掉「先点一下小图再按数字」这一步；
+ * 选中一批时则按批量意图走，别被鼠标位置顶掉。
  */
 function markTargets(): number[] {
   if (!elLoupe.hidden) {
     const c = items[loupeIndex];
     return c ? [c.id] : [];
   }
+  if (selection.size > 1) return [...selection];
+  if (hoverCardId !== null) return [hoverCardId];
   return [...selection];
 }
 
@@ -2476,13 +2658,13 @@ function queueMarkWrite<T>(fn: () => Promise<T>): Promise<T> {
  * 应用一次标记。`patch` 里没给的项就不动——
  * 这样「只改星级」不会把已经做好的保留/淘汰决定冲掉。
  */
-async function applyPatch(patch: Patch, idsOverride?: number[]) {
-  // idsOverride：批量标记时直接由调用方给全量 id（含还没滚出来的那些），
-  // 不走「当前选中」那一套
-  const bulk = idsOverride !== undefined;
+async function applyPatch(patch: Patch, idsOverride?: number[], bulkOverride?: boolean) {
+  // idsOverride：批量标记（含还没滚出来的那些），或卡片星级条点名单张。
+  // bulkOverride=false 让「卡片上点一下星」走单张分支，不会被当成批量而清空选择。
+  const bulk = bulkOverride ?? (idsOverride !== undefined);
   const ids = idsOverride ?? markTargets();
   if (ids.length === 0) {
-    setHint("先单击选中一张照片，或双击打开大图，再按 P / X。", "warn");
+    setHint("把鼠标停在一张照片上，或单击选中它，再按 P / X / 1-5。", "warn");
     return;
   }
 
@@ -2882,7 +3064,23 @@ elBtnInvert.addEventListener("click", () => void invertSelection());
 elBtnSelectNone.addEventListener("click", clearSelection);
 
 elGrid.addEventListener("click", (e) => {
-  const card = (e.target as HTMLElement).closest<HTMLElement>(".card");
+  const target = e.target as HTMLElement;
+
+  // 卡片上的星级条：点哪颗星就给这张打几星，不必先选中、更不必开大图。
+  // 走 applyPatch 的普通单张分支（bulkOverride=false），复用乐观更新与撤销栈。
+  const rateBtn = target.closest<HTMLButtonElement>(".card-rate button[data-rate]");
+  if (rateBtn) {
+    const rateCard = rateBtn.closest<HTMLElement>(".card");
+    const rateId = Number(rateCard?.dataset.id);
+    const n = Number(rateBtn.dataset.rate);
+    if (rateId && !Number.isNaN(n)) {
+      e.stopPropagation();
+      void applyPatch({ stars: n }, [rateId], false);
+    }
+    return;
+  }
+
+  const card = target.closest<HTMLElement>(".card");
   if (!card) return;
   const id = Number(card.dataset.id);
   if (!id) return;
@@ -2895,6 +3093,8 @@ elGrid.addEventListener("click", (e) => {
 // 双击看大图。单击留给「选中」——选片时选中比看用得频繁得多，
 // 而看大图另外还有回车、空格两条路。
 elGrid.addEventListener("dblclick", (e) => {
+  // 连点星级条不该顺手打开大图
+  if ((e.target as HTMLElement).closest(".card-rate")) return;
   const card = (e.target as HTMLElement).closest<HTMLElement>(".card");
   if (!card) return;
   const idx = items.findIndex((c) => String(c.id) === card.dataset.id);
@@ -4810,6 +5010,15 @@ window.addEventListener("keydown", (e) => {
   const meta = e.metaKey || e.ctrlKey;
   const key = e.key;
 
+  // 首次键位卡也是弹窗：Esc 关掉，其余键一律不穿透到背后的网格
+  if (!elWelcome.hidden) {
+    if (key === "Escape") {
+      e.preventDefault();
+      closeWelcome();
+    }
+    return;
+  }
+
   // 任意弹窗打开时，它才是当前的焦点：只认 Esc，其余快捷键一律不穿透到网格。
   // 以前只挡了「导出」和「清理」两个，对比 / 连拍 / 时间校正 / 范围选择会漏——
   // 在弹窗里按 1 会顺手给背景的照片打上一星。
@@ -4960,6 +5169,14 @@ window.addEventListener("keydown", (e) => {
     else if (key === "ArrowLeft") moveSelection(-1);
     else if (key === "ArrowDown") moveSelection(gridColumns());
     else moveSelection(-gridColumns());
+    return;
+  }
+
+  // 网格里 [ / ] 直接调列数（大图里的 [ 是缩小，上面已经 return 掉了）
+  if (key === "[" || key === "]") {
+    e.preventDefault();
+    const cur = colsByMode[uiMode] ?? gridColumns();
+    setCols(Math.min(MAX_COLS, Math.max(MIN_COLS, cur + (key === "]" ? 1 : -1))));
     return;
   }
 
@@ -5317,6 +5534,11 @@ setTimeout(() => void checkForUpdate(true), 8000);
 async function boot() {
   applyTheme(savedTheme());
   initSidebar();
+
+  // 界面档位与列数：head 里的内联脚本已经预置了 data-mode 防闪烁，
+  // 这里补齐按钮状态、该档自己的列数，以及首次启动的一屏键位卡。
+  applyUiMode(uiMode, true);
+  showWelcomeIfNeeded();
 
   // 分组依据选择器：本应用只有分组视图，始终显示
   elGroupMode.value = groupMode;

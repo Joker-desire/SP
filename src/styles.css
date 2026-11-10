@@ -3087,3 +3087,217 @@ body.easter-cheer .footer {
     0 0 0 1px rgba(0, 0, 0, 0.5),
     0 0 6px rgba(255, 210, 74, 0.35);
 }
+
+/* ==========================================================================
+   一屏选片：自定义列数 + 一步标记 + 简洁 / 专业一键切换
+   这一整段只管「可见性」和布局；交互、状态、快捷键仍是原来那一套。
+   ========================================================================== */
+
+/* ---------- 自定义列数 ----------
+   没设列数时走原来的 auto-fill；设了才用固定轨道。gridColumns() 从
+   computed style 数轨道，所以方向键 ↑↓ 会自动跟着变，不用改 JS。 */
+html[data-cols] .grid:not(.is-grouped),
+html[data-cols] .group-grid {
+  grid-template-columns: repeat(var(--sp-cols), minmax(0, 1fr));
+}
+
+.cols-control {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+
+.cols-control button {
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.cols-control button:hover { background: var(--bg-hover); }
+
+.cols-btn { width: 26px; font-size: 15px; line-height: 1; }
+
+.cols-value {
+  min-width: 52px;
+  padding: 0 6px;
+  font-size: 11.5px;
+  white-space: nowrap;
+  color: var(--text-dim);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+/* ---------- 一步标记：当前目标 + 卡片星级条 ----------
+   hover 目标是内圈高亮，选中是外描边，两者叠一起也能分清谁是谁。 */
+.card[data-hover="1"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow-lg);
+}
+
+.card-rate {
+  display: none;
+  align-items: center;
+  gap: 3px;
+  margin-bottom: 5px;
+  /* overlay 整体 pointer-events:none，星级条单独放开才能点 */
+  pointer-events: auto;
+}
+
+.card:hover .card-rate,
+.card:focus-within .card-rate,
+.card[data-hover="1"] .card-rate { display: flex; }
+
+.card-rate button {
+  width: 21px;
+  height: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.52);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(4px);
+}
+
+.card-rate button:hover {
+  background: rgba(0, 0, 0, 0.74);
+  border-color: #ffd166;
+  color: #ffd166;
+}
+
+.card-rate button.is-active {
+  color: #ffd166;
+  border-color: rgba(255, 209, 102, 0.72);
+  background: rgba(120, 86, 0, 0.46);
+}
+
+.card-rate .card-rate-clear { font-size: 10px; margin-left: 4px; }
+
+/* 触屏没有 hover，星级条必须常显，否则根本点不到 */
+@media (hover: none) {
+  .card-rate { display: flex; }
+}
+
+/* ---------- 简洁 / 专业一键切换 ---------- */
+.btn-mode { gap: 5px; }
+.mode-label { font-size: 11.5px; color: var(--text-dim); }
+.btn-mode[aria-pressed="true"] { border-color: var(--accent); }
+.btn-mode[aria-pressed="true"] .mode-label { color: var(--accent); font-weight: 600; }
+
+/* 注意这里**不藏**：更新面板、进度条、错误横幅、导出、缓存占用、
+   #btn-clear（筛选生效时它就是「一键清除」）。筛选藏了，出口不能藏。 */
+html[data-mode="simple"] #btn-rescan,
+html[data-mode="simple"] #btn-cache,
+html[data-mode="simple"] #btn-similar,
+html[data-mode="simple"] #btn-clear-lib,
+html[data-mode="simple"] #btn-undo,
+html[data-mode="simple"] #btn-redo,
+html[data-mode="simple"] #group-mode,
+html[data-mode="simple"] #sort,
+html[data-mode="simple"] #btn-unmark,
+html[data-mode="simple"] #btn-select-all,
+html[data-mode="simple"] #btn-invert,
+html[data-mode="simple"] #btn-select-none,
+html[data-mode="simple"] #bulk,
+html[data-mode="simple"] .facet-group:not([data-group="decision"]):not([data-group="stars"]):not([data-group="colors"]) {
+  display: none !important;
+}
+
+html[data-mode="simple"] #btn-clear {
+  border-radius: 999px;
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ---------- 首次键位卡 ---------- */
+.welcome {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.56);
+  backdrop-filter: blur(8px);
+}
+
+.welcome[hidden] { display: none; }
+
+.welcome-card {
+  width: min(520px, calc(100vw - 40px));
+  padding: 28px 30px 24px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+}
+
+.welcome-eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+
+.welcome-card h2 { margin: 8px 0 18px; font-size: 20px; }
+
+.welcome-steps {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 18px;
+  display: grid;
+  gap: 10px;
+  font-size: 13.5px;
+}
+
+.welcome-steps li { display: flex; align-items: center; gap: 10px; }
+
+.welcome-steps b {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.welcome-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.welcome-keys kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.welcome-note { font-size: 12px; color: var(--text-dim); margin: 16px 0 20px; }
+.welcome-ok { width: 100%; justify-content: center; }
