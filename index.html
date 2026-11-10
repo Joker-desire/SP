@@ -194,6 +194,7 @@
           <option value="lens">按镜头分组</option>
           <option value="focal">按焦段分组</option>
           <option value="iso">按 ISO 分组</option>
+          <option value="shape">按横竖图分组</option>
         </select>
       </div>
     </header>
@@ -257,6 +258,11 @@
           <section class="facet-group" data-group="pair">
             <h3 class="facet-title">文件类型</h3>
             <div class="facet-list" id="facets-pair"></div>
+          </section>
+
+          <section class="facet-group" id="group-shape" data-group="shape" hidden>
+            <h3 class="facet-title">画幅方向</h3>
+            <div class="facet-list" id="facets-shape"></div>
           </section>
 
           <section class="facet-group" data-group="days">

@@ -296,6 +296,45 @@ const STARS: &str = "COALESCE(d.stars, 0)";
 /// 色标。没打过色标的行取不到值，同样要兜成空串，否则「无色标」这一档筛不出来。
 const COLOR: &str = "COALESCE(d.color, '')";
 
+/// 画幅方向（横 / 竖 / 方 / 尺寸未知）。
+///
+/// EXIF Orientation 5–8 表示画面要转 90° 才是人看到的朝向，而
+/// PixelXDimension / PixelYDimension 写的仍是传感器原始像素尺寸；
+/// 不先交换宽高，机身竖拍会被整批算成横图。
+/// 这里只算一次：筛选、分面计数、列表下发都引用同一段 SQL，
+/// 免得前后端各算一遍，出现「分组里是竖图、按竖图却筛不到」。
+const DISPLAY_W: &str = "CASE WHEN p.orientation IN (5, 6, 7, 8) THEN p.height ELSE p.width END";
+const DISPLAY_H: &str = "CASE WHEN p.orientation IN (5, 6, 7, 8) THEN p.width ELSE p.height END";
+
+/// 四档取值与显示名。顺序决定侧栏和分组里的排布。
+const SHAPE_KEYS: &[(&str, &str)] = &[
+    ("landscape", "横图"),
+    ("portrait", "竖图"),
+    ("square", "方图"),
+    ("unknown", "尺寸未知"),
+];
+
+fn shape_key_sql() -> String {
+    // 宽高差在平均边长的 2% 以内算方图：裁切过一两个像素的方图不该落到「横图」里。
+    //
+    // 尼康 NEF 常把像素尺寸写在 SubIFD 的 ImageWidth/Length，而索引只取 ExifIFD 的
+    // PixelXDimension/YDimension，于是 width/height 会是 NULL（实测 Z50II 就是这样）。
+    // 这时退化用 Orientation 判断：5–8 是竖拍、1–4 是横拍。少了这一层，整批 NEF
+    // 都会落进「尺寸未知」，这个分面等于没做。
+    format!(
+        "CASE
+           WHEN {DISPLAY_W} IS NOT NULL AND {DISPLAY_H} IS NOT NULL
+                AND {DISPLAY_W} > 0 AND {DISPLAY_H} > 0 THEN
+             CASE WHEN ABS({DISPLAY_W} - {DISPLAY_H}) * 100 <= {DISPLAY_W} + {DISPLAY_H} THEN 'square'
+                  WHEN {DISPLAY_W} > {DISPLAY_H} THEN 'landscape'
+                  ELSE 'portrait' END
+           WHEN p.orientation IN (5, 6, 7, 8) THEN 'portrait'
+           WHEN p.orientation IN (1, 2, 3, 4) THEN 'landscape'
+           ELSE 'unknown'
+         END"
+    )
+}
+
 /// 色标的全部取值与显示名。顺序决定 `6`-`0` 这五个键的排布，
 /// 前端 `src/main.ts` 里有一份对应的定义，两边改任一边都要通知另一边。
 const COLOR_KEYS: &[(&str, &str)] = &[
@@ -379,6 +418,9 @@ struct PairFilter {
     /// ISO 分档：low / mid / high / veryHigh
     #[serde(default)]
     iso: Option<String>,
+    /// 画幅方向：landscape / portrait / square / unknown
+    #[serde(default)]
+    shape: Option<String>,
 
     // ---- 多选（v0.4）----------------------------------------------------
     //
@@ -406,6 +448,8 @@ struct PairFilter {
     focals: Vec<String>,
     #[serde(default)]
     isos: Vec<String>,
+    #[serde(default)]
+    shapes: Vec<String>,
 }
 
 /// 网格用的照片卡片。以「一次快门」为单位，而不是以文件为单位。
@@ -446,6 +490,8 @@ struct PairCard {
     overexposed: Option<f64>,
     /// 暗部死黑像素占比 0–1
     underexposed: Option<f64>,
+    /// 画幅方向：landscape / portrait / square / unknown（由宽高 + EXIF 旋转算出）
+    shape: String,
 }
 
 /// 一页照片 + 满足条件的总数（前端据此显示「共 N 张」和决定还要不要继续加载）。
@@ -493,6 +539,8 @@ struct LibraryFacets {
     focals: Vec<Facet>,
     /// ISO 分档：low / mid / high / veryHigh
     isos: Vec<Facet>,
+    /// 画幅方向：横图 / 竖图 / 方图 / 尺寸未知（四档固定，0 也保留）
+    shapes: Vec<Facet>,
 }
 
 /// 搜索关键词里的 LIKE 通配符要转义，否则输入一个 `%` 会把整个库匹配出来。
@@ -773,6 +821,18 @@ fn build_where(f: &PairFilter) -> (String, Vec<rusqlite::types::Value>) {
         &mut args,
     );
 
+    // 画幅方向。四档是白名单，认不出来的值按「不筛」处理（同 decision / color），
+    // 免得条件被悄悄丢掉后界面看起来「筛了却没生效」。
+    let shapes: Vec<&str> = merged_strings(f.shape.as_deref(), &f.shapes)
+        .into_iter()
+        .filter(|s| SHAPE_KEYS.iter().any(|(k, _)| *k == *s))
+        .collect();
+    push_any(
+        in_parts(&format!("({})", shape_key_sql()), &shapes),
+        &mut conds,
+        &mut args,
+    );
+
     // 画面质量。没分析过的照片（sharpness IS NULL）一律不算「有问题」——
     // 分析是后台跑的，刚扫完就筛会把还没轮到的照片全列进「糊了」，那是误报。
     let qualities = merged_strings(f.quality.as_deref(), &f.qualities);
@@ -883,6 +943,7 @@ fn query_pairs(
         |r| r.get(0),
     )?;
 
+    let shape_expr = shape_key_sql();
     let sql = format!(
         "SELECT p.id, p.pair_key, p.path, p.file_kind,
                 (SELECT MAX(CASE WHEN q.file_kind = 'raw'  THEN 1 ELSE 0 END)
@@ -894,7 +955,8 @@ fn query_pairs(
                 p.lens, p.focal_len, p.aperture, p.shutter, p.iso,
                 p.file_size, p.decode_path,
                 {DECISION}, {STARS}, {COLOR},
-                p.sharpness, p.overexposed, p.underexposed
+                p.sharpness, p.overexposed, p.underexposed,
+                ({shape_expr})
          {FROM_PHOTOS}
          WHERE {where_sql}
          {}
@@ -937,6 +999,7 @@ fn query_pairs(
             sharpness: r.get(20)?,
             overexposed: r.get(21)?,
             underexposed: r.get(22)?,
+            shape: r.get(23)?,
         })
     })?;
 
@@ -1547,6 +1610,33 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         &["400 以下", "400–1600", "1600–6400", "6400 以上"],
     )?;
 
+    // 画幅方向：四档固定列出（含 0 的），位置不随素材跳动。
+    // 与分组、筛选共用 shape_key_sql()，保证「竖图」在三个地方是同一批照片。
+    let shapes = {
+        let mut out: Vec<Facet> = SHAPE_KEYS
+            .iter()
+            .map(|(key, label)| Facet {
+                key: (*key).into(),
+                label: (*label).into(),
+                count: 0,
+            })
+            .collect();
+        let expr = shape_key_sql();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT ({expr}) AS s, COUNT(*) FROM photos p
+             WHERE p.is_primary = 1{scope} GROUP BY s"
+        ))?;
+        let mut rows = stmt.query(sp())?;
+        while let Some(r) = rows.next()? {
+            let key: String = r.get(0)?;
+            let n: i64 = r.get(1)?;
+            if let Some(slot) = out.iter_mut().find(|f| f.key == key) {
+                slot.count = n;
+            }
+        }
+        out
+    };
+
     Ok(LibraryFacets {
         total,
         processed,
@@ -1562,6 +1652,7 @@ fn facets_of(conn: &Connection, roots: Option<&[String]>) -> anyhow::Result<Libr
         lenses,
         focals,
         isos,
+        shapes,
     })
 }
 
@@ -3189,6 +3280,76 @@ mod tests {
         query_pairs(&conn.lock().unwrap(), &filter, 100, 0)
             .unwrap()
             .total
+    }
+
+    /// 竖拍的 EXIF 宽高仍是传感器原始尺寸，只有 Orientation 5–8 说明画面要转 90°。
+    /// 不先交换宽高，整批竖图都会被算成横图（#4 最容易踩的坑）。
+    #[test]
+    fn shape_facets_follow_exif_rotation() {
+        let (_dir, db) = seeded("shape");
+        {
+            let conn = db.lock().unwrap();
+            // 0001：横图；0002：竖拍但原始像素仍是横向的；0003：读不到尺寸
+            conn.execute_batch(
+                "UPDATE photos SET width = 6000, height = 4000, orientation = 1 WHERE path LIKE '%0001%';
+                 UPDATE photos SET width = 6000, height = 4000, orientation = 6 WHERE path LIKE '%0002%';",
+            )
+            .unwrap();
+        }
+
+        let n = |key: &str| {
+            facets_of(&db.lock().unwrap(), None)
+                .unwrap()
+                .shapes
+                .iter()
+                .find(|f| f.key == key)
+                .map(|f| f.count)
+                .unwrap_or(-1)
+        };
+        assert_eq!(n("landscape"), 1);
+        assert_eq!(n("portrait"), 1, "Orientation=6 要先交换宽高");
+        assert_eq!(n("unknown"), 1);
+        assert_eq!(n("square"), 0);
+
+        // 列表下发的 shape 必须和分面、筛选是同一套口径
+        let page = query_pairs(&db.lock().unwrap(), &PairFilter::default(), 10, 0).unwrap();
+        assert_eq!(
+            page.items.iter().filter(|c| c.shape == "portrait").count(),
+            1
+        );
+
+        let with = |v: &[&str]| PairFilter {
+            shapes: v.iter().map(|s| (*s).into()).collect(),
+            ..Default::default()
+        };
+        assert_eq!(count(&db, with(&["portrait"])), 1);
+        assert_eq!(count(&db, with(&["landscape", "portrait"])), 2, "同维 OR");
+        assert_eq!(count(&db, with(&["unknown"])), 1);
+        assert_eq!(count(&db, with(&["bogus"])), 3, "认不出来的值当不筛");
+
+        // 尺寸读不到、但 Orientation 还在：尼康 NEF 的常见情况，退化判定必须认出竖拍
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch("UPDATE photos SET orientation = 6 WHERE path LIKE '%0003%';")
+                .unwrap();
+        }
+        assert_eq!(n("portrait"), 2, "无尺寸时靠 Orientation=6 认出竖拍");
+        assert_eq!(n("unknown"), 0);
+        assert_eq!(count(&db, with(&["portrait"])), 2);
+
+        // 方图（宽高差在容差内）+ orientation=8 同样要转 90°
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch(
+                "UPDATE photos SET width = 4000, height = 4000, orientation = 1 WHERE path LIKE '%0003%';
+                 UPDATE photos SET width = 6000, height = 4000, orientation = 8 WHERE path LIKE '%0002%';",
+            )
+            .unwrap();
+        }
+        assert_eq!(n("square"), 1);
+        assert_eq!(n("portrait"), 1, "Orientation=8 也要交换");
+        assert_eq!(n("unknown"), 0);
+        assert_eq!(count(&db, with(&["square"])), 1);
     }
 
     /// 换文件夹之后，视图必须只属于新文件夹。

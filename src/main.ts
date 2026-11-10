@@ -69,6 +69,8 @@ interface PairCard {
   sharpness: number | null;
   overexposed: number | null;
   underexposed: number | null;
+  /** 画幅方向，后端按宽高 + EXIF 旋转算好：landscape / portrait / square / unknown */
+  shape: string;
 }
 
 interface CameraBody {
@@ -166,6 +168,8 @@ interface LibraryFacets {
   lenses: Facet[];
   focals: Facet[];
   isos: Facet[];
+  /** 画幅方向：横图 / 竖图 / 方图 / 尺寸未知，四档固定（计数为 0 也在） */
+  shapes: Facet[];
 }
 
 interface ThumbPayload {
@@ -249,6 +253,8 @@ interface FilterState {
   focal: Set<string>;
   /** low / mid / high / veryHigh */
   iso: Set<string>;
+  /** landscape / portrait / square / unknown */
+  shape: Set<string>;
   search: string;
   sort: string;
 }
@@ -277,6 +283,7 @@ function setForFacet(facet: string): Set<string> | null {
     case "lens": return filter.lens;
     case "focal": return filter.focal;
     case "iso": return filter.iso;
+    case "shape": return filter.shape;
     default: return null;
   }
 }
@@ -302,6 +309,7 @@ function activeChips(): ActiveChip[] {
   add("day", "日期", filter.day);
   add("focal", "焦段", filter.focal);
   add("iso", "ISO", filter.iso);
+  add("shape", "画幅", filter.shape);
   add("camera", "机身", filter.cameraSerial);
   add("lens", "镜头", filter.lens);
   if (filter.search.trim() !== "") {
@@ -356,6 +364,7 @@ const elFacetsQuality = $<HTMLElement>("#facets-quality");
 const elFacetsLens = $<HTMLElement>("#facets-lens");
 const elFacetsFocal = $<HTMLElement>("#facets-focal");
 const elFacetsIso = $<HTMLElement>("#facets-iso");
+const elFacetsShape = $<HTMLElement>("#facets-shape");
 const elBtnTimeOffset = $<HTMLButtonElement>("#btn-time-offset");
 const elOffsetModal = $<HTMLElement>("#offset-modal");
 const elOffsetList = $<HTMLElement>("#offset-list");
@@ -365,6 +374,7 @@ const elGroupQuality = $<HTMLElement>("#group-quality");
 const elGroupLens = $<HTMLElement>("#group-lens");
 const elGroupParams = $<HTMLElement>("#group-params");
 const elGroupIso = $<HTMLElement>("#group-iso");
+const elGroupShape = $<HTMLElement>("#group-shape");
 const elQualityNote = $<HTMLElement>("#quality-note");
 const elFacetsDays = $<HTMLElement>("#facets-days");
 const elFacetsCameras = $<HTMLElement>("#facets-cameras");
@@ -559,7 +569,8 @@ type GroupMode =
   | "quality"
   | "lens"
   | "focal"
-  | "iso";
+  | "iso"
+  | "shape";
 
 const GROUP_MODES: GroupMode[] = [
   "folder",
@@ -572,6 +583,7 @@ const GROUP_MODES: GroupMode[] = [
   "lens",
   "focal",
   "iso",
+  "shape",
 ];
 
 /** 从 localStorage 读分组依据，兼容旧版（0/1 开关和含「none」的版本）。 */
@@ -631,6 +643,7 @@ const filter: FilterState = {
   lens: new Set(),
   focal: new Set(),
   iso: new Set(),
+  shape: new Set(),
   search: "",
   sort: "takenDesc",
 };
@@ -1160,6 +1173,7 @@ function currentFilterPayload() {
     lenses: [...filter.lens],
     focals: [...filter.focal],
     isos: [...filter.iso],
+    shapes: [...filter.shape],
     search: filter.search,
     sort: filter.sort,
     roots: currentRoots(),
@@ -1378,6 +1392,14 @@ const FOCAL_BUCKETS: Array<{ lo: number; hi: number; key: string; label: string 
   { lo: 200, hi: Infinity, key: "super", label: "200 以上" },
 ];
 
+/** 画幅方向显示名。与后端 lib.rs 的 SHAPE_KEYS 一一对应，分组标题用。 */
+const SHAPE_LABEL: Record<string, string> = {
+  landscape: "横图",
+  portrait: "竖图",
+  square: "方图",
+  unknown: "尺寸未知",
+};
+
 const ISO_BUCKETS: Array<{ lo: number; hi: number; key: string; label: string }> = [
   { lo: 0, hi: 400, key: "low", label: "400 以下" },
   { lo: 400, hi: 1600, key: "mid", label: "400–1600" },
@@ -1437,6 +1459,8 @@ function groupKeyOf(c: PairCard, mode: GroupMode): { key: string; label: string;
       const b = bucketOf(c.iso, ISO_BUCKETS);
       return b ? { key: b.key, label: b.label } : { key: "?", label: "未知 ISO" };
     }
+    case "shape":
+      return { key: c.shape, label: SHAPE_LABEL[c.shape] ?? "未知画幅" };
   }
 }
 
@@ -1893,6 +1917,7 @@ function renderFacetsEmpty() {
     elFacetsLens,
     elFacetsFocal,
     elFacetsIso,
+    elFacetsShape,
   ]) {
     host.innerHTML = "";
   }
@@ -1900,6 +1925,7 @@ function renderFacetsEmpty() {
   elGroupLens.hidden = true;
   elGroupParams.hidden = true;
   elGroupIso.hidden = true;
+  elGroupShape.hidden = true;
   elLensNote.textContent = "";
   elLensClear.hidden = true;
   elLensMore.hidden = true;
@@ -1934,6 +1960,7 @@ async function loadFacets() {
     ["lens", f.lenses],
     ["focal", f.focals],
     ["iso", f.isos],
+    ["shape", f.shapes],
   ];
   for (const [facet, list] of groups) {
     for (const it of list) {
@@ -1958,6 +1985,7 @@ async function loadFacets() {
   renderLensFacets(f);
   renderBucketFacets(elFacetsFocal, elGroupParams, f.focals, "focal", filter.focal);
   renderBucketFacets(elFacetsIso, elGroupIso, f.isos, "iso", filter.iso);
+  renderBucketFacets(elFacetsShape, elGroupShape, f.shapes, "shape", filter.shape);
   revealActiveGroups();
   renderActiveFilters();
 }
@@ -2057,6 +2085,7 @@ function resetFilter() {
     filter.lens,
     filter.focal,
     filter.iso,
+    filter.shape,
   ]) {
     set.clear();
   }
@@ -2251,6 +2280,7 @@ const GROUP_HAS_FILTER: Record<string, () => boolean> = {
   days: () => filter.day.size > 0,
   focal: () => filter.focal.size > 0,
   iso: () => filter.iso.size > 0,
+  shape: () => filter.shape.size > 0,
   cameras: () => filter.cameraSerial.size > 0,
   lens: () => filter.lens.size > 0,
 };

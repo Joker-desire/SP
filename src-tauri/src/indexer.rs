@@ -754,7 +754,9 @@ fn read_exif(path: &Path) -> Result<ExifLite> {
         .and_then(as_u32)
         .map(|v| v as i64);
 
-    // 像素尺寸优先取 EXIF 里的 ExifImageWidth/Height；缺失则留空，后续由缩略图阶段补
+    // 像素尺寸取 EXIF 的 ExifImageWidth/Height。尼康 NEF 常把尺寸写在 SubIFD 的
+    // ImageWidth/Length，这里读不到就留 NULL；横竖判定会退化用 Orientation
+    // （见 lib.rs::shape_key_sql），别把 NULL 当成「可以稍后补上」的空头承诺。
     out.width = exif
         .get_field(Tag::PixelXDimension, In::PRIMARY)
         .and_then(as_u32)
