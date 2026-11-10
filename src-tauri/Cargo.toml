@@ -20,7 +20,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon：系统托盘图标 + 菜单（显示主窗口 / 退出）。没有它，Windows 上
+# 关掉窗口后既找不到重新打开的入口，也找不到退出软件的地方。
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -817,5 +817,13 @@
         <button class="btn btn-primary" id="update-now">立即更新</button>
       </div>
     </div>
+
+    <!-- ── 拖入文件夹导入：只是提示层，原生拖放事件由 Tauri 转发到前端 ──── -->
+    <div class="drop-overlay" id="drop-overlay" hidden aria-hidden="true">
+      <div class="drop-card">
+        <span class="drop-title">松开即可导入</span>
+        <span class="drop-sub">拖入照片文件夹，或拖一张 JPG / NEF 照片（导入其所在文件夹）</span>
+      </div>
+    </div>
   </body>
 </html>

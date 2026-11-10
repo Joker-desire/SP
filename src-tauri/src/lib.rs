@@ -134,6 +134,26 @@ async fn list_subdirs(path: String) -> Result<Vec<indexer::DirNode>, String> {
     Ok(indexer::list_subdirs(Path::new(&path), 4, 3000))
 }
 
+/// 把拖进窗口的路径换成「可以导入的文件夹」。
+///
+/// 拖文件夹是最常见的用法，直接返回；只拖一张照片也很自然（比如从资源管理器
+/// 里随手拽一张 NEF 过来），这时导入它所在的目录。其它文件（快捷方式、txt、
+/// 压缩包）一律拒绝，免得误把 Downloads 整个扫一遍。
+/// 路径判断放后端做：`std::path` 自己处理 Windows 的反斜杠分隔符，前端不用猜。
+#[tauri::command]
+fn folder_from_drop(path: String) -> Option<String> {
+    let p = Path::new(&path);
+    if p.is_dir() {
+        return Some(p.to_string_lossy().into_owned());
+    }
+    if !p.is_file() || pairing::classify(&pairing::ext_lower(p)).is_none() {
+        return None;
+    }
+    p.parent()
+        .filter(|dir| dir.is_dir())
+        .map(|dir| dir.to_string_lossy().into_owned())
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LibraryStats {
@@ -2800,15 +2820,70 @@ fn open_about(app: tauri::AppHandle) {
     open_about_window(&app);
 }
 
-/// 关于窗口里查到新版本时把主窗口提到前面——更新面板挂在主窗口上，
-/// 不聚焦会被关于窗口挡住，用户只看得到「发现新版本」却找不到按钮。
-#[tauri::command]
-fn focus_main_window(app: tauri::AppHandle) {
-    use tauri::Manager;
+/// 把主窗口找回来：取消最小化 → 显示 → 聚焦。
+///
+/// 托盘、第二个实例、关于页三处共用。缺任何一步都会变成「点了没反应」：
+/// 窗口可能只是被最小化、被关窗隐藏，或者整个应用被 macOS Hide 过。
+fn show_main_window(app: &tauri::AppHandle) {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS 上整个应用可能被 Hide，只 show 一个窗口不足以把它带回来
+        let _ = app.show();
+    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
+    }
+}
+
+/// 关于窗口里查到新版本时把主窗口提到前面——更新面板挂在主窗口上，
+/// 不聚焦会被关于窗口挡住，用户只看得到「发现新版本」却找不到按钮。
+#[tauri::command]
+fn focus_main_window(app: tauri::AppHandle) {
+    show_main_window(&app);
+}
+
+/// 系统托盘：解决「关掉窗口后找不到重新打开的入口」和「Windows 上没有退出」。
+///
+/// 左键点图标 = 显示主窗口，右键菜单 = 显示主窗口 / 退出 S·P。
+/// 菜单事件走全局 `on_menu_event`（见 `run`），这里只负责把图标建出来。
+fn setup_tray(app: &tauri::AppHandle) {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let outcome = (|| -> tauri::Result<()> {
+        let show = MenuItemBuilder::with_id("tray-show", "显示主窗口").build(app)?;
+        let quit = MenuItemBuilder::with_id("tray-quit", "退出 S·P").build(app)?;
+        let menu = MenuBuilder::new(app).item(&show).item(&quit).build()?;
+
+        let mut builder = TrayIconBuilder::new()
+            .menu(&menu)
+            // 左键用来唤回窗口，右键才弹菜单；默认 true 会把两者都变成弹菜单
+            .show_menu_on_left_click(false)
+            .tooltip("S·P 选片 · 左键显示窗口，右键可退出");
+        if let Some(icon) = app.default_window_icon().cloned() {
+            builder = builder.icon(icon);
+        }
+
+        builder
+            .on_tray_icon_event(|tray, event| {
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    show_main_window(tray.app_handle());
+                }
+            })
+            .build(app)?;
+        Ok(())
+    })();
+
+    // 托盘建不出来不该让整个应用启动失败（某些 Linux 桌面没有系统托盘）。
+    if let Err(e) = outcome {
+        eprintln!("系统托盘图标创建失败（不影响主窗口）：{e}");
     }
 }
 
@@ -2899,10 +2974,9 @@ pub fn run() {
         // 两个进程各持一个 SQLite 连接写同一个库，选片状态会打架，
         // 而这种问题排查起来极费劲，不如在入口就堵死。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
+            // 以前只有 unminimize + set_focus：窗口若已被「关进托盘」隐藏，
+            // 再点一次应用图标就什么也不会发生。统一走 show_main_window。
+            show_main_window(app);
         }))
         .manage(AppState {
             db: Arc::new(Mutex::new(conn)),
@@ -2912,6 +2986,7 @@ pub fn run() {
             startup_status,
             scan_folder,
             list_subdirs,
+            folder_from_drop,
             analyze_library,
             list_camera_bodies,
             library_stats,
@@ -2935,13 +3010,37 @@ pub fn run() {
     // 应用菜单只在 macOS 上接管；Windows / Linux 由顶栏按钮调 `open_about`
     // 打开同一个关于窗口，手动检查更新的入口因此不会丢。
     #[cfg(target_os = "macos")]
-    let builder = builder.menu(macos_menu).on_menu_event(|app, event| {
-        if event.id() == "about-sp" {
-            open_about_window(app);
-        }
+    let builder = builder.menu(macos_menu);
+
+    // 菜单事件只注册一份：macOS 应用菜单的「关于」和托盘的「显示 / 退出」都走这里。
+    // 全局 handler 会收到所有菜单事件，分开注册反而容易让判断散在两处。
+    let builder = builder.on_menu_event(|app, event| match event.id().as_ref() {
+        "about-sp" => open_about_window(app),
+        "tray-show" => show_main_window(app),
+        "tray-quit" => app.exit(0),
+        _ => {}
     });
 
     builder
+        .setup(|app| {
+            setup_tray(app.handle());
+
+            // 点 × 不真退出，收进托盘：切去别的软件后能从托盘一键找回来，
+            // 真要退出就走托盘菜单的「退出 S·P」（macOS 也可用 ⌘Q）。
+            // 不这么做的话，Windows 上关掉窗口 = 进程结束，托盘图标也一起消失。
+            if let Some(window) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(w) = handle.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
+                    }
+                });
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -3001,6 +3100,31 @@ fn fatal(message: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_from_drop_resolves_directories_and_photos() {
+        let dir = std::env::temp_dir().join(format!("sp-drop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("DSC_0001.NEF");
+        let note = dir.join("notes.txt");
+        std::fs::write(&photo, b"nef").unwrap();
+        std::fs::write(&note, b"note").unwrap();
+
+        let expected = dir.to_string_lossy().into_owned();
+        assert_eq!(folder_from_drop(expected.clone()), Some(expected.clone()));
+        assert_eq!(
+            folder_from_drop(photo.to_string_lossy().into_owned()),
+            Some(expected.clone())
+        );
+        assert_eq!(folder_from_drop(note.to_string_lossy().into_owned()), None);
+        // 不存在的「照片」不能被当成导入目标（拖放正常不会给，但别留空子）
+        assert_eq!(
+            folder_from_drop(dir.join("missing.NEF").to_string_lossy().into_owned()),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 造三次快门：两张 NEF + JPG 配对完整，一张只有 NEF。
     fn seeded(name: &str) -> (std::path::PathBuf, Arc<Mutex<Connection>>) {

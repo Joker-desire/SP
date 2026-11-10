@@ -3301,3 +3301,53 @@ html[data-mode="simple"] #btn-clear {
 
 .welcome-note { font-size: 12px; color: var(--text-dim); margin: 16px 0 20px; }
 .welcome-ok { width: 100%; justify-content: center; }
+
+/* ── 拖入文件夹导入 ──────────────────────────────────────────────────────
+   pointer-events:none 是必须的：这层只是提示，绝不能把原生 drop 事件吃掉。
+   两种主题都用各自的玻璃变量，不写死深色，免得浅色主题下突然压暗一片。 */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  background: var(--glass);
+  backdrop-filter: blur(4px);
+}
+
+.drop-overlay::before {
+  content: "";
+  position: absolute;
+  inset: 18px;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  opacity: 0.8;
+}
+
+.drop-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 460px;
+  padding: 28px 34px;
+  text-align: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--glass-strong);
+  box-shadow: var(--shadow-lg);
+}
+
+.drop-title {
+  font-size: 20px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.drop-sub {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-dim);
+}

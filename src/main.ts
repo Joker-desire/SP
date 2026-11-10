@@ -344,6 +344,7 @@ const elRootPath = $<HTMLElement>("#root-path");
 const elRootMeta = $<HTMLElement>("#root-meta");
 const elTheme = $<HTMLButtonElement>("#btn-theme");
 const elPick = $<HTMLButtonElement>("#btn-pick");
+const elDropOverlay = $<HTMLElement>("#drop-overlay");
 const elRescan = $<HTMLButtonElement>("#btn-rescan");
 const elCache = $<HTMLButtonElement>("#btn-cache");
 
@@ -3844,10 +3845,10 @@ async function runAnalysis() {
   }
 }
 
-async function pickFolder() {
-  const picked = await open({ directory: true, multiple: false, title: "选择照片文件夹" });
-  if (typeof picked !== "string") return;
-
+/** 把一个文件夹设为当前图库并扫描。
+ *  顶栏「选择文件夹」和拖入共用这一条路径：rootPath、localStorage、子目录范围
+ *  选择、扫描都只写一遍，两处行为不会慢慢分叉。 */
+async function useFolder(picked: string) {
   const previous = rootPath;
   rootPath = picked;
   localStorage.setItem(ROOT_KEY, picked);
@@ -3868,6 +3869,76 @@ async function pickFolder() {
   } else {
     setHint("正在扫描…缩略图会在过程中逐张出现。");
     await startScan(picked, { quiet: false });
+  }
+}
+
+async function pickFolder() {
+  const picked = await open({ directory: true, multiple: false, title: "选择照片文件夹" });
+  if (typeof picked !== "string") return;
+  await useFolder(picked);
+}
+
+// ── 拖入文件夹直接导入 ─────────────────────────────────────────────────
+
+async function handleDroppedPaths(paths: string[]) {
+  if (paths.length === 0) return;
+  if (scanning) {
+    setHint("正在扫描当前文件夹，等这一轮结束再拖入新的。", "warn");
+    return;
+  }
+  if (!elScopeModal.hidden) {
+    setHint("先完成子文件夹范围选择，再拖入新文件夹。", "warn");
+    return;
+  }
+
+  // 多文件拖入时取第一个能用的：通常是同一个文件夹里的一批照片，
+  // 后端会把照片换成它所在的目录，整批只会得到一个文件夹。
+  let folder: string | null = null;
+  for (const p of paths) {
+    try {
+      folder = await invoke<string | null>("folder_from_drop", { path: p });
+    } catch {
+      folder = null;
+    }
+    if (folder) break;
+  }
+  if (!folder) {
+    setHint("拖进来的不是照片文件夹。请拖入文件夹，或直接拖一张 JPG / NEF 照片。", "warn");
+    return;
+  }
+
+  // 首次启动的键位卡还开着的话，导入了就顺手收掉，别挡着照片
+  if (!elWelcome.hidden) closeWelcome();
+  setHint(`已载入拖入的文件夹：${folder}`);
+  await useFolder(folder);
+}
+
+async function setupDragDrop() {
+  // 浏览器预览（直接开页面）没有原生拖放，但浏览器自己会把拖进来的文件
+  // 当导航打开、整页就没了。这两行把它挡掉，Tauri 里同样无害。
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", (e) => e.preventDefault());
+
+  try {
+    await getCurrentWindow().onDragDropEvent((event) => {
+      const payload = event.payload;
+      switch (payload.type) {
+        case "enter":
+        case "over":
+          // over 每次移动鼠标都会来，别反复写 DOM
+          if (elDropOverlay.hidden) elDropOverlay.hidden = false;
+          break;
+        case "leave":
+          elDropOverlay.hidden = true;
+          break;
+        case "drop":
+          elDropOverlay.hidden = true;
+          void handleDroppedPaths(payload.paths);
+          break;
+      }
+    });
+  } catch {
+    /* 预览环境没有 Tauri 窗口，拖放本来就不存在 */
   }
 }
 
@@ -5547,6 +5618,7 @@ async function boot() {
 
   await listen<ScanProgress>("scan://progress", (e) => showProgress(e.payload));
   await listen<ExportProgress>("export://progress", (e) => showExportProgress(e.payload));
+  await setupDragDrop();
   await showStartupError();
 
   updateCullInfo();
