@@ -878,9 +878,12 @@ async function loadQualityConfig() {
  * 这张照片有没有机器「怀疑」的硬伤。
  * 一律写「疑似」：清晰度按最清晰区域算、曝光只看溢出占比，都是初筛，
  * 浅景深和雪景仍可能误判，最终判断交给眼睛（以及大图里的直方图）。
+ *
+ * 文案是「疑似 + 两字」：和侧栏分面、分析完成提示、详情面板用同一套词，
+ * 卡片、侧栏、提示三处说同一件事，不能各叫各的。
  */
 function qualityIssue(c: PairCard): string | null {
-  if (is(c.sharpness) && (c.sharpness as number) < qualityCfg.blurThreshold) return "疑似糊";
+  if (is(c.sharpness) && (c.sharpness as number) < qualityCfg.blurThreshold) return "疑似跑焦";
   if (is(c.overexposed) && (c.overexposed as number) >= qualityCfg.overexposedThreshold)
     return "疑似过曝";
   if (is(c.underexposed) && (c.underexposed as number) >= qualityCfg.underexposedThreshold)
