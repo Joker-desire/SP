@@ -2651,6 +2651,8 @@ function applyFeatures() {
       : `当前：${label}。点开可选择显示哪些功能（⌘/Ctrl + ,）`;
   applyCols(colsByMode[uiMode]);
   updateFeatChrome();
+  // 直方图关掉了，挂在图上的面板也得收：否则开关说「关」，唯一的关闭键还被藏了
+  closeHistogramIfHidden();
 }
 
 /** 换一个预设；列数、侧栏这些「档位级的习惯」跟着各档走。 */
@@ -2837,6 +2839,25 @@ elFeatReset.addEventListener("click", () => {
   renderFeatureList();
   setHint("已恢复推荐配置（新装为简洁，已有图库为专业）。");
 });
+
+/**
+ * 当前挡在最前面的弹窗（含它的关闭动作）。
+ *
+ * 快捷键和拖放都要先问一句：弹窗开着时，键盘与鼠标都属于弹窗，不能落到背后的网格上。
+ * 以前只挡了「导出」「清理」，在别处按 1 会顺手给背景照片打一星；拖文件进来则直接换库。
+ */
+function openModalEntry(): [HTMLElement, () => void] | null {
+  const modals: Array<[HTMLElement, () => void]> = [
+    [elExportModal, closeExportDialog],
+    [elCacheModal, closeCacheDialog],
+    [elSimilarModal, closeSimilarDialog],
+    [elCompareModal, closeCompareDialog],
+    [elScopeModal, closeScopeModal],
+    [elOffsetModal, () => { elOffsetModal.hidden = true; }],
+    [elFeatModal, closeFeatureDialog],
+  ];
+  return modals.find(([el]) => !el.hidden) ?? null;
+}
 
 for (const btn of elFeatPresetButtons) {
   btn.addEventListener("click", () => {
@@ -4239,6 +4260,12 @@ async function handleDroppedPaths(paths: string[]) {
     setHint("先完成子文件夹范围选择，再拖入新文件夹。", "warn");
     return;
   }
+  // 其它弹窗（导出 / 清理 / 功能页 / 对比…）开着时不接拖入：
+  // 用户此刻在弹窗里做事，一次误拖不该把整个图库换掉。
+  if (openModalEntry()) {
+    setHint("先关掉当前弹窗，再拖入文件夹。", "warn");
+    return;
+  }
 
   // 多文件拖入时取第一个能用的：通常是同一个文件夹里的一批照片，
   // 后端会把照片换成它所在的目录，整批只会得到一个文件夹。
@@ -4274,6 +4301,8 @@ async function setupDragDrop() {
       switch (payload.type) {
         case "enter":
         case "over":
+          // 弹窗开着时不弹提示层：它的层级比弹窗高，会盖在弹窗上，看着像可以松手
+          if (openModalEntry()) break;
           // over 每次移动鼠标都会来，别反复写 DOM
           if (elDropOverlay.hidden) elDropOverlay.hidden = false;
           break;
@@ -5283,6 +5312,20 @@ elLoupeHistBtn.addEventListener("click", () => toggleHistogram());
 elLoupeHistClose.addEventListener("click", () => toggleHistogram(false));
 
 /**
+ * 关掉「直方图」这个功能时，把已经展开的面板一并收起。
+ *
+ * 面板上唯一的关闭按钮就在那个按钮旁边，按钮被藏起来后用户只能看着面板干瞪眼。
+ * 但只收面板、不写 localStorage：偏好留着，功能再加回来时还是按上次的状态。
+ */
+function closeHistogramIfHidden() {
+  if (enabledFeatures.has("loupeHist") || !histOpen) return;
+  histOpen = false;
+  histForId = null;
+  elLoupeHistPanel.hidden = true;
+  elLoupeHistBtn.classList.remove("is-active");
+}
+
+/**
  * 全屏切换。
  *
  * 浏览器预览里（npm run dev 直接开页面）没有 Tauri 的窗口 API，
@@ -5537,18 +5580,8 @@ window.addEventListener("keydown", (e) => {
   }
 
   // 任意弹窗打开时，它才是当前的焦点：只认 Esc，其余快捷键一律不穿透到网格。
-  // 以前只挡了「导出」和「清理」两个，对比 / 连拍 / 时间校正 / 范围选择会漏——
-  // 在弹窗里按 1 会顺手给背景的照片打上一星。
-  const modals: Array<[HTMLElement, () => void]> = [
-    [elExportModal, closeExportDialog],
-    [elCacheModal, closeCacheDialog],
-    [elSimilarModal, closeSimilarDialog],
-    [elCompareModal, closeCompareDialog],
-    [elScopeModal, closeScopeModal],
-    [elOffsetModal, () => { elOffsetModal.hidden = true; }],
-    [elFeatModal, closeFeatureDialog],
-  ];
-  const openModal = modals.find(([el]) => !el.hidden);
+  // 弹窗清单见 openModalEntry()——拖放走的是同一份判断。
+  const openModal = openModalEntry();
   if (openModal) {
     if (key === "Escape") {
       e.preventDefault();
@@ -6073,7 +6106,8 @@ async function boot() {
   applyFeatures();
   // 首次进简洁档、且用户从没动过侧栏 → 默认收起；之后完全尊重用户自己的选择
   if (uiMode === "simple" && localStorage.getItem(SIDEBAR_KEY) === null) toggleSidebar(true);
-  toggleHistogram(histOpen);
+  // 功能开着才恢复面板；关掉时不写 localStorage，偏好留给下次打开
+  if (enabledFeatures.has("loupeHist")) toggleHistogram(histOpen);
   showWelcomeIfNeeded();
 
   // 分组依据选择器：本应用只有分组视图，始终显示
