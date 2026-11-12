@@ -568,7 +568,8 @@
           <span class="loupe-name" id="loupe-name"></span>
           <span class="loupe-exif" id="loupe-exif"></span>
           <span class="loupe-pos" id="loupe-pos"></span>
-          <span class="loupe-keys" data-feature="loupeKeys">← → 翻页 · P/X 标记 · 1-5 打星 · 0 清星 · 6-9 与 - 色标 · I 详情 · O 对焦点 · H 直方图 · + 放大 / _ 缩小 · 滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位 · Esc 关闭</span>
+          <!-- 键位速查由 refreshLoupeKeys() 按当前绑定生成，改键后会跟着变 -->
+          <span class="loupe-keys" data-feature="loupeKeys" id="loupe-keys"></span>
           <button class="btn btn-ghost loupe-close" id="loupe-close">关闭</button>
         </div>
       </div>

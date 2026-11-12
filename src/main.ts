@@ -5658,7 +5658,48 @@ const btnShortcuts = $<HTMLButtonElement>("#btn-shortcuts");
 let recordingId: string | null = null;
 let recHandler: ((e: KeyboardEvent) => void) | null = null;
 
-/** 同步界面上所有 [data-shortcut] 的 <kbd> 文案与按钮 title，让自定义键实时可见。 */
+/** 大图底栏那行键位速查：按当前绑定生成，改键后跟着变。
+ *  仍保持默认、且默认能压成连续区间的一组（1-5 星级、6-9 色标）用「首-末」；
+ *  只要组内有一个被改过，就逐个列出真实键位，绝不显示过时的默认键。
+ *  生成纯文本而非 <kbd>，是怕一排键帽把这行撑宽、挤到文件名和关闭按钮。 */
+function refreshLoupeKeys() {
+  const el = document.querySelector<HTMLElement>("#loupe-keys");
+  if (!el) return;
+
+  const key = (id: string) => SC.prettyKey(SC.bindingOf(id));
+  const consecutive = (xs: string[]) =>
+    xs.length > 1 &&
+    xs.every((v) => v.length === 1) &&
+    xs.every((v, i) => i === 0 || v.charCodeAt(0) === xs[i - 1].charCodeAt(0) + 1);
+
+  /** 一组键的文案：默认且连续就压成「1-5」，否则老老实实逐个列。 */
+  const group = (ids: string[], allowRange: boolean): string => {
+    const defs = ids.map((id) => SC.prettyKey(SC.defaultOf(id)));
+    const unchanged = ids.every((id) => SC.bindingOf(id) === SC.defaultOf(id));
+    if (allowRange && unchanged && consecutive(defs)) {
+      return `${key(ids[0])}-${key(ids[ids.length - 1])}`;
+    }
+    return ids.map(key).join(" ");
+  };
+
+  el.textContent = [
+    `${group(["loupePrev", "loupeNext"], false)} 翻页`,
+    `${key("keep")}/${key("reject")} 标记`,
+    `${group(["star1", "star2", "star3", "star4", "star5"], true)} 打星`,
+    `${key("star0")} 清星`,
+    `${group(["colorRed", "colorYellow", "colorGreen", "colorBlue"], true)} 与 ${key("colorPurple")} 色标`,
+    `${key("toggleDetail")} 详情`,
+    `${key("toggleAf")} 对焦点`,
+    `${key("histogram")} 直方图`,
+    `${key("zoomIn")} 放大 / ${key("zoomOut")} 缩小`,
+    `${key("zoomActual")} 1:1`,
+    // 鼠标手势与窗口级固定键不进注册表，本来就不能改，保持固定文案
+    "滚轮缩放 · 双击放大 · F 全屏 · ⇧F 复位",
+    `${key("closeLoupe")} 关闭`,
+  ].join(" · ");
+}
+
+/** 同步界面上所有 [data-shortcut] 的 <kbd> 文案、按钮 title，以及大图底栏的键位速查。 */
 function refreshKeyHints() {
   document.querySelectorAll<HTMLElement>("[data-shortcut]").forEach((el) => {
     const id = el.dataset.shortcut;
@@ -5668,6 +5709,7 @@ function refreshKeyHints() {
     if (kbd) kbd.textContent = key;
     if (el.title) el.title = el.title.replace(/（快捷键 .*?）/u, `（快捷键 ${key}）`);
   });
+  refreshLoupeKeys();
 }
 
 const CTX_LABEL: Record<string, string> = { both: "通用", grid: "网格", loupe: "大图" };
