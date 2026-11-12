@@ -3684,3 +3684,61 @@ html[data-theme="light"] .zbtn.is-active {
 
 .feat-count { font-size: 11.5px; color: var(--text-dim); }
 .feat-locked { font-size: 10.5px; color: var(--text-mute); }
+
+/* ---------- 自定义快捷键弹窗 ---------- */
+
+.shortcut-section { margin-bottom: 16px; }
+.shortcut-section:last-child { margin-bottom: 0; }
+
+.shortcut-section-title {
+  margin: 0 0 7px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+  font-weight: 600;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border-radius: 8px;
+}
+
+.shortcut-row:nth-child(even) { background: var(--bg-elev); }
+
+.shortcut-label { font-size: 13px; }
+
+.keybtn {
+  min-width: 58px;
+  padding: 4px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.14s, background 0.14s, opacity 0.14s;
+}
+
+.keybtn:hover { border-color: var(--border-strong); }
+
+.keybtn.is-recording {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+/* 录制时，其它键先淡下去，把注意力交给正在录的那个 */
+#shortcuts-modal.is-recording .shortcut-row .keybtn { opacity: 0.5; }
+#shortcuts-modal.is-recording .shortcut-row .keybtn.is-recording { opacity: 1; }
+
+.shortcut-row.is-conflict .keybtn {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.shortcut-row.is-conflict .shortcut-label { color: var(--danger); }

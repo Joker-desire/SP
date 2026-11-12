@@ -7,6 +7,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import * as zoomMath from "./zoom";
 import type { Box } from "./zoom";
+import * as SC from "./shortcuts";
 
 // ---------------------------------------------------------------------------
 // 类型：与 Rust 侧命令的返回值一一对应
@@ -124,10 +125,6 @@ const COLORS: ColorDef[] = [
   { key: "purple", label: "紫", hot: "-" },
 ];
 const findColor = (key: string): ColorDef | undefined => COLORS.find((c) => c.key === key);
-
-/** 按键落在哪个色标上。返回 undefined 表示这个键跟色标无关。 */
-const colorKeyFor = (key: string): string | undefined =>
-  COLORS.find((c) => c.hot === key)?.key;
 
 interface PairPage {
   items: PairCard[];
@@ -2858,6 +2855,7 @@ function openModalEntry(): [HTMLElement, () => void] | null {
     [elScopeModal, closeScopeModal],
     [elOffsetModal, () => { elOffsetModal.hidden = true; }],
     [elFeatModal, closeFeatureDialog],
+    [elShortcutsModal, closeShortcutsDialog],
   ];
   return modals.find(([el]) => !el.hidden) ?? null;
 }
@@ -5569,6 +5567,206 @@ function moveSelection(delta: number) {
   revealCard(items[next].id);
 }
 
+// ---------------------------------------------------------------------------
+// 自定义快捷键：查表派发
+//
+// 动作与默认键位登记在 ./shortcuts.ts；这里只负责「当前键 → 动作 → 副作用」。
+// 窗口级固定键（⌘A / ⌘Z / ⇧⌘Z / ⌘, / F / ⇧F）不进表，写死在下面的监听器里。
+// ---------------------------------------------------------------------------
+
+function currentCtx(): SC.Ctx {
+  return elLoupe.hidden ? "grid" : "loupe";
+}
+
+/** 当前按键在所处场景下命中的可改键动作；没命中返回 undefined（交还给下面的固定逻辑）。 */
+function resolveAction(e: KeyboardEvent): SC.ActionDef | undefined {
+  const norm = SC.normKey(e);
+  const ctx = currentCtx();
+  return SC.ACTIONS.find(
+    (a) => SC.bindingOf(a.id) === norm && (a.ctx === ctx || a.ctx === "both"),
+  );
+}
+
+const COLOR_OF: Record<string, string> = {
+  colorRed: "red",
+  colorYellow: "yellow",
+  colorGreen: "green",
+  colorBlue: "blue",
+  colorPurple: "purple",
+};
+
+/** 执行一个动作。openLoupe 的焦点在卡片控件上时由调用方先拦下，这里不再判断。 */
+function runAction(id: string) {
+  switch (id) {
+    case "keep": applyDecision("keep"); break;
+    case "reject": applyDecision("reject"); break;
+    case "unmark": applyDecision("none"); break;
+    case "star0": applyStars(0); break;
+    case "star1": applyStars(1); break;
+    case "star2": applyStars(2); break;
+    case "star3": applyStars(3); break;
+    case "star4": applyStars(4); break;
+    case "star5": applyStars(5); break;
+    case "colorRed":
+    case "colorYellow":
+    case "colorGreen":
+    case "colorBlue":
+    case "colorPurple":
+      applyColor(COLOR_OF[id]);
+      break;
+    case "moveLeft": moveSelection(-1); break;
+    case "moveRight": moveSelection(1); break;
+    case "moveUp": moveSelection(-gridColumns()); break;
+    case "moveDown": moveSelection(gridColumns()); break;
+    case "openLoupe": {
+      const idx = items.findIndex((c) => selection.has(c.id));
+      if (idx >= 0) void openLoupe(idx);
+      else if (items.length > 0) selectOnly(items[0].id);
+      break;
+    }
+    case "searchFocus": elSearch.focus(); break;
+    case "clearSel": clearSelection(); break;
+    case "toggleSidebar": toggleSidebar(); break;
+    case "colMinus":
+      setCols(Math.min(MAX_COLS, Math.max(MIN_COLS, (colsByMode[uiMode] ?? gridColumns()) - 1)));
+      break;
+    case "colPlus":
+      setCols(Math.min(MAX_COLS, Math.max(MIN_COLS, (colsByMode[uiMode] ?? gridColumns()) + 1)));
+      break;
+    case "loupePrev": stepLoupe(-1); break;
+    case "loupeNext": stepLoupe(1); break;
+    case "zoomIn": zoomBy(1.4); break;
+    case "zoomOut": zoomBy(1 / 1.4); break;
+    case "zoomActual": elLoupeZoomActual.click(); break;
+    case "toggleAf": setAf(!showAf); break;
+    case "toggleDetail": toggleDetail(); break;
+    case "histogram": toggleHistogram(); break;
+    case "closeLoupe": closeLoupe(); break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 自定义快捷键：设置弹窗 + 录制
+// ---------------------------------------------------------------------------
+
+const elShortcutsModal = $<HTMLElement>("#shortcuts-modal");
+const elShortcutsList = $<HTMLElement>("#shortcuts-list");
+const elShortcutsReset = $<HTMLButtonElement>("#shortcuts-reset");
+const elShortcutsDone = $<HTMLButtonElement>("#shortcuts-done");
+const btnShortcuts = $<HTMLButtonElement>("#btn-shortcuts");
+
+let recordingId: string | null = null;
+let recHandler: ((e: KeyboardEvent) => void) | null = null;
+
+/** 同步界面上所有 [data-shortcut] 的 <kbd> 文案与按钮 title，让自定义键实时可见。 */
+function refreshKeyHints() {
+  document.querySelectorAll<HTMLElement>("[data-shortcut]").forEach((el) => {
+    const id = el.dataset.shortcut;
+    if (!id) return;
+    const key = SC.prettyKey(SC.bindingOf(id));
+    const kbd = el.querySelector("kbd");
+    if (kbd) kbd.textContent = key;
+    if (el.title) el.title = el.title.replace(/（快捷键 .*?）/u, `（快捷键 ${key}）`);
+  });
+}
+
+const CTX_LABEL: Record<string, string> = { both: "通用", grid: "网格", loupe: "大图" };
+const CTX_ORDER: Array<SC.Ctx | "both"> = ["both", "grid", "loupe"];
+
+function renderShortcutList() {
+  const conflicts = SC.conflictingIds();
+  elShortcutsList.replaceChildren();
+  for (const ctx of CTX_ORDER) {
+    const acts = SC.ACTIONS.filter((a) => a.ctx === ctx);
+    if (acts.length === 0) continue;
+    const sec = document.createElement("div");
+    sec.className = "shortcut-section";
+    const h = document.createElement("h3");
+    h.className = "shortcut-section-title";
+    h.textContent = CTX_LABEL[ctx];
+    sec.appendChild(h);
+    for (const a of acts) {
+      const row = document.createElement("div");
+      row.className = "shortcut-row" + (conflicts.has(a.id) ? " is-conflict" : "");
+      const label = document.createElement("span");
+      label.className = "shortcut-label";
+      label.textContent = a.label;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "keybtn";
+      btn.dataset.id = a.id;
+      if (recordingId === a.id) {
+        btn.classList.add("is-recording");
+        btn.textContent = "按下新键…";
+        btn.title = "按 Esc 取消录制";
+      } else {
+        btn.textContent = SC.prettyKey(SC.bindingOf(a.id));
+        if (conflicts.has(a.id)) btn.title = "同一场景里和另一个动作撞键了";
+      }
+      btn.addEventListener("click", () => startRecording(a.id));
+      row.appendChild(label);
+      row.appendChild(btn);
+      sec.appendChild(row);
+    }
+    elShortcutsList.appendChild(sec);
+  }
+}
+
+function startRecording(id: string) {
+  recordingId = id;
+  elShortcutsModal.classList.add("is-recording");
+  renderShortcutList();
+  recHandler = (e: KeyboardEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      stopRecording();
+      return;
+    }
+    // 只按了修饰键（⌘/Shift/Ctrl/Alt）不算，避免录进 "shift+shift" 这种脏键
+    if (e.key === "Shift" || e.key === "Control" || e.key === "Alt" || e.key === "Meta") return;
+    SC.setBinding(id, SC.normKey(e));
+    stopRecording();
+    renderShortcutList();
+    refreshKeyHints();
+  };
+  document.addEventListener("keydown", recHandler, true);
+}
+
+function stopRecording() {
+  if (recHandler) {
+    document.removeEventListener("keydown", recHandler, true);
+    recHandler = null;
+  }
+  recordingId = null;
+  elShortcutsModal.classList.remove("is-recording");
+  renderShortcutList();
+}
+
+function openShortcutsDialog() {
+  elShortcutsModal.hidden = false;
+  renderShortcutList();
+  refreshKeyHints();
+}
+
+function closeShortcutsDialog() {
+  stopRecording();
+  elShortcutsModal.hidden = true;
+  btnShortcuts.focus();
+}
+
+btnShortcuts.addEventListener("click", openShortcutsDialog);
+elShortcutsDone.addEventListener("click", closeShortcutsDialog);
+elShortcutsModal.addEventListener("click", (e) => {
+  if (e.target === elShortcutsModal) closeShortcutsDialog();
+});
+elShortcutsReset.addEventListener("click", () => {
+  SC.resetBindings();
+  renderShortcutList();
+  refreshKeyHints();
+  setHint("已恢复默认快捷键。");
+});
+
 window.addEventListener("keydown", (e) => {
   const meta = e.metaKey || e.ctrlKey;
   const key = e.key;
@@ -5633,158 +5831,15 @@ window.addEventListener("keydown", (e) => {
     return;
   }
 
-  // ---- 大图 ----
-  if (!elLoupe.hidden) {
-    if (key === "Escape") {
-      e.preventDefault();
-      closeLoupe();
-      return;
-    }
-    if (key === "ArrowRight") {
-      e.preventDefault();
-      stepLoupe(1);
-      return;
-    }
-    if (key === "ArrowLeft") {
-      e.preventDefault();
-      stepLoupe(-1);
-      return;
-    }
-
-    // 缩放：+ 放大、_ 或 [ 缩小、⇧F 复位、A 到 1:1、F 全屏（在前面统一处理）。
-    // `-` 归紫色色标（见 COLORS，它就在 0 右边），不能被缩放抢先 return 掉。
-    // 0 已经被「清除星级」占了，所以复位不用 0。
-    const lower = key.toLowerCase();
-    if (key === "+" || key === "=") {
-      e.preventDefault();
-      zoomBy(1.4);
-      return;
-    }
-    if (key === "_" || key === "[") {
-      e.preventDefault();
-      zoomBy(1 / 1.4);
-      return;
-    }
-    if (lower === "a") {
-      e.preventDefault();
-      elLoupeZoomActual.click();
-      return;
-    }
-    if (lower === "o") {
-      e.preventDefault();
-      setAf(!showAf);
-      return;
-    }
-    if (lower === "i") {
-      e.preventDefault();
-      toggleDetail();
-      return;
-    }
-    if (lower === "h") {
-      e.preventDefault();
-      toggleHistogram();
-      return;
-    }
-
-    // 标记完自动跳下一张——这就是选片的手感：一个键处理一张，手不离开键盘
-    if (lower === "p") {
-      e.preventDefault();
-      applyDecision("keep");
-      return;
-    }
-    if (lower === "x") {
-      e.preventDefault();
-      applyDecision("reject");
-      return;
-    }
-    if (lower === "u") {
-      e.preventDefault();
-      applyDecision("none");
-      return;
-    }
-    if (/^[0-5]$/.test(key)) {
-      e.preventDefault();
-      applyStars(Number(key));
-      return;
-    }
-    const loupColor = colorKeyFor(key);
-    if (loupColor) {
-      e.preventDefault();
-      applyColor(loupColor);
-    }
-    return;
-  }
-
-  // ---- 网格 ----
-  if (key === "Escape") {
-    clearSelection();
-    return;
-  }
-
-  if (key === "Enter" || key === " ") {
-    if (onWidget(e)) return;
+  // ---- 自定义快捷键：查表派发 ----
+  // 窗口级固定键（⌘A / ⌘Z / ⇧⌘Z / ⌘, / F / ⇧F）已在上面处理；这里只接可改键的动作。
+  // 焦点在卡片控件上时不抢「打开大图」（Enter / 空格），交还给控件自身。
+  const act = resolveAction(e);
+  if (act) {
+    if (act.id === "openLoupe" && onWidget(e)) return;
     e.preventDefault();
-    const idx = items.findIndex((c) => selection.has(c.id));
-    if (idx >= 0) void openLoupe(idx);
-    else if (items.length > 0) selectOnly(items[0].id);
+    runAction(act.id);
     return;
-  }
-
-  if (key === "ArrowRight" || key === "ArrowLeft" || key === "ArrowDown" || key === "ArrowUp") {
-    e.preventDefault();
-    if (key === "ArrowRight") moveSelection(1);
-    else if (key === "ArrowLeft") moveSelection(-1);
-    else if (key === "ArrowDown") moveSelection(gridColumns());
-    else moveSelection(-gridColumns());
-    return;
-  }
-
-  // 网格里 [ / ] 直接调列数（大图里的 [ 是缩小，上面已经 return 掉了）
-  if (key === "[" || key === "]") {
-    e.preventDefault();
-    const cur = colsByMode[uiMode] ?? gridColumns();
-    setCols(Math.min(MAX_COLS, Math.max(MIN_COLS, cur + (key === "]" ? 1 : -1))));
-    return;
-  }
-
-  if (key === "\\") {
-    if (typingInField(e)) return;
-    e.preventDefault();
-    toggleSidebar();
-    return;
-  }
-
-  if (key === "/") {
-    e.preventDefault();
-    elSearch.focus();
-    return;
-  }
-
-  const lower = key.toLowerCase();
-  if (lower === "p") {
-    e.preventDefault();
-    applyDecision("keep");
-    return;
-  }
-  if (lower === "x") {
-    e.preventDefault();
-    applyDecision("reject");
-    return;
-  }
-  if (lower === "u") {
-    e.preventDefault();
-    applyDecision("none");
-    return;
-  }
-  if (/^[0-5]$/.test(key)) {
-    e.preventDefault();
-    applyStars(Number(key));
-    return;
-  }
-  const gridColor = colorKeyFor(key);
-  if (gridColor) {
-    e.preventDefault();
-    applyColor(gridColor);
   }
 });
 
@@ -6135,6 +6190,9 @@ async function boot() {
   }
 
   await refreshLibrary();
+
+  // 把上一次保存的自定义键同步到界面（标记按钮 / 缩放按钮的 <kbd> 与 title）
+  refreshKeyHints();
 
   if (savedRoot) {
     // 图库铺好之后再增量重扫：文件没变的话是纯 stat，秒级完成，

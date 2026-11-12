@@ -97,6 +97,15 @@
           <span class="update-dot" id="update-dot" hidden></span>
         </button>
 
+        <button class="btn btn-ghost btn-icon" id="btn-shortcuts" title="自定义快捷键" aria-label="自定义快捷键">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+            <rect x="1.8" y="4.4" width="12.4" height="7.2" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/>
+            <path d="M5.2 8h5.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+            <circle cx="5.2" cy="8" r="1.2" fill="currentColor"/>
+            <circle cx="10.8" cy="8" r="1.2" fill="currentColor"/>
+          </svg>
+        </button>
+
         <button class="btn btn-ghost" id="btn-rescan" data-feature="rescan" disabled>
           <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
             <path
@@ -360,19 +369,19 @@
              选中一批 → 按一下键 → 状态立刻落到卡片上。 -->
         <div class="cullbar" id="cullbar" hidden>
           <div class="cullbar-side">
-            <button class="cbtn cbtn--keep" id="btn-keep" data-feature="keepReject" title="标记为保留（快捷键 P）">
+            <button class="cbtn cbtn--keep" id="btn-keep" data-feature="keepReject" data-shortcut="keep" title="标记为保留（快捷键 P）">
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="m3.2 8.4 3.2 3.2 6.4-7.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
               </svg>
               保留<kbd>P</kbd>
             </button>
-            <button class="cbtn cbtn--reject" id="btn-reject" data-feature="keepReject" title="标记为淘汰（快捷键 X）">
+            <button class="cbtn cbtn--reject" id="btn-reject" data-feature="keepReject" data-shortcut="reject" title="标记为淘汰（快捷键 X）">
               <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
                 <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
               </svg>
               淘汰<kbd>X</kbd>
             </button>
-            <button class="cbtn" id="btn-unmark" data-feature="unmark" title="清除标记与星级（快捷键 U）">清除<kbd>U</kbd></button>
+            <button class="cbtn" id="btn-unmark" data-feature="unmark" data-shortcut="unmark" title="清除标记与星级（快捷键 U）">清除<kbd>U</kbd></button>
           </div>
 
           <div class="cullbar-stars" id="cullbar-stars" data-feature="stars" role="group" aria-label="星级">
@@ -469,14 +478,14 @@
       <div class="loupe-stage">
         <!-- 缩放控件浮在图上：放大看细节是选片时的高频动作，不该让人去底栏找 -->
         <div class="loupe-zoom" id="loupe-zoom" data-feature="loupeZoom">
-          <button class="zbtn" id="loupe-zoom-out" title="缩小（快捷键 -）" aria-label="缩小">
+          <button class="zbtn" id="loupe-zoom-out" data-shortcut="zoomOut" title="缩小（快捷键 -）" aria-label="缩小">
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           </button>
           <button class="zbtn zbtn-text" id="loupe-zoom-reset" title="复位到适应窗口（快捷键 F）">100%</button>
-          <button class="zbtn" id="loupe-zoom-in" title="放大（快捷键 +）" aria-label="放大">
+          <button class="zbtn" id="loupe-zoom-in" data-shortcut="zoomIn" title="放大（快捷键 +）" aria-label="放大">
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           </button>
-          <button class="zbtn zbtn-text" id="loupe-zoom-actual" title="放大到 1:1 像素（快捷键 A）">1:1</button>
+          <button class="zbtn zbtn-text" id="loupe-zoom-actual" data-shortcut="zoomActual" title="放大到 1:1 像素（快捷键 A）">1:1</button>
         </div>
 
         <img class="loupe-img" id="loupe-img" alt="" />
@@ -514,22 +523,22 @@
 
         <!-- 大图里的标记按钮和网格里的是同一批操作，只是位置更顺手 -->
         <div class="loupe-actions">
-          <button class="cbtn cbtn--keep" id="loupe-keep" title="保留并看下一张（P）">
+          <button class="cbtn cbtn--keep" id="loupe-keep" data-shortcut="keep" title="保留并看下一张（P）">
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
               <path d="m3.2 8.4 3.2 3.2 6.4-7.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             保留<kbd>P</kbd>
           </button>
-          <button class="cbtn cbtn--reject" id="loupe-reject" title="淘汰并看下一张（X）">
+          <button class="cbtn cbtn--reject" id="loupe-reject" data-shortcut="reject" title="淘汰并看下一张（X）">
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
               <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
             </svg>
             淘汰<kbd>X</kbd>
           </button>
-          <button class="cbtn" id="loupe-unmark" title="清除标记（U）">清除<kbd>U</kbd></button>
-          <button class="cbtn" id="loupe-detail" data-feature="loupeDetail" title="详细信息（I）">详情<kbd>I</kbd></button>
-          <button class="cbtn" id="loupe-af-toggle" data-feature="loupeAf" title="显示相机记录的对焦框（O）">对焦点<kbd>O</kbd></button>
-          <button class="cbtn" id="loupe-histogram" data-feature="loupeHist" title="显示 RGB / 亮度直方图（H）">直方图<kbd>H</kbd></button>
+          <button class="cbtn" id="loupe-unmark" data-shortcut="unmark" title="清除标记（U）">清除<kbd>U</kbd></button>
+          <button class="cbtn" id="loupe-detail" data-feature="loupeDetail" data-shortcut="toggleDetail" title="详细信息（I）">详情<kbd>I</kbd></button>
+          <button class="cbtn" id="loupe-af-toggle" data-feature="loupeAf" data-shortcut="toggleAf" title="显示相机记录的对焦框（O）">对焦点<kbd>O</kbd></button>
+          <button class="cbtn" id="loupe-histogram" data-feature="loupeHist" data-shortcut="histogram" title="显示 RGB / 亮度直方图（H）">直方图<kbd>H</kbd></button>
 
           <!-- 星级放一组可点的按钮：按 1-5 打星，按完停在原地，
                再按别的数字就是调整——打星是评价，不是过片 -->
@@ -887,6 +896,20 @@
       <div class="drop-card">
         <span class="drop-title">松开即可导入</span>
         <span class="drop-sub">拖入照片文件夹，或拖一张 JPG / NEF 照片（导入其所在文件夹）</span>
+      </div>
+    </div>
+    <!-- ── 自定义快捷键 ─────────────────────────────────────────────── -->
+    <div class="modal" id="shortcuts-modal" hidden>
+      <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">
+        <h2 class="modal-title" id="shortcuts-title">自定义快捷键</h2>
+        <p class="modal-note">按自己的习惯改键。同一场景里两个动作绑了同一个键会标红，改完立刻生效，存在本机。</p>
+        <div class="modal-body">
+          <div id="shortcuts-list"></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-ghost" id="shortcuts-reset" type="button">恢复默认</button>
+          <button class="btn btn-primary" id="shortcuts-done" type="button">完成</button>
+        </div>
       </div>
     </div>
   </body>
