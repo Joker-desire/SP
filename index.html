@@ -224,6 +224,7 @@
           type="button"
           aria-controls="sidebar-scroll"
           aria-expanded="true"
+          data-shortcut="toggleSidebar"
           title="收起侧栏（快捷键 \）"
         >
           <svg class="icon sidebar-toggle-icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -461,7 +462,7 @@
           <span><kbd>←</kbd><kbd>→</kbd> 翻页</span>
           <span><kbd>Esc</kbd> 关闭大图</span>
         </div>
-        <p class="welcome-note">想用更多功能？点顶栏「功能」逐项勾选，或直接套「专业」预设。</p>
+        <p class="welcome-note">上面是出厂默认键位，都能在顶栏「快捷键」里改成自己顺手的；想用更多功能？点顶栏「功能」逐项勾选，或直接套「专业」预设。</p>
         <button class="btn btn-primary welcome-ok" id="welcome-ok" type="button">知道了，开始选片</button>
       </div>
     </div>
@@ -478,11 +479,12 @@
       <div class="loupe-stage">
         <!-- 缩放控件浮在图上：放大看细节是选片时的高频动作，不该让人去底栏找 -->
         <div class="loupe-zoom" id="loupe-zoom" data-feature="loupeZoom">
-          <button class="zbtn" id="loupe-zoom-out" data-shortcut="zoomOut" title="缩小（快捷键 -）" aria-label="缩小">
+          <button class="zbtn" id="loupe-zoom-out" data-shortcut="zoomOut" title="缩小（快捷键 _）" aria-label="缩小">
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           </button>
-          <button class="zbtn zbtn-text" id="loupe-zoom-reset" title="复位到适应窗口（快捷键 F）">100%</button>
-          <button class="zbtn" id="loupe-zoom-in" data-shortcut="zoomIn" title="放大（快捷键 +）" aria-label="放大">
+          <!-- ⇧F 是窗口级固定键，不进注册表，title 保持静态 -->
+          <button class="zbtn zbtn-text" id="loupe-zoom-reset" title="复位到适应窗口（⇧F）">100%</button>
+          <button class="zbtn" id="loupe-zoom-in" data-shortcut="zoomIn" title="放大（快捷键 =）" aria-label="放大">
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.5v9M3.5 8h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           </button>
           <button class="zbtn zbtn-text" id="loupe-zoom-actual" data-shortcut="zoomActual" title="放大到 1:1 像素（快捷键 A）">1:1</button>
@@ -521,44 +523,45 @@
           <div class="lh-note" id="loupe-hist-note">曲线堆在最右＝高光溢出，堆在最左＝暗部死黑</div>
         </aside>
 
-        <!-- 大图里的标记按钮和网格里的是同一批操作，只是位置更顺手 -->
+        <!-- 大图里的标记按钮和网格里的是同一批操作，只是位置更顺手。
+             带 data-shortcut 的按钮由 refreshKeyHints() 按当前绑定刷新 <kbd> 与 title。 -->
         <div class="loupe-actions">
-          <button class="cbtn cbtn--keep" id="loupe-keep" data-shortcut="keep" title="保留并看下一张（P）">
+          <button class="cbtn cbtn--keep" id="loupe-keep" data-shortcut="keep" title="保留并看下一张（快捷键 P）">
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
               <path d="m3.2 8.4 3.2 3.2 6.4-7.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             保留<kbd>P</kbd>
           </button>
-          <button class="cbtn cbtn--reject" id="loupe-reject" data-shortcut="reject" title="淘汰并看下一张（X）">
+          <button class="cbtn cbtn--reject" id="loupe-reject" data-shortcut="reject" title="淘汰并看下一张（快捷键 X）">
             <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
               <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
             </svg>
             淘汰<kbd>X</kbd>
           </button>
-          <button class="cbtn" id="loupe-unmark" data-shortcut="unmark" title="清除标记（U）">清除<kbd>U</kbd></button>
-          <button class="cbtn" id="loupe-detail" data-feature="loupeDetail" data-shortcut="toggleDetail" title="详细信息（I）">详情<kbd>I</kbd></button>
-          <button class="cbtn" id="loupe-af-toggle" data-feature="loupeAf" data-shortcut="toggleAf" title="显示相机记录的对焦框（O）">对焦点<kbd>O</kbd></button>
-          <button class="cbtn" id="loupe-histogram" data-feature="loupeHist" data-shortcut="histogram" title="显示 RGB / 亮度直方图（H）">直方图<kbd>H</kbd></button>
+          <button class="cbtn" id="loupe-unmark" data-shortcut="unmark" title="清除标记（快捷键 U）">清除<kbd>U</kbd></button>
+          <button class="cbtn" id="loupe-detail" data-feature="loupeDetail" data-shortcut="toggleDetail" title="详细信息（快捷键 I）">详情<kbd>I</kbd></button>
+          <button class="cbtn" id="loupe-af-toggle" data-feature="loupeAf" data-shortcut="toggleAf" title="显示相机记录的对焦框（快捷键 O）">对焦点<kbd>O</kbd></button>
+          <button class="cbtn" id="loupe-histogram" data-feature="loupeHist" data-shortcut="histogram" title="显示 RGB / 亮度直方图（快捷键 H）">直方图<kbd>H</kbd></button>
 
-          <!-- 星级放一组可点的按钮：按 1-5 打星，按完停在原地，
+          <!-- 星级放一组可点的按钮：默认 1-5 打星，按完停在原地，
                再按别的数字就是调整——打星是评价，不是过片 -->
           <div class="loupe-stars" id="loupe-stars" data-feature="loupeStars" role="group" aria-label="星级">
-            <button type="button" data-stars="1" title="1 星（快捷键 1）">★</button>
-            <button type="button" data-stars="2" title="2 星（快捷键 2）">★</button>
-            <button type="button" data-stars="3" title="3 星（快捷键 3）">★</button>
-            <button type="button" data-stars="4" title="4 星（快捷键 4）">★</button>
-            <button type="button" data-stars="5" title="5 星（快捷键 5）">★</button>
-            <button type="button" data-stars="0" class="is-clear" title="清除星级（快捷键 0）">0</button>
+            <button type="button" data-stars="1" data-shortcut="star1" title="1 星（快捷键 1）">★</button>
+            <button type="button" data-stars="2" data-shortcut="star2" title="2 星（快捷键 2）">★</button>
+            <button type="button" data-stars="3" data-shortcut="star3" title="3 星（快捷键 3）">★</button>
+            <button type="button" data-stars="4" data-shortcut="star4" title="4 星（快捷键 4）">★</button>
+            <button type="button" data-stars="5" data-shortcut="star5" title="5 星（快捷键 5）">★</button>
+            <button type="button" data-stars="0" class="is-clear" data-shortcut="star0" title="清除星级（快捷键 0）">0</button>
           </div>
 
-          <!-- 色标同理做成可点的：键盘 6-9 和减号能按，鼠标这边也要能点。
+          <!-- 色标同理做成可点的：默认 6-9 和减号能按，鼠标这边也要能点。
                再点一次同一个色＝取消，和键盘一个规矩 -->
           <div class="loupe-colors" id="loupe-colors" data-feature="loupeColors" role="group" aria-label="色标">
-            <button type="button" data-color="red" title="红 6">红<kbd>6</kbd></button>
-            <button type="button" data-color="yellow" title="黄 7">黄<kbd>7</kbd></button>
-            <button type="button" data-color="green" title="绿 8">绿<kbd>8</kbd></button>
-            <button type="button" data-color="blue" title="蓝 9">蓝<kbd>9</kbd></button>
-            <button type="button" data-color="purple" title="紫 减号键">紫<kbd>-</kbd></button>
+            <button type="button" data-color="red" data-shortcut="colorRed" title="红色标（快捷键 6）">红<kbd>6</kbd></button>
+            <button type="button" data-color="yellow" data-shortcut="colorYellow" title="黄色标（快捷键 7）">黄<kbd>7</kbd></button>
+            <button type="button" data-color="green" data-shortcut="colorGreen" title="绿色标（快捷键 8）">绿<kbd>8</kbd></button>
+            <button type="button" data-color="blue" data-shortcut="colorBlue" title="蓝色标（快捷键 9）">蓝<kbd>9</kbd></button>
+            <button type="button" data-color="purple" data-shortcut="colorPurple" title="紫色标（快捷键 -）">紫<kbd>-</kbd></button>
           </div>
 
           <span class="loupe-mark" id="loupe-mark"></span>

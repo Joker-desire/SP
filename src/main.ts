@@ -103,26 +103,23 @@ interface Patch {
 }
 
 /**
- * 色标。五星 martial 之外的第二条「标记轴」——PC 上不详述：同一批里
- * 「要修的」「要发的」「给客户看的」常常重叠，星级一旦被用去表示去留，
- * 就再也表达不了批次了。色标颜色本身不表意，你定它是什么意思。
+ * 色标。星级之外的第二条「标记轴」——同一批里「要修的」「要发的」「给客户看的」
+ * 常常重叠，星级一旦被用去表示去留，就再也表达不了批次了。颜色本身不表意，你定它是什么意思。
  *
- * 键位上没有第五个数字可用了 —— `0` 已经是「清除星级」，`1`-`5` 是星级，
- * 所以紫色挂在减号上（就在 `0` 右边，位置上是第五个）。再按一次同一个键＝取消该色标。
- *
- * 后端 lib.rs 里有一份对应的 `COLOR_KEYS`，改任一边都要通知另一边。
+ * 出厂键位是 `6`-`9` 与减号（紫色挂在减号上，因为 `0` 已给「清除星级」、`1`-`5` 是星级），
+ * 但键位归 shortcuts.ts 管、用户可以改；这里只登记颜色与中文名，不再存键位。
+ * 后端 lib.rs 的 COLOR_KEYS 只决定侧栏分面的顺序，不参与按键解析。
  */
 interface ColorDef {
   key: string;
   label: string;
-  hot: string;
 }
 const COLORS: ColorDef[] = [
-  { key: "red", label: "红", hot: "6" },
-  { key: "yellow", label: "黄", hot: "7" },
-  { key: "green", label: "绿", hot: "8" },
-  { key: "blue", label: "蓝", hot: "9" },
-  { key: "purple", label: "紫", hot: "-" },
+  { key: "red", label: "红" },
+  { key: "yellow", label: "黄" },
+  { key: "green", label: "绿" },
+  { key: "blue", label: "蓝" },
+  { key: "purple", label: "紫" },
 ];
 const findColor = (key: string): ColorDef | undefined => COLORS.find((c) => c.key === key);
 
@@ -1039,8 +1036,7 @@ function paintCard(card: HTMLElement, c: PairCard) {
   if (stripe) {
     stripe.hidden = c.color === "";
     stripe.dataset.color = c.color;
-    const def = c.color ? findColor(c.color) : undefined;
-    stripe.title = def ? `${def.label}色标 —— 按 ${def.hot} 可取消` : "";
+    refreshStripeTitle(stripe);
   }
 }
 
@@ -5699,7 +5695,17 @@ function refreshLoupeKeys() {
   ].join(" · ");
 }
 
-/** 同步界面上所有 [data-shortcut] 的 <kbd> 文案、按钮 title，以及大图底栏的键位速查。 */
+/** 卡片左侧色带的提示也读当前绑定——不能再用出厂键糊弄改过键的人。 */
+function refreshStripeTitle(stripe: HTMLElement) {
+  const color = stripe.dataset.color ?? "";
+  const def = color ? findColor(color) : undefined;
+  // colorRed / colorYellow … 正好是注册表里的动作 id，不必再维护一张映射表
+  const actionId = color ? `color${color.charAt(0).toUpperCase()}${color.slice(1)}` : "";
+  const key = actionId ? SC.prettyKey(SC.bindingOf(actionId)) : "";
+  stripe.title = def && key ? `${def.label}色标 —— 按 ${key} 可取消` : "";
+}
+
+/** 同步界面上所有键位提示：带 [data-shortcut] 的 <kbd>/title、卡片色带 title、大图底栏速查。 */
 function refreshKeyHints() {
   document.querySelectorAll<HTMLElement>("[data-shortcut]").forEach((el) => {
     const id = el.dataset.shortcut;
@@ -5709,6 +5715,8 @@ function refreshKeyHints() {
     if (kbd) kbd.textContent = key;
     if (el.title) el.title = el.title.replace(/（快捷键 .*?）/u, `（快捷键 ${key}）`);
   });
+  // 卡片复用 DOM，改键时已经渲染出来的那些色带也要一并刷新
+  document.querySelectorAll<HTMLElement>(".card-color[data-color]").forEach(refreshStripeTitle);
   refreshLoupeKeys();
 }
 
