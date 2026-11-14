@@ -89,6 +89,7 @@ Windows 遇到 SmartScreen 提示点「仍要运行」。
 
 | 版本 | 主要变化 |
 |---|---|
+| [v0.5.3](https://github.com/Joker-desire/SP/releases/tag/v0.5.3) · 2026-11-14 | 修复导出会多导未标记照片 |
 | [v0.5.2](https://github.com/Joker-desire/SP/releases/tag/v0.5.2) · 2026-11-13 | 键位提示跟随自定义快捷键，修正键位文案、补齐文档 |
 | [v0.5.1](https://github.com/Joker-desire/SP/releases/tag/v0.5.1) · 2026-11-12 | 自定义快捷键：核心选片键可改、支持修饰键与冲突检测，界面键位提示实时刷新 |
 | [v0.5.0](https://github.com/Joker-desire/SP/releases/tag/v0.5.0) · 2026-11-10 | 悬停一步标记、1–8 列自定义、功能页逐项开关、拖入导入、系统托盘、画质判定重做与大图直方图、横竖图分组 |
