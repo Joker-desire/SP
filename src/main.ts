@@ -3590,15 +3590,20 @@ async function runExport() {
   elExportFill.style.width = "0%";
   elExportProgressText.textContent = "正在整理…";
 
-  // 「当前选中的」是显式的一串 id，不掺筛选条件——勾了什么就导出什么。
-  // 其余范围沿用原来的口径：日期、机身、搜索这些条件继续生效，
-  // 「把这一天的保留都导出」是最常用的组合。导出范围要覆盖侧栏的选片状态
-  // 选择，所以这里用 decisions 数组整个替换掉；"all" 就是空数组＝不筛。
+  // 「当前选中的」是显式的一串 id，勾了什么就导出什么；其余筛选条件继续生效，
+  // 选中项本来就在当前视图里，叠加不会把它们筛掉。
+  // 「当前筛选下的全部照片」必须完整沿用当前筛选（含侧栏的选片状态）——
+  // 这一项显示的张数就是筛选后的网格总数，少传一层条件就会把没标的片子一起导出去。
+  // 「保留的 / 淘汰的 / 全部已标记」是按状态另选范围，计数来自当前文件夹，
+  // 所以只替换 decisions 这一维，日期、机身、搜索等条件仍照旧生效（「把这一天的保留都导出」）。
   const onlyIds = scope === "selected" ? Array.from(selection).filter((id) => itemById.has(id)) : null;
+  const base = currentFilterPayload();
   const filter =
     onlyIds && onlyIds.length > 0
-      ? { ...currentFilterPayload(), decisions: [], ids: onlyIds }
-      : { ...currentFilterPayload(), decisions: scope === "all" ? [] : [scope] };
+      ? { ...base, decisions: [], ids: onlyIds }
+      : scope === "all"
+        ? base
+        : { ...base, decisions: [scope] };
 
   try {
     const summary = await invoke<ExportSummary>("export_selection", {
