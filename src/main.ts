@@ -1243,6 +1243,17 @@ async function reload(opts?: { keepView?: boolean }) {
   updateCullInfo();
 }
 
+/** 正在等分页落地的人。大图翻页越过 items 末尾时，要等这一页真的 push 进来才能继续。 */
+const pageWaiters: Array<() => void> = [];
+
+function waitForPage(): Promise<void> {
+  return new Promise((resolve) => pageWaiters.push(resolve));
+}
+
+function pageSettled() {
+  while (pageWaiters.length) pageWaiters.shift()?.();
+}
+
 async function loadMore(token: number) {
   if (loadingPage || noMore || token !== renderToken) return;
   loadingPage = true;
@@ -1258,6 +1269,7 @@ async function loadMore(token: number) {
     updateCount();
     renderEmpty();
     loadingPage = false;
+    pageSettled();
     return;
   }
 
@@ -1284,6 +1296,8 @@ async function loadMore(token: number) {
 
     // 首屏没填满时继续取，直到出现滚动条或取完
     if (!noMore && elGrid.scrollHeight <= elGrid.clientHeight + 200) {
+      // 递归这一跳自己会置 loadingPage 并在 finally 里收尾；外层此时不能清标志，
+      // 否则等页的人会误以为已经落地、拿着旧的 items.length 再判一次越界。
       recursing = true;
       loadingPage = false;
       return loadMore(token);
@@ -1292,10 +1306,14 @@ async function loadMore(token: number) {
     setHint(`读取图库失败：${String(e)}`, "error");
     noMore = true;
   } finally {
-    loadingPage = false;
-    // 上面有几条提前 return 的路（换视图 / 读失败）没走到 updateCount，
-    // 不在这里补一次，计数那条就会一直挂着「读取中…」
-    if (!recursing) updateCount();
+    // 递归补页由内层收尾；外层提前清标志会让正在等页的人拿到半截状态。
+    if (!recursing) {
+      loadingPage = false;
+      // 上面有几条提前 return 的路（换视图 / 读失败）没走到 updateCount，
+      // 不在这里补一次，计数那条就会一直挂着「读取中…」
+      updateCount();
+      pageSettled();
+    }
   }
 }
 
@@ -5456,6 +5474,9 @@ elLoupeAfToggle.addEventListener("click", () => setAf(!showAf));
 elLoupeAfToggle.classList.toggle("is-active", showAf);
 
 function closeLoupe() {
+  // 先记下当前这张：loupeIndex 马上要清掉，而网格该停在大图最后看的那张，
+  // 不是当初点进去的那张（翻了页却不动网格，关掉后会"跳回原处"）。
+  const current = loupeIndex >= 0 ? items[loupeIndex] : undefined;
   loupeIndex = -1;
   elLoupe.hidden = true;
   hideAf();
@@ -5466,13 +5487,35 @@ function closeLoupe() {
   window.clearTimeout(detailTimer);
   resetZoom();
   updateCullInfo();
+  // 只挪滚动位置，不动 selection —— 大图里翻页不该清掉网格里已勾的导出项
+  if (current) revealCard(current.id);
 }
 
-function stepLoupe(delta: number) {
-  if (loupeIndex < 0) return;
-  const next = loupeIndex + delta;
-  if (next < 0 || next >= items.length) return;
-  void openLoupe(next);
+let steppingLoupe = false;
+
+/** 大图翻页不能只靠网格滚动补页：大图盖住网格后没有滚动事件，越界时要主动取下一页。 */
+async function stepLoupe(delta: number) {
+  if (loupeIndex < 0 || steppingLoupe) return;
+  const anchor = loupeIndex;
+  const next = anchor + delta;
+  if (next < 0) return;
+
+  steppingLoupe = true;
+  try {
+    // 正常一页 120 张就够；上限兜底防止筛选切换后 token 对不上时空转。
+    for (let attempt = 0; next >= items.length && !noMore && attempt < 8; attempt += 1) {
+      if (loadingPage) await waitForPage();
+      else await loadMore(renderToken);
+    }
+    // 等待期间可能已经翻页 / 关窗 / 换了视图，别把人送到旧索引上
+    if (loupeIndex !== anchor || next >= items.length) return;
+
+    // 快到这一页末尾就提前取下一页，正常连续翻阅时不会撞到等待
+    if (!noMore && !loadingPage && next >= items.length - 24) void loadMore(renderToken);
+    void openLoupe(next);
+  } finally {
+    steppingLoupe = false;
+  }
 }
 
 elLoupeClose.addEventListener("click", closeLoupe);
