@@ -3100,9 +3100,12 @@ async function applyPatch(patch: Patch, idsOverride?: number[], bulkOverride?: b
 
     if (inLoupe) {
       if (dropped && current && gone.has(current.id)) {
-        // 当前这张被筛选拿掉了，同一个索引现在指的就是下一张
-        if (items.length === 0) closeLoupe();
-        else void openLoupe(Math.min(loupeIndex, items.length - 1));
+        // 当前这张被筛选拿掉了：它在 items 里被摘除，同一个索引现在就指向下一张。
+        // 若它正好是已加载页的最后一张，索引会越界——交给带补页的 stepLoupe(0)，
+        // 不能用 Math.min 钳回去（那会倒退到看过的上一张，还绕过了补页）。
+        // 已经是全库最后一张、后面确实没有了，就退出大图，别停在已移除的那张上。
+        if (items.length === 0 || (loupeIndex >= items.length && noMore)) closeLoupe();
+        else stepLoupe(0);
       } else if (advance) {
         stepLoupe(1);
       } else {
