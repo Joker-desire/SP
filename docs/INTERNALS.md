@@ -125,6 +125,14 @@ SP_DB_PATH=/path/to/library.db cargo test real_db   # 先复制一份，别指�
 
 **0.5.1 新增（已随 v0.5.1 发布）**：自定义快捷键。新增 `src/shortcuts.ts` 动作注册表（场景 / 默认键 / `localStorage` 持久化 / 同场景冲突检测），`main.ts` 的 keydown 由写死分支改为查表派发；顶栏键盘图标打开设置弹窗，录制新键（支持修饰键）、撞键标红、一键恢复默认；按钮上的键位标记、按钮提示与大图底栏速查按当前绑定实时刷新。窗口级固定键 `⌘A` / `⌘Z` / `⇧⌘Z` / `⌘,` / `F` / `⇧F` 不参与自定义。反馈来源与交付记录见 [`FEEDBACK.md`](FEEDBACK.md)「后续反馈」。
 
+**方向修复与手动旋转（v0.5.4 之后，本分支）**：修「手机竖拍在网格里横躺」的回归。根因是方向信息在索引阶段丢失且缓存无法自愈，三处一起改：
+
+- **A · 读取容错**：`indexer::read_exif` 不再因一个字段坏掉就丢光全部；整段 EXIF 读不出来时，退到 `thumb::orientation_from_source` 从内嵌预览 JPEG 的 APP1 里补读方向。`thumb::find_orientation` 先查 IFD0、再 `fields()` 全局兜底（后期工具会把 Orientation 挪进子 IFD）。
+- **B · 缓存带方向**：`thumb::cache_key` = 指纹 + 方向 + 尺寸，方向补回 / 手动旋转后键自动变，旧横躺图不再被复用。`indexer` 的 `KnownFile` 带上 `exif_ok`/`orientation`，方向缺失的图每次重扫都强制重读 EXIF（快路径不再跳过它们）。
+- **C · 手动旋转**：`photos` 表新增 `orientation_override`（NULL = 没手动转过）；所有方向读取点统一用 `EFFECTIVE_ORIENTATION = COALESCE(orientation_override, orientation)`——缩略图、详情、横竖分面、对焦框一致。大图加「右转 90°」（`R`）与「复原」，`rotate_orientation` 按 D4 群运算（1→6→3→8、2→7→4→5）。重扫写回 EXIF 不会冲掉手动值。
+
+`orientation=None` 与 `orientation=1` 在缓存键里刻意区分：前者是「不知道方向」，后者是「确认正立」，混为一谈会让补读失效。
+
 **还没做 / 已知取舍**（按「什么时候会真的需要它」排序，完整路线图见 [`DESIGN.md`](DESIGN.md)「十一、实施路线」）：
 
 - `Tab` 折叠连拍组 / `Shift`+`←→` 跨组跳转还没接（视图切换器已移除，`G` / `C` 不再适用）

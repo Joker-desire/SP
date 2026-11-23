@@ -224,6 +224,7 @@ fn create_indexes(conn: &Connection) {
 /// 现在 decisions 也要升级 —— 凡是加了字段就得在这儿登记一次。
 fn add_missing_columns(conn: &Connection) {
     let wanted: &[(&str, &str, &str)] = &[
+        ("photos", "orientation_override", "INTEGER"),
         ("photos", "sharpness", "REAL"),
         ("photos", "overexposed", "REAL"),
         ("photos", "underexposed", "REAL"),
@@ -341,6 +342,10 @@ CREATE TABLE IF NOT EXISTS photos (
   shutter            TEXT,
   iso                INTEGER,
   orientation        INTEGER,
+  -- 用户手动旋转后的方向（EXIF 的 1-8 同语义）。NULL = 没手动转过，用 orientation。
+  -- 单独存一列而不是改写 orientation：重扫会把 EXIF 值写回 orientation，
+  -- 手动旋转的意图必须能跨重扫保留。所有显示 / 缩略图都读 COALESCE(本列, orientation)。
+  orientation_override INTEGER,
   exif_ok            INTEGER NOT NULL DEFAULT 0,
   indexed_at         INTEGER NOT NULL DEFAULT 0,
   -- 画面分析（后台算，见 analyze.rs）。NULL = 还没轮到它。

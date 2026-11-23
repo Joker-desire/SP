@@ -64,6 +64,7 @@ export const ACTIONS: ActionDef[] = [
   { id: "toggleAf", label: "对焦框", ctx: "loupe", def: "o" },
   { id: "toggleDetail", label: "详情面板", ctx: "loupe", def: "i" },
   { id: "histogram", label: "直方图", ctx: "loupe", def: "h" },
+  { id: "rotateCw", label: "顺时针旋转 90°", ctx: "loupe", def: "r" },
   { id: "closeLoupe", label: "关闭大图", ctx: "loupe", def: "escape" },
 ];
 
