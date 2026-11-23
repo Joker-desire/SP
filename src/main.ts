@@ -469,6 +469,8 @@ const elLoupeZoomIn = $<HTMLButtonElement>("#loupe-zoom-in");
 const elLoupeZoomOut = $<HTMLButtonElement>("#loupe-zoom-out");
 const elLoupeZoomActual = $<HTMLButtonElement>("#loupe-zoom-actual");
 const elLoupeHistBtn = $<HTMLButtonElement>("#loupe-histogram");
+const elLoupeRotateCw = $<HTMLButtonElement>("#loupe-rotate-cw");
+const elLoupeRotateReset = $<HTMLButtonElement>("#loupe-rotate-reset");
 const elLoupeHistPanel = $<HTMLElement>("#loupe-hist-panel");
 const elLoupeHistClose = $<HTMLButtonElement>("#loupe-hist-close");
 // `$` 的约束是 HTMLElement，SVG 元素不在其中；这里单独取一次
@@ -800,6 +802,13 @@ function store(cache: Map<number, ThumbPayload>, max: number, t: ThumbPayload) {
 
 /** 缩略图档位。4096 只在放大到 100% 时按需请求，常规浏览不会碰。 */
 type ThumbSize = 512 | 1600 | 4096;
+
+/** 方向变了就把这张图的三档内存缓存都丢掉，强制重新向后端取旋转后的像素。 */
+function dropThumbCaches(id: number) {
+  gridCache.delete(id);
+  loupeCache.delete(id);
+  previewCache.delete(id);
+}
 
 /** 同一个 id + 尺寸只会真正请求一次；重复请求复用同一个 Promise。 */
 function loadThumb(id: number, size: ThumbSize): Promise<ThumbPayload> {
@@ -2554,6 +2563,7 @@ const FEATURES: FeatureDef[] = [
   { key: "loupeDetail", label: "详细信息", note: "完整 EXIF（I）", section: "大图查看" },
   { key: "loupeAf", label: "对焦点", note: "画相机记录的 AF 框（O）", section: "大图查看" },
   { key: "loupeHist", label: "直方图", note: "RGB 与亮度（H）", section: "大图查看" },
+  { key: "loupeRotate", label: "旋转", note: "手动掰正无 EXIF 的照片（R）", section: "大图查看" },
   { key: "loupeStars", label: "星级按钮", note: "大图里直接点星", section: "大图查看" },
   { key: "loupeColors", label: "色标按钮", note: "红黄绿蓝紫", section: "大图查看" },
   { key: "loupeKeys", label: "键位提示", note: "底栏那行快捷键说明", section: "大图查看" },
@@ -4937,6 +4947,8 @@ interface PhotoDetail {
   shutter: string | null;
   iso: number | null;
   orientation: number | null;
+  effectiveOrientation: number | null;
+  orientationRotated: boolean;
   exifOk: boolean;
   indexedText: string | null;
   sharpness: number | null;
@@ -5122,8 +5134,9 @@ function renderDetail(d: PhotoDetail) {
   const kindLabel = d.fileKind === "raw" ? "RAW" : d.fileKind === "jpeg" ? "JPG" : d.fileKind;
 
   const mp = d.width && d.height ? (d.width * d.height) / 1e6 : null;
-  const orientationLabel =
-    d.orientation === null || d.orientation === undefined || d.orientation === 1
+  const orientationLabel = d.orientationRotated
+    ? `（手动旋转，当前方向 ${d.effectiveOrientation ?? 1}；按「复原」回到 EXIF）`
+    : d.orientation === null || d.orientation === undefined || d.orientation === 1
       ? ""
       : `（EXIF 方向 ${d.orientation}，已按此摆正）`;
   const ratio = aspectRatio(d.width, d.height);
@@ -5332,6 +5345,8 @@ function toggleHistogram(on = !histOpen) {
 }
 
 elLoupeHistBtn.addEventListener("click", () => toggleHistogram());
+elLoupeRotateCw.addEventListener("click", () => void rotateCurrent(true));
+elLoupeRotateReset.addEventListener("click", () => void rotateCurrent(false));
 elLoupeHistClose.addEventListener("click", () => toggleHistogram(false));
 
 /**
@@ -5360,6 +5375,35 @@ async function toggleFullscreen() {
     await w.setFullscreen(!(await w.isFullscreen()));
   } catch {
     /* 预览环境没有窗口可操作 */
+  }
+}
+
+/**
+ * 手动旋转当前大图。方向写进后端 orientation_override（重扫不会冲掉），
+ * 缓存键含方向，所以丢掉这张图的内存缓存后重新取到的就是转好的像素。
+ * 没有 EXIF 方向的手机 JPG 就是靠这条路掰正的。
+ */
+async function rotateCurrent(clockwise: boolean) {
+  const c = items[loupeIndex];
+  if (!c) return;
+  try {
+    if (clockwise) await invoke<number>("rotate_photo", { id: c.id, clockwise: true });
+    else await invoke("reset_rotation", { id: c.id });
+    dropThumbCaches(c.id);
+    resetZoom();
+    // 详情面板若开着，方向状态要跟着更新
+    if (detailOpen) void loadPhotoDetail(c.id);
+    if (showAf) void loadAf(c.id);
+    // 大图重新取旋转后的像素（openLoupe 会重设 src / title / loading 态）
+    await openLoupe(loupeIndex);
+    // 网格里那张卡也换成新方向的缩略图
+    const card = cardOf(c.id);
+    if (card) {
+      card.dataset.state = "idle";
+      void hydrate(card);
+    }
+  } catch (e) {
+    elLoupeExif.textContent = `旋转失败：${String(e)}`;
   }
 }
 
@@ -5688,6 +5732,7 @@ function runAction(id: string) {
     case "toggleAf": setAf(!showAf); break;
     case "toggleDetail": toggleDetail(); break;
     case "histogram": toggleHistogram(); break;
+    case "rotateCw": void rotateCurrent(true); break;
     case "closeLoupe": closeLoupe(); break;
   }
 }
@@ -5738,6 +5783,7 @@ function refreshLoupeKeys() {
     `${key("toggleDetail")} 详情`,
     `${key("toggleAf")} 对焦点`,
     `${key("histogram")} 直方图`,
+    `${key("rotateCw")} 右转 90°`,
     `${key("zoomIn")} 放大 / ${key("zoomOut")} 缩小`,
     `${key("zoomActual")} 1:1`,
     // 鼠标手势与窗口级固定键不进注册表，本来就不能改，保持固定文案

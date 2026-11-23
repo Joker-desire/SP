@@ -295,18 +295,30 @@ pub struct ThumbInfo {
     pub from_cache: bool,
 }
 
-/// 缓存键：指纹 + 尺寸。指纹变了（文件被改过）键就变，自然失效。
-fn cache_key(fingerprint: &str, size: u32) -> String {
+/// 缓存键：指纹 + 方向 + 尺寸。
+///
+/// 方向必须进键：同一张竖拍，方向缺失时生成的是横躺缩略图，补回方向后应该是竖图。
+/// 旧实现只哈希指纹+尺寸，导致「修好了方向却仍显示横躺」——缓存一直命中旧像素。
+/// 手动旋转也走同一个方向值，转一下键就变，旧图自然作废，不需要删文件。
+fn cache_key(fingerprint: &str, orientation: Option<i64>, size: u32) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(fingerprint.as_bytes());
+    hasher.update(b"|");
+    // None 用一个不可能与 EXIF 值（1-8）冲突的标记，别和「方向 1」混成同一个键
+    hasher.update(
+        orientation
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".into())
+            .as_bytes(),
+    );
     hasher.update(b"|");
     hasher.update(size.to_string().as_bytes());
     hasher.finalize().to_hex()[..20].to_string()
 }
 
 /// 缓存文件路径：按哈希前两位分桶，避免单目录塞满几万个文件。
-fn cache_path(root: &Path, fingerprint: &str, size: u32) -> PathBuf {
-    let key = cache_key(fingerprint, size);
+fn cache_path(root: &Path, fingerprint: &str, orientation: Option<i64>, size: u32) -> PathBuf {
+    let key = cache_key(fingerprint, orientation, size);
     root.join(&key[..2]).join(format!("{key}-{size}.jpg"))
 }
 
@@ -514,7 +526,7 @@ pub fn ensure(
     let mut slots: Vec<Option<ThumbInfo>> = sizes
         .iter()
         .map(|&size| {
-            let path = cache_path(thumbs_root, fingerprint, size);
+            let path = cache_path(thumbs_root, fingerprint, orientation, size);
             // 0 字节文件多半是上次进程被杀时留下的半成品，不能当缓存命中，
             // 否则会一直拿一张空图去喂前端。
             let usable = path
@@ -549,7 +561,7 @@ pub fn ensure(
         if slots[idx].is_some() {
             continue;
         }
-        let path = cache_path(thumbs_root, fingerprint, size);
+        let path = cache_path(thumbs_root, fingerprint, orientation, size);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -614,6 +626,53 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     // rename 成功后 tmp 已经不存在，删不掉也无所谓
     let _ = std::fs::remove_file(&tmp);
     result
+}
+
+/// 从 Exif 容器里找 Orientation：先看标准的 IFD0，再全局扫一遍字段。
+///
+/// `get_field` 只能按 IFD 索引查，而 kamadak-exif 没有暴露「ExifIFD」的 In 常量。
+/// 后期工具偶尔会把 Orientation 挪进子 IFD，这时候 `fields()` 全局兜底就能找到。
+pub fn find_orientation(exif: &exif::Exif) -> Option<i64> {
+    use exif::Tag;
+
+    exif.get_field(Tag::Orientation, exif::In::PRIMARY)
+        .or_else(|| exif.fields().find(|f| f.tag == Tag::Orientation))
+        .and_then(|f| f.value.get_uint(0))
+        .map(|v| v as i64)
+}
+
+/// 从一段 JPEG 字节里读 EXIF Orientation（1-8）。
+///
+/// 为什么需要这个：手机照片经微信 / LANDrop 转存后，主文件的 EXIF 常常只剩半截，
+/// `exif::Reader` 读整个文件会报错。但抠出来的内嵌预览（或 JPG 文件本身）仍是完整
+/// JPEG，它的 APP1 里往往还留着 Orientation。扫描时拿不到方向，就靠这里补一口。
+///
+/// IFD0 和 ExifIFD 都找：标准的 Orientation 在 IFD0，但后期工具偶尔会挪到 ExifIFD。
+/// 读不到就返回 None——调用方据此知道「这张真的没方向信息」，而不是当成 1。
+pub fn orientation_from_jpeg_bytes(bytes: &[u8]) -> Option<i64> {
+    let exif = exif::Reader::new()
+        .read_from_container(&mut std::io::Cursor::new(bytes))
+        .ok()?;
+    find_orientation(&exif)
+}
+
+/// 从文件里补读方向：先读文件自身的 EXIF，读不到再从内嵌预览 JPEG 里找。
+///
+/// 只在扫描阶段 `read_exif` 整体失败 / 方向为空时调用，正常照片不会付这份开销。
+pub fn orientation_from_source(path: &Path) -> Option<i64> {
+    if let Ok(file) = File::open(path) {
+        if let Ok(exif) =
+            exif::Reader::new().read_from_container(&mut std::io::BufReader::new(file))
+        {
+            if let Some(o) = find_orientation(&exif) {
+                return Some(o);
+            }
+        }
+    }
+    // 文件级 EXIF 读不出来（或被剥得只剩方向在预览里）：退到内嵌 JPEG。
+    best_jpeg_from_file(path)
+        .ok()
+        .and_then(|(bytes, _)| orientation_from_jpeg_bytes(&bytes))
 }
 
 /// EXIF 方向值（1-8）→ image crate 的方向枚举。
@@ -834,6 +893,71 @@ mod tests {
         let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90);
         enc.encode_image(&img).unwrap();
         out
+    }
+
+    /// 造一张带 EXIF Orientation 的 JPEG：在 SOI 后插一个 APP1 段。
+    /// TIFF 用大端，IFD0 只放一个 Orientation(SHORT) 字段。
+    fn make_jpeg_with_orientation(w: u32, h: u32, orientation: u16) -> Vec<u8> {
+        let jpeg = make_jpeg(w, h);
+        // TIFF header: "MM" + 42 + IFD0 offset(8)
+        let mut tiff: Vec<u8> = vec![0x4D, 0x4D, 0x00, 0x2A, 0, 0, 0, 8];
+        tiff.extend_from_slice(&1u16.to_be_bytes()); // IFD0 条目数
+        tiff.extend_from_slice(&0x0112u16.to_be_bytes()); // Orientation tag
+        tiff.extend_from_slice(&3u16.to_be_bytes()); // SHORT
+        tiff.extend_from_slice(&1u32.to_be_bytes()); // count
+        tiff.extend_from_slice(&orientation.to_be_bytes()); // value（2 字节 + 2 填充）
+        tiff.extend_from_slice(&0u16.to_be_bytes());
+        tiff.extend_from_slice(&0u32.to_be_bytes()); // 下一个 IFD 偏移 = 0
+
+        let mut app1 = Vec::new();
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(&tiff);
+        let seg_len = (app1.len() + 2) as u16; // 长度字段自身 2 字节
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&jpeg[..2]); // SOI (FF D8)
+        out.extend_from_slice(&[0xFF, 0xE1]); // APP1
+        out.extend_from_slice(&seg_len.to_be_bytes());
+        out.extend_from_slice(&app1);
+        out.extend_from_slice(&jpeg[2..]); // 剩余段 + SOS + EOI
+        out
+    }
+
+    #[test]
+    fn reads_orientation_from_jpeg_bytes() {
+        let jpeg = make_jpeg_with_orientation(400, 300, 6);
+        assert_eq!(orientation_from_jpeg_bytes(&jpeg), Some(6));
+
+        // 没有 EXIF 的纯 JPEG 应返回 None，而不是当成 1（「没方向」和「正立」要分清）
+        let plain = make_jpeg(400, 300);
+        assert_eq!(orientation_from_jpeg_bytes(&plain), None);
+    }
+
+    #[test]
+    fn cache_key_includes_orientation() {
+        // 同一张图，方向从「无」补到 6，缓存键必须不同，否则修好方向后仍命中横躺的旧图
+        let key_none = cache_key("fp-abc", None, 512);
+        let key_o6 = cache_key("fp-abc", Some(6), 512);
+        let key_o1 = cache_key("fp-abc", Some(1), 512);
+        assert_ne!(key_none, key_o6, "None 不能和方向 1 混成同一个键");
+        assert_ne!(key_o1, key_o6, "方向不同必须换键");
+        assert_eq!(key_o6, cache_key("fp-abc", Some(6), 512), "相同输入要稳定");
+
+        // 一张图在两种方向下各生成一次：第二次不能命中第一次的缓存
+        let dir = std::env::temp_dir().join(format!("sp-orient-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let thumbs = dir.join("thumbs");
+        let src = dir.join("src.jpg");
+        std::fs::create_dir_all(&thumbs).unwrap();
+        std::fs::write(&src, make_jpeg(400, 300)).unwrap();
+        let (a, _) = ensure(&thumbs, "fp-x", &src, &[SIZE_GRID], Some(1)).unwrap();
+        assert!(!a[0].from_cache, "首次应是新生成");
+        let (b, _) = ensure(&thumbs, "fp-x", &src, &[SIZE_GRID], Some(6)).unwrap();
+        assert!(!b[0].from_cache, "方向变了必须重新生成，不能复用旧像素");
+        assert_ne!(a[0].path, b[0].path, "两版缓存路径应不同");
+        let (c, _) = ensure(&thumbs, "fp-x", &src, &[SIZE_GRID], Some(6)).unwrap();
+        assert!(c[0].from_cache, "同方向第二次应命中缓存");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1198,6 +1322,26 @@ mod tests {
             30.0 / (n as f64 / secs)
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 真实 JPG 的方向补读抽查。用于验证「EXIF 被转存工具写坏」时还能从预览补回方向。
+    ///
+    /// ```bash
+    /// SP_SAMPLE=/path/to/DSC_1306.JPG \
+    ///   cargo test real_jpeg_orientation -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "需要真实素材，通过 SP_SAMPLE 指定"]
+    fn real_jpeg_orientation_smoke() {
+        let Ok(sample) = std::env::var("SP_SAMPLE") else {
+            eprintln!("未设置 SP_SAMPLE，跳过");
+            return;
+        };
+        let o1 = orientation_from_source(Path::new(&sample));
+        let (bytes, route) = best_jpeg_from_file(Path::new(&sample)).unwrap();
+        let o2 = orientation_from_jpeg_bytes(&bytes);
+        println!("{sample}：路由 {route}，文件级方向 {o1:?}，预览级方向 {o2:?}");
+        assert_eq!(o1, o2, "两条补读路径在真实 JPG 上应得到一致方向");
     }
 
     /// 拿真实素材抽查。合成样本证明不了「真机能用」——不同机身的 NEF 布局、

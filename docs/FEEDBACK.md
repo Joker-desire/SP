@@ -245,3 +245,14 @@
 
 - **关掉「直方图」功能时，已展开的面板自动收起**：面板上唯一的 × 就在被藏起来的那个按钮旁边，只收面板、不写 localStorage，偏好留着，功能再加回来仍是上次的状态。
 - **拖放与快捷键共用一份弹窗判断**（`openModalEntry()`）：任何弹窗开着时，拖放提示层不再盖在弹窗上、松手也不会换库，只给一句「先关掉当前弹窗」。此前只挡了「扫描中」和「范围选择」，在功能页里误拖一下，整个图库就换了。
+
+## 后续反馈：#13 图片横屏回归（v0.5.4 后，分支 `fix/exif-orientation`）
+
+> 来源：v0.5.4 实机截图——手机竖拍 JPG 在网格里全部横躺，状态栏显示「941 个无 EXIF」。用户反馈「又出现了图片横屏的问题」，要求 A（读取容错）+ B（缓存带方向）+ C（手动旋转）三档一起做。
+
+- **结论**：不是新 bug，方向处理代码自初始提交就没改过。根因是方向信息在索引阶段丢失 + 缓存无法自愈：手机 JPG 经微信 / 传输转存后 EXIF 常被剥坏，`read_exif` 整段 `Result` 一处报错就丢光 orientation；缓存键只有指纹+尺寸，方向补回后旧横躺图仍被命中；重扫的 size+mtime 快路径又不重读 EXIF。
+- **A 读取容错**：`read_exif` 整段读失败时退到 `thumb::orientation_from_source`，从内嵌预览 JPEG 的 APP1 补读方向；`find_orientation` 先查 IFD0、再 `fields()` 全局兜底。仍读不到的才算 `exifFailed`，统计口径不变。
+- **B 缓存带方向**：`cache_key` = 指纹+方向+尺寸（None 与 1 刻意区分）；`KnownFile` 带 `exif_ok`/`orientation`，方向缺失的图重扫强制重读，不再走快路径。
+- **C 手动旋转**：`photos` 新增 `orientation_override`；统一用 `COALESCE(override, orientation)` 作有效方向（缩略图 / 详情 / 横竖分面 / 对焦框一致）；大图加「右转 90°」（`R`，D4 群运算）与「复原」。新列通过 `add_missing_columns` 补到老库。
+- **验证**：`cargo test --lib` 97 通过（新增 4 例）；真实 JPG（`DSC_1306.JPG`，方向 8）上 `orientation_from_source` 与预览补读一致；`tsc --noEmit` 通过。**Windows 实机（中文路径 + 那批无 EXIF 的手机 JPG）待用户验证**。
+- **已知边界**：被彻底剥光 EXIF 的图 A 档救不回来，靠 C 档手动掰正；导出仍复制原片、不写回旋转（旋转只影响 S·P 内的显示与分组）。

@@ -296,6 +296,13 @@ const STARS: &str = "COALESCE(d.stars, 0)";
 /// 色标。没打过色标的行取不到值，同样要兜成空串，否则「无色标」这一档筛不出来。
 const COLOR: &str = "COALESCE(d.color, '')";
 
+/// 「有效方向」：用户手动旋转过就用手动值，否则用 EXIF 的。
+///
+/// 所有方向读取点（缩略图、详情、横竖分面、对焦框）都必须引用这一处，
+/// 否则会出现「图片转过来了，但分组里还算横图」这类自相矛盾的显示。
+/// 手动值单独存一列，重扫写回 EXIF orientation 时不会把它冲掉。
+pub const EFFECTIVE_ORIENTATION: &str = "COALESCE(p.orientation_override, p.orientation)";
+
 /// 画幅方向（横 / 竖 / 方 / 尺寸未知）。
 ///
 /// EXIF Orientation 5–8 表示画面要转 90° 才是人看到的朝向，而
@@ -303,8 +310,8 @@ const COLOR: &str = "COALESCE(d.color, '')";
 /// 不先交换宽高，机身竖拍会被整批算成横图。
 /// 这里只算一次：筛选、分面计数、列表下发都引用同一段 SQL，
 /// 免得前后端各算一遍，出现「分组里是竖图、按竖图却筛不到」。
-const DISPLAY_W: &str = "CASE WHEN p.orientation IN (5, 6, 7, 8) THEN p.height ELSE p.width END";
-const DISPLAY_H: &str = "CASE WHEN p.orientation IN (5, 6, 7, 8) THEN p.width ELSE p.height END";
+const DISPLAY_W: &str = "CASE WHEN COALESCE(p.orientation_override, p.orientation) IN (5, 6, 7, 8) THEN p.height ELSE p.width END";
+const DISPLAY_H: &str = "CASE WHEN COALESCE(p.orientation_override, p.orientation) IN (5, 6, 7, 8) THEN p.width ELSE p.height END";
 
 /// 四档取值与显示名。顺序决定侧栏和分组里的排布。
 const SHAPE_KEYS: &[(&str, &str)] = &[
@@ -328,8 +335,8 @@ fn shape_key_sql() -> String {
              CASE WHEN ABS({DISPLAY_W} - {DISPLAY_H}) * 100 <= {DISPLAY_W} + {DISPLAY_H} THEN 'square'
                   WHEN {DISPLAY_W} > {DISPLAY_H} THEN 'landscape'
                   ELSE 'portrait' END
-           WHEN p.orientation IN (5, 6, 7, 8) THEN 'portrait'
-           WHEN p.orientation IN (1, 2, 3, 4) THEN 'landscape'
+           WHEN {EFFECTIVE_ORIENTATION} IN (5, 6, 7, 8) THEN 'portrait'
+           WHEN {EFFECTIVE_ORIENTATION} IN (1, 2, 3, 4) THEN 'landscape'
            ELSE 'unknown'
          END"
     )
@@ -1073,7 +1080,12 @@ struct PhotoDetail {
     aperture: Option<f64>,
     shutter: Option<String>,
     iso: Option<i64>,
+    /// EXIF 原始方向（未被手动旋转改写）
     orientation: Option<i64>,
+    /// 当前生效方向：手动旋转过就是 override，否则等于 EXIF 方向
+    effective_orientation: Option<i64>,
+    /// 是否有手动旋转记录
+    orientation_rotated: bool,
     exif_ok: bool,
     indexed_text: Option<String>,
     sharpness: Option<f64>,
@@ -1098,7 +1110,9 @@ fn photo_detail_of(conn: &Connection, id: i64) -> anyhow::Result<PhotoDetail> {
                 {TIME_TEXT},
                 CASE WHEN p.taken_at_corrected IS NOT NULL THEN 'exif' ELSE 'mtime' END,
                 p.camera_model, p.camera_serial, p.lens, p.focal_len, p.aperture,
-                p.shutter, p.iso, p.orientation, p.exif_ok,
+                p.shutter, p.iso, p.orientation,
+                {EFFECTIVE_ORIENTATION}, p.orientation_override IS NOT NULL,
+                p.exif_ok,
                 strftime('%Y-%m-%d %H:%M:%S', p.indexed_at, 'unixepoch', 'localtime'),
                 p.sharpness, p.overexposed, p.underexposed, p.decode_path,
                 p.fingerprint, p.content_hash, p.phash,
@@ -1126,18 +1140,20 @@ fn photo_detail_of(conn: &Connection, id: i64) -> anyhow::Result<PhotoDetail> {
             shutter: r.get(14)?,
             iso: r.get(15)?,
             orientation: r.get(16)?,
-            exif_ok: r.get(17)?,
-            indexed_text: r.get(18)?,
-            sharpness: r.get(19)?,
-            overexposed: r.get(20)?,
-            underexposed: r.get(21)?,
-            decode_path: r.get(22)?,
-            fingerprint: r.get(23)?,
-            content_hash: r.get(24)?,
-            phash: r.get(25)?,
-            decision: r.get(26)?,
-            stars: r.get(27)?,
-            color: r.get(28)?,
+            effective_orientation: r.get(17)?,
+            orientation_rotated: r.get(18)?,
+            exif_ok: r.get(19)?,
+            indexed_text: r.get(20)?,
+            sharpness: r.get(21)?,
+            overexposed: r.get(22)?,
+            underexposed: r.get(23)?,
+            decode_path: r.get(24)?,
+            fingerprint: r.get(25)?,
+            content_hash: r.get(26)?,
+            phash: r.get(27)?,
+            decision: r.get(28)?,
+            stars: r.get(29)?,
+            color: r.get(30)?,
             file_name: String::new(),
             dir: String::new(),
             siblings: Vec::new(),
@@ -1268,12 +1284,12 @@ async fn photo_af(
         let conn = db.lock().map_err(|e| e.to_string())?;
         let (path, orientation): (String, Option<i64>) = conn
             .query_row(
-                "SELECT path, orientation FROM photos WHERE id = ?1",
+                "SELECT path, COALESCE(orientation_override, orientation) FROM photos WHERE id = ?1",
                 [id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|e| e.to_string())?;
-        // orientation 决定了对焦框要不要跟着图一起转
+        // 有效方向决定对焦框要不要跟着图一起转（手动旋转过也得转）
         Ok(af::af_area_of(Path::new(&path), orientation.unwrap_or(1)))
     })
     .await
@@ -1799,6 +1815,73 @@ async fn apply_decision(
             color.as_deref(),
         )
         .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 手动旋转：在当前有效方向上再转 90°，返回新的 EXIF 方向值（1-8）。
+///
+/// EXIF 的 8 个方向构成二面体群 D4。把每个值看成「先可选水平镜像，再顺时针转 rot°」：
+///   1=(0,F) 2=(0,T) 3=(180,F) 4=(180,T) 5=(270,T) 6=(90,F) 7=(90,T) 8=(270,F)
+/// 再顺时针转 90° 就是 rot+90、镜像位不变，于是：
+///   顺时针：1→6→3→8→1，2→7→4→5→2
+///   逆时针：1→8→3→6→1，2→5→4→7→2
+/// 方向未知时按「正立」(1) 起转，这样没有 EXIF 的横躺 JPG 也能手动掰正。
+pub fn rotate_orientation(current: Option<i64>, clockwise: bool) -> i64 {
+    let cur = match current {
+        Some(v) if (1..=8).contains(&v) => v,
+        _ => 1,
+    };
+    // 索引 = cur-1。D4 群：旋转 subgroup 1→6→3→8，镜像 subgroup 2→7→4→5。
+    let cw = [6, 7, 8, 5, 2, 3, 4, 1];
+    let ccw = [8, 5, 6, 7, 4, 1, 2, 3];
+    let table = if clockwise { cw } else { ccw };
+    table[(cur - 1) as usize]
+}
+
+/// 记录用户手动旋转。写进 `orientation_override` 而不是改 EXIF 的 `orientation`，
+/// 这样下次重扫把真实 EXIF 写回去时，手动方向不会被冲掉。
+#[tauri::command]
+async fn rotate_photo(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+    clockwise: bool,
+) -> Result<i64, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<i64, String> {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        let current: Option<i64> = conn
+            .query_row(
+                "SELECT COALESCE(orientation_override, orientation) FROM photos WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("读取方向失败（id={id}）：{e}"))?;
+        let next = rotate_orientation(current, clockwise);
+        conn.execute(
+            "UPDATE photos SET orientation_override = ?1 WHERE id = ?2",
+            rusqlite::params![next, id],
+        )
+        .map_err(|e| format!("保存旋转失败（id={id}）：{e}"))?;
+        Ok(next)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 清除手动旋转，回到照片自己的 EXIF 方向。
+#[tauri::command]
+async fn reset_rotation(state: tauri::State<'_, AppState>, id: i64) -> Result<(), String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE photos SET orientation_override = NULL WHERE id = ?1",
+            [id],
+        )
+        .map_err(|e| format!("清除旋转失败（id={id}）：{e}"))?;
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2441,7 +2524,7 @@ async fn photo_thumbnail(
         let (path, fingerprint, orientation) = {
             let conn = db.lock().map_err(|e| e.to_string())?;
             conn.query_row(
-                "SELECT path, fingerprint, orientation FROM photos WHERE id = ?1",
+                "SELECT path, fingerprint, COALESCE(orientation_override, orientation) FROM photos WHERE id = ?1",
                 [id],
                 |r| {
                     Ok((
@@ -3130,6 +3213,8 @@ pub fn run() {
             photo_af,
             photo_detail,
             apply_decision,
+            rotate_photo,
+            reset_rotation,
             similar_groups,
             export_selection,
             photo_thumbnail,
@@ -3233,6 +3318,73 @@ fn fatal(message: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotate_orientation_follows_exif_group() {
+        // 顺时针一圈应该回到原点，逆时针亦然
+        for start in 1..=8i64 {
+            let mut v = Some(start);
+            for _ in 0..4 {
+                v = Some(rotate_orientation(v, true));
+            }
+            assert_eq!(v, Some(start), "顺时针四次应回到 {start}");
+        }
+        // 纯旋转 subgroup：1→6→3→8→1
+        assert_eq!(rotate_orientation(Some(1), true), 6);
+        assert_eq!(rotate_orientation(Some(6), true), 3);
+        assert_eq!(rotate_orientation(Some(3), true), 8);
+        assert_eq!(rotate_orientation(Some(8), true), 1);
+        // 逆时针是顺时针的逆
+        assert_eq!(rotate_orientation(Some(6), false), 1);
+        assert_eq!(rotate_orientation(Some(8), false), 3);
+        // 带镜像的 subgroup：2→7→4→5→2（顺时针），逆向 5→4→7→2
+        assert_eq!(rotate_orientation(Some(2), true), 7);
+        assert_eq!(rotate_orientation(Some(7), true), 4);
+        assert_eq!(rotate_orientation(Some(5), true), 2);
+        assert_eq!(rotate_orientation(Some(5), false), 4);
+        // 没有方向信息时按正立起转：手机 JPG 的横躺靠这个掰正
+        assert_eq!(rotate_orientation(None, true), 6);
+        assert_eq!(rotate_orientation(None, false), 8);
+        // 非法值也兜住
+        assert_eq!(rotate_orientation(Some(99), true), 6);
+    }
+
+    #[test]
+    fn manual_rotation_survives_rescan_and_drives_thumb_key() {
+        // 用现成的 seeded 库：改 override 后，详情读到的应是生效方向，
+        // 且 COALESCE 只认 override，重扫写回的 orientation 不会冲掉它。
+        let (_dir, db) = seeded("rotate-override");
+        let id: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row("SELECT id FROM photos ORDER BY id LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE photos SET orientation = 1, orientation_override = 6 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        }
+        {
+            let conn = db.lock().unwrap();
+            let eff: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(orientation_override, orientation) FROM photos WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(eff, 6, "手动旋转应盖过 EXIF 方向");
+            let detail = photo_detail_of(&conn, id).unwrap();
+            assert_eq!(detail.effective_orientation, Some(6));
+            assert!(detail.orientation_rotated);
+            assert_eq!(detail.orientation, Some(1), "EXIF 原值仍保留");
+        }
+    }
 
     #[test]
     fn folder_from_drop_resolves_directories_and_photos() {

@@ -542,6 +542,14 @@
           <button class="cbtn" id="loupe-detail" data-feature="loupeDetail" data-shortcut="toggleDetail" title="详细信息（快捷键 I）">详情<kbd>I</kbd></button>
           <button class="cbtn" id="loupe-af-toggle" data-feature="loupeAf" data-shortcut="toggleAf" title="显示相机记录的对焦框（快捷键 O）">对焦点<kbd>O</kbd></button>
           <button class="cbtn" id="loupe-histogram" data-feature="loupeHist" data-shortcut="histogram" title="显示 RGB / 亮度直方图（快捷键 H）">直方图<kbd>H</kbd></button>
+          <!-- 没有 EXIF 方向的照片只能靠手动掰正。旋转会记住，重扫也不会被冲掉。 -->
+          <button class="cbtn" id="loupe-rotate-cw" data-feature="loupeRotate" data-shortcut="rotateCw" title="顺时针旋转 90°（快捷键 R），会记住">
+            <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M13 5V2m0 3h-3m3-1a5.5 5.5 0 1 0 .4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            右转<kbd>R</kbd>
+          </button>
+          <button class="cbtn" id="loupe-rotate-reset" data-feature="loupeRotate" title="恢复 EXIF 原始方向">复原</button>
 
           <!-- 星级放一组可点的按钮：默认 1-5 打星，按完停在原地，
                再按别的数字就是调整——打星是评价，不是过片 -->

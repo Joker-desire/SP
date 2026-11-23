@@ -59,6 +59,19 @@ struct KnownFile {
     fingerprint: String,
     file_size: i64,
     mtime: i64,
+    /// 上次扫描有没有读到 EXIF。方向缺失的图每次重扫都要再试一次：
+    /// 早期的 EXIF 读取是「全有或全无」，一处的格式问题会让整张图的方向丢掉，
+    /// 而修好读取逻辑 / 原图被重新保存后，这些图是有机会补回方向的。
+    exif_ok: i64,
+    orientation: Option<i64>,
+}
+
+impl KnownFile {
+    /// 方向信息是否值得重扫一次。方向为空的 JPG 竖拍会横躺显示，
+    /// 宁可每次启动多读几个文件，也不能让它一直错着。
+    fn needs_exif_retry(&self) -> bool {
+        self.exif_ok == 0 || self.orientation.is_none()
+    }
 }
 
 /// 扫描进度。前端据此显示进度条——几千张的首次扫描要跑几分钟，
@@ -219,7 +232,9 @@ where
     let mut known: HashMap<String, KnownFile> = HashMap::new();
     {
         let conn = db.lock().map_err(|e| anyhow!("{e}"))?;
-        let mut stmt = conn.prepare("SELECT path, fingerprint, file_size, mtime FROM photos")?;
+        let mut stmt = conn.prepare(
+            "SELECT path, fingerprint, file_size, mtime, exif_ok, orientation FROM photos",
+        )?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
             known.insert(
@@ -228,6 +243,8 @@ where
                     fingerprint: r.get(1)?,
                     file_size: r.get(2)?,
                     mtime: r.get(3)?,
+                    exif_ok: r.get(4)?,
+                    orientation: r.get(5)?,
                 },
             );
         }
@@ -602,9 +619,17 @@ fn parse_one(path: &Path, known: &HashMap<String, KnownFile>) -> Parsed {
 
     // 快路径：大小与修改时间都没动过，内容几乎不可能变（改了内容又恰好
     // 保持同样的字节数、还把 mtime 改回来的情况，不在个人素材库里讨论）。
-    if let Some(k) = known.get(&path_str) {
-        if k.file_size == file_size && k.mtime == mtime {
-            return Parsed::Unchanged(path_str);
+    // 例外：方向缺失的图必须再读一次 EXIF——代码升级、原图被重新保存都可能补回方向，
+    // 一旦跳过就永远横躺着（见 thumb::orientation_from_source）。
+    let needs_retry = known
+        .get(&path_str)
+        .map(|k| k.needs_exif_retry())
+        .unwrap_or(false);
+    if !needs_retry {
+        if let Some(k) = known.get(&path_str) {
+            if k.file_size == file_size && k.mtime == mtime {
+                return Parsed::Unchanged(path_str);
+            }
         }
     }
 
@@ -613,10 +638,11 @@ fn parse_one(path: &Path, known: &HashMap<String, KnownFile>) -> Parsed {
         Err(_) => return Parsed::Failed(path_str),
     };
 
-    if known
-        .get(&path_str)
-        .map(|k| k.fingerprint == fp)
-        .unwrap_or(false)
+    if !needs_retry
+        && known
+            .get(&path_str)
+            .map(|k| k.fingerprint == fp)
+            .unwrap_or(false)
     {
         return Parsed::Unchanged(path_str);
     }
@@ -693,9 +719,20 @@ fn read_exif(path: &Path) -> Result<ExifLite> {
 
     let file = std::fs::File::open(path).with_context(|| format!("打开失败 {}", path.display()))?;
     let mut br = std::io::BufReader::new(file);
-    let exif = exif::Reader::new()
-        .read_from_container(&mut br)
-        .with_context(|| format!("读取 EXIF 失败 {}", path.display()))?;
+    let exif = match exif::Reader::new().read_from_container(&mut br) {
+        Ok(exif) => exif,
+        // 整段 EXIF 读不出来（微信转存把 APP1 写坏了很常见）：这里不再一走了之。
+        // 其他字段留空可以接受，但方向必须再单独补一次——手机竖拍靠它摆正。
+        Err(_) => {
+            let mut out = ExifLite::default();
+            out.orientation = crate::thumb::orientation_from_source(path);
+            // 补到方向才算「部分读出来」；没补到就维持 Err，让 exifFailed 统计如实反映。
+            return out
+                .orientation
+                .map(|_| out)
+                .with_context(|| format!("读取 EXIF 失败 {}", path.display()));
+        }
+    };
 
     let mut out = ExifLite::default();
 
@@ -749,10 +786,10 @@ fn read_exif(path: &Path) -> Result<ExifLite> {
                 .map(|v| v as i64)
         });
 
-    out.orientation = exif
-        .get_field(Tag::Orientation, In::PRIMARY)
-        .and_then(as_u32)
-        .map(|v| v as i64);
+    // 标准位置是 IFD0；少量后期工具会挪进子 IFD，thumb::find_orientation 会全局兜底。
+    // 两者都没有时，再退到内嵌预览 JPEG 的 APP1 里找（见 thumb::orientation_from_source）。
+    out.orientation = crate::thumb::find_orientation(&exif)
+        .or_else(|| crate::thumb::orientation_from_source(path));
 
     // 像素尺寸取 EXIF 的 ExifImageWidth/Height。尼康 NEF 常把尺寸写在 SubIFD 的
     // ImageWidth/Length，这里读不到就留 NULL；横竖判定会退化用 Orientation
@@ -849,6 +886,34 @@ mod tests {
     }
 
     #[test]
+    fn missing_direction_forces_exif_retry() {
+        // 方向缺失（exif_ok=0 或 orientation=NULL）的快照必须标记重试；
+        // 只有两者都健康的文件才能走快路径跳过。这正是「修好读取后重扫能补回方向」的前提。
+        let missing = KnownFile {
+            fingerprint: "fp".into(),
+            file_size: 100,
+            mtime: 1,
+            exif_ok: 0,
+            orientation: None,
+        };
+        assert!(missing.needs_exif_retry());
+
+        let partial = KnownFile {
+            exif_ok: 1,
+            orientation: None,
+            ..missing.clone()
+        };
+        assert!(partial.needs_exif_retry(), "EXIF 读到但方向为空也要重试");
+
+        let healthy = KnownFile {
+            exif_ok: 1,
+            orientation: Some(6),
+            ..missing
+        };
+        assert!(!healthy.needs_exif_retry(), "方向齐全的文件应走快路径");
+    }
+
+    #[test]
     fn parses_exif_datetime() {
         // 2026-09-16 10:12:44 UTC
         assert_eq!(parse_exif_datetime("2026:09:16 10:12:44"), Some(1789553564));
@@ -880,6 +945,13 @@ mod tests {
         assert_eq!(s.pairs, 2, "两次快门应该配成 2 张照片，而不是 4 张");
         assert_eq!(s.orphan_raw, 0);
         assert_eq!(s.orphan_jpg, 0);
+
+        // 这些是手写的假文件，没有真 EXIF。补成「方向齐全」来模拟正常照片，
+        // 否则新增的「方向缺失必重试」逻辑会让下面的快路径断言失效。
+        db.lock()
+            .unwrap()
+            .execute("UPDATE photos SET exif_ok = 1, orientation = 1", [])
+            .unwrap();
 
         // 再扫一次：指纹未变，应该全部跳过（增量扫描）
         let s2 = scan(&dir, &db).unwrap();
@@ -966,9 +1038,13 @@ mod tests {
 
         let db = Arc::new(Mutex::new(crate::db::open_in_memory().unwrap()));
         scan(&dir, &db).unwrap();
+        // 假文件没 EXIF，补成健康记录，专测「内容没变就跳过」这一条快路径
         db.lock()
             .unwrap()
-            .execute("UPDATE photos SET fingerprint = 'corrupted-on-purpose'", [])
+            .execute(
+                "UPDATE photos SET fingerprint = 'corrupted-on-purpose', exif_ok = 1, orientation = 1",
+                [],
+            )
             .unwrap();
 
         let s = scan(&dir, &db).unwrap();
