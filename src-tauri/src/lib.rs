@@ -301,8 +301,7 @@ const COLOR: &str = "COALESCE(d.color, '')";
 /// 所有方向读取点（缩略图、详情、横竖分面、对焦框）都必须引用这一处，
 /// 否则会出现「图片转过来了，但分组里还算横图」这类自相矛盾的显示。
 /// 手动值单独存一列，重扫写回 EXIF orientation 时不会把它冲掉。
-pub const EFFECTIVE_ORIENTATION: &str =
-    "COALESCE(p.orientation_override, p.orientation)";
+pub const EFFECTIVE_ORIENTATION: &str = "COALESCE(p.orientation_override, p.orientation)";
 
 /// 画幅方向（横 / 竖 / 方 / 尺寸未知）。
 ///
@@ -3357,8 +3356,10 @@ mod tests {
         let (_dir, db) = seeded("rotate-override");
         let id: i64 = {
             let conn = db.lock().unwrap();
-            conn.query_row("SELECT id FROM photos ORDER BY id LIMIT 1", [], |r| r.get(0))
-                .unwrap()
+            conn.query_row("SELECT id FROM photos ORDER BY id LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
         {
             let conn = db.lock().unwrap();

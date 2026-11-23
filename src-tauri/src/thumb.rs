@@ -305,7 +305,12 @@ fn cache_key(fingerprint: &str, orientation: Option<i64>, size: u32) -> String {
     hasher.update(fingerprint.as_bytes());
     hasher.update(b"|");
     // None 用一个不可能与 EXIF 值（1-8）冲突的标记，别和「方向 1」混成同一个键
-    hasher.update(orientation.map(|v| v.to_string()).unwrap_or_else(|| "none".into()).as_bytes());
+    hasher.update(
+        orientation
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".into())
+            .as_bytes(),
+    );
     hasher.update(b"|");
     hasher.update(size.to_string().as_bytes());
     hasher.finalize().to_hex()[..20].to_string()
@@ -656,7 +661,8 @@ pub fn orientation_from_jpeg_bytes(bytes: &[u8]) -> Option<i64> {
 /// 只在扫描阶段 `read_exif` 整体失败 / 方向为空时调用，正常照片不会付这份开销。
 pub fn orientation_from_source(path: &Path) -> Option<i64> {
     if let Ok(file) = File::open(path) {
-        if let Ok(exif) = exif::Reader::new().read_from_container(&mut std::io::BufReader::new(file))
+        if let Ok(exif) =
+            exif::Reader::new().read_from_container(&mut std::io::BufReader::new(file))
         {
             if let Some(o) = find_orientation(&exif) {
                 return Some(o);
